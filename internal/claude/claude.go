@@ -45,8 +45,19 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 	}
 	defer cleanup()
 
+	// Build a clean environment without CLAUDECODE to avoid nested session detection.
+	cleanEnv := os.Environ()
+	for i := 0; i < len(cleanEnv); {
+		if strings.HasPrefix(cleanEnv[i], "CLAUDECODE=") {
+			cleanEnv = append(cleanEnv[:i], cleanEnv[i+1:]...)
+		} else {
+			i++
+		}
+	}
+
 	tmuxRun := func(args ...string) error {
 		cmd := exec.CommandContext(ctx, "tmux", args...)
+		cmd.Env = cleanEnv
 		cmd.Stderr = nil
 		return cmd.Run()
 	}
@@ -56,7 +67,7 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 		_ = tmuxRun(args...)
 	}
 
-	if err := tmuxRun("new-session", "-d", "-s", session, "-x", "120", "-y", "40", claudeBin); err != nil {
+	if err := tmuxRun("new-session", "-d", "-s", session, "-x", "120", "-y", "40", "env", "-u", "CLAUDECODE", claudeBin); err != nil {
 		return nil, fmt.Errorf("failed to create tmux session: %w", err)
 	}
 

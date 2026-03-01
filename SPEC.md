@@ -156,6 +156,17 @@ Quit
 - refresh 실패 시 이전 성공 데이터(lastOK)를 유지하고 에러 메시지만 표시
 - 동시 refresh 방지 (mutex + running flag)
 
+**Stale 데이터 경고**:
+- provider별 마지막 성공 시각(`lastSuccessAt`)을 추적
+- 5분 이상 갱신 실패 시, 해당 provider의 데이터에 `?` 접미사를 붙여 표시
+  - 바 타이틀: `95%` → `95%?`
+  - 메뉴 항목: `Session 95%` → `Session 95%?`
+- "Updated" 행에 경과 시간 표시: `Updated 14:30 (claude 5m0s ago!)`
+
+**로그**:
+- 데몬 프로세스 로그 출력: `~/.config/quota/quota-bar.log`
+- 에러, 시작/종료 이벤트 등을 기록
+
 ---
 
 ## Internal 패키지 사양

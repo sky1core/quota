@@ -19,6 +19,7 @@ import (
 )
 
 const refreshEvery = 60 * time.Second
+const staleThreshold = 5 * time.Minute
 
 // menu item keys in display order
 var allKeys = []string{
@@ -122,6 +123,7 @@ func fetchQuota() quotaData {
 	for i := 0; i < 2; i++ {
 		r := <-ch
 		if r.err != nil {
+			log.Printf("fetch %s error: %v", r.provider, r.err)
 			d.errs[r.provider] = r.err.Error()
 			continue
 		}
@@ -180,11 +182,34 @@ func iconPct(cfg settings, data quotaData) int {
 	return min
 }
 
-func barTitle(cfg settings, data quotaData) string {
+// hasProviderData returns true if quotaData has at least one value for the given prefix.
+func hasProviderData(d quotaData, prefix string) bool {
+	for _, k := range allKeys {
+		if strings.HasPrefix(k, prefix) {
+			if _, ok := d.values[k]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// providerOf returns "claude" or "codex" for a given key.
+func providerOf(key string) string {
+	if strings.HasPrefix(key, "claude_") {
+		return "claude"
+	}
+	return "codex"
+}
+
+func barTitle(cfg settings, data quotaData, staleProviders map[string]bool) string {
 	var parts []string
 	for _, key := range allKeys {
 		if cfg.isSelected(key) {
 			if v, ok := data.values[key]; ok {
+				if staleProviders[providerOf(key)] {
+					v += "?"
+				}
 				parts = append(parts, v)
 			}
 		}
@@ -211,6 +236,23 @@ type menuItem struct {
 	item *systray.MenuItem
 }
 
+func logPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "quota", "quota-bar.log")
+}
+
+func setupLog() {
+	p := logPath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	log.SetOutput(f)
+}
+
 func main() {
 	if os.Getenv("_QUOTA_BAR_DAEMON") != "1" {
 		// Fork self into background and exit parent
@@ -228,6 +270,8 @@ func main() {
 		}
 		os.Exit(0)
 	}
+	setupLog()
+	log.Printf("quota-bar started (pid=%d)", os.Getpid())
 	systray.Run(onReady, onExit)
 }
 
@@ -276,9 +320,10 @@ func onReady() {
 	miQuit := systray.AddMenuItem("Quit", "Quit")
 
 	var (
-		mu      sync.Mutex
-		running bool
-		lastOK  quotaData
+		mu            sync.Mutex
+		running       bool
+		lastOK        quotaData
+		lastSuccessAt = map[string]time.Time{}
 	)
 
 	labels := map[string]string{
@@ -290,12 +335,30 @@ func onReady() {
 		"codex_day":            "Day",
 	}
 
+	getStaleProviders := func() map[string]bool {
+		now := time.Now()
+		sp := map[string]bool{}
+		for _, p := range []string{"claude", "codex"} {
+			if t, ok := lastSuccessAt[p]; ok && now.Sub(t) > staleThreshold {
+				sp[p] = true
+			}
+		}
+		return sp
+	}
+
 	renderMenu := func(data quotaData) {
+		mu.Lock()
+		stale := getStaleProviders()
+		mu.Unlock()
+
 		for _, mi := range allItems {
 			lbl := labels[mi.key]
 			val := data.values[mi.key]
 			if val == "" {
 				val = "-"
+			}
+			if stale[providerOf(mi.key)] && val != "-" {
+				val += "?"
 			}
 			r := data.resets[mi.key]
 			if r != "" {
@@ -328,9 +391,21 @@ func onReady() {
 		mu.Lock()
 		cfgSnap := cfg
 		mu.Unlock()
-		systray.SetTitle(barTitle(cfgSnap, data))
+		systray.SetTitle(barTitle(cfgSnap, data, stale))
 		systray.SetIcon(ui.GenIcon(iconPct(cfgSnap, data)))
-		miUpdated.SetTitle("Updated " + time.Now().Format("15:04"))
+
+		updatedText := "Updated " + time.Now().Format("15:04")
+		if len(stale) > 0 {
+			var staleNames []string
+			for p := range stale {
+				mu.Lock()
+				ago := time.Since(lastSuccessAt[p]).Truncate(time.Minute)
+				mu.Unlock()
+				staleNames = append(staleNames, fmt.Sprintf("%s %s ago", p, ago))
+			}
+			updatedText += " (" + strings.Join(staleNames, ", ") + "!)"
+		}
+		miUpdated.SetTitle(updatedText)
 	}
 
 	refresh := func() {
@@ -386,8 +461,10 @@ func onReady() {
 				}
 			}
 		}
-		// Update lastOK for successful providers
-		if _, hasErr := data.errs["claude"]; !hasErr {
+		// Update lastOK and lastSuccessAt for successful providers
+		now := time.Now()
+		if _, hasErr := data.errs["claude"]; !hasErr && hasProviderData(data, "claude_") {
+			lastSuccessAt["claude"] = now
 			if lastOK.values == nil {
 				lastOK = quotaData{values: map[string]string{}, resets: map[string]string{}, errs: map[string]string{}}
 			}
@@ -402,7 +479,8 @@ func onReady() {
 				}
 			}
 		}
-		if _, hasErr := data.errs["codex"]; !hasErr {
+		if _, hasErr := data.errs["codex"]; !hasErr && hasProviderData(data, "codex_") {
+			lastSuccessAt["codex"] = now
 			if lastOK.values == nil {
 				lastOK = quotaData{values: map[string]string{}, resets: map[string]string{}, errs: map[string]string{}}
 			}
@@ -447,6 +525,7 @@ func onReady() {
 		selected := cfg.isSelected(mi.key)
 		cfgSnap := cfg
 		data := copyData(lastOK)
+		stale := getStaleProviders()
 		mu.Unlock()
 		if selected {
 			mi.item.Check()
@@ -454,7 +533,7 @@ func onReady() {
 			mi.item.Uncheck()
 		}
 		if data.values != nil {
-			systray.SetTitle(barTitle(cfgSnap, data))
+			systray.SetTitle(barTitle(cfgSnap, data, stale))
 			systray.SetIcon(ui.GenIcon(iconPct(cfgSnap, data)))
 		} else {
 			systray.SetTitle("")

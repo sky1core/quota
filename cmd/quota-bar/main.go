@@ -276,6 +276,7 @@ func acquireLock() int {
 		syscall.Close(fd)
 		return -1
 	}
+	syscall.CloseOnExec(fd)
 	// Write PID
 	_ = syscall.Ftruncate(fd, 0)
 	pid := fmt.Sprintf("%d\n", os.Getpid())

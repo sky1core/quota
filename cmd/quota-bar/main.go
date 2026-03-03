@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/getlantern/systray"
@@ -253,6 +254,35 @@ func setupLog() {
 	log.SetOutput(f)
 }
 
+func pidLockPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "quota", "quota-bar.pid")
+}
+
+// acquireLock tries to acquire an exclusive flock on the PID file.
+// Returns the file descriptor on success, or -1 if another instance is running.
+func acquireLock() int {
+	p := pidLockPath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		log.Printf("acquireLock: mkdir: %v", err)
+		return -1
+	}
+	fd, err := syscall.Open(p, syscall.O_CREAT|syscall.O_RDWR, 0o644)
+	if err != nil {
+		log.Printf("acquireLock: open: %v", err)
+		return -1
+	}
+	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		syscall.Close(fd)
+		return -1
+	}
+	// Write PID
+	_ = syscall.Ftruncate(fd, 0)
+	pid := fmt.Sprintf("%d\n", os.Getpid())
+	_, _ = syscall.Write(fd, []byte(pid))
+	return fd
+}
+
 func main() {
 	if os.Getenv("_QUOTA_BAR_DAEMON") != "1" {
 		// Fork self into background and exit parent
@@ -271,6 +301,10 @@ func main() {
 		os.Exit(0)
 	}
 	setupLog()
+	if fd := acquireLock(); fd < 0 {
+		log.Printf("another instance is already running, exiting")
+		os.Exit(1)
+	}
 	log.Printf("quota-bar started (pid=%d)", os.Getpid())
 	systray.Run(onReady, onExit)
 }
@@ -278,7 +312,8 @@ func main() {
 func onExit() {}
 
 func onReady() {
-	systray.SetIcon(ui.GenIcon(50))
+	icon := ui.GenIcon(50)
+	systray.SetTemplateIcon(icon, icon)
 	systray.SetTooltip("quota-bar")
 
 	cfg := loadSettings()
@@ -392,7 +427,8 @@ func onReady() {
 		cfgSnap := cfg
 		mu.Unlock()
 		systray.SetTitle(barTitle(cfgSnap, data, stale))
-		systray.SetIcon(ui.GenIcon(iconPct(cfgSnap, data)))
+		iconData := ui.GenIcon(iconPct(cfgSnap, data))
+		systray.SetTemplateIcon(iconData, iconData)
 
 		updatedText := "Updated " + time.Now().Format("15:04")
 		if len(stale) > 0 {
@@ -534,10 +570,12 @@ func onReady() {
 		}
 		if data.values != nil {
 			systray.SetTitle(barTitle(cfgSnap, data, stale))
-			systray.SetIcon(ui.GenIcon(iconPct(cfgSnap, data)))
+			iconData := ui.GenIcon(iconPct(cfgSnap, data))
+			systray.SetTemplateIcon(iconData, iconData)
 		} else {
 			systray.SetTitle("")
-			systray.SetIcon(ui.GenIcon(50))
+			iconData := ui.GenIcon(50)
+			systray.SetTemplateIcon(iconData, iconData)
 		}
 	}
 

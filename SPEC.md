@@ -110,6 +110,7 @@ github.com/sky1core/quota
 **용도**: macOS 메뉴바에 상주하며 quota를 주기적으로 갱신
 
 실행 시 자동으로 백그라운드 프로세스로 전환된다 (`&` 불필요).
+중복 실행 방지: `~/.config/quota/quota-bar.pid` 파일에 flock을 획득하여 단일 인스턴스만 실행된다. 이미 실행 중이면 즉시 종료.
 
 **동작**:
 1. 시작 시 `~/.config/quota/quota-bar.json`에서 설정 로드
@@ -224,6 +225,7 @@ Quit
 **함수**: `GenIcon(pct int) []byte`
 
 - 남은 퍼센트를 받아 22x22 PNG 아이콘 생성 (세로 바 레벨 표시, systray용)
+- macOS template icon으로 사용 (`SetTemplateIcon`) — 다크모드/라이트모드에서 시스템이 자동으로 색상 반전
 
 ---
 

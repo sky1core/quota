@@ -9,17 +9,25 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
+	"text/template"
 	"time"
 
 	"github.com/getlantern/systray"
 
 	"github.com/sky1core/quota/internal/claude"
 	"github.com/sky1core/quota/internal/codex"
+	"github.com/sky1core/quota/internal/idle"
 	"github.com/sky1core/quota/internal/ui"
 )
 
-const refreshEvery = 60 * time.Second
-const staleThreshold = 5 * time.Minute
+const (
+	refreshActive  = 3 * time.Minute
+	refreshIdle    = 30 * time.Minute
+	idleThreshold  = 10 * time.Minute
+	pauseThreshold = 1 * time.Hour
+	staleThreshold = 35 * time.Minute // > refreshIdle to avoid false stale during idle
+)
 
 // menu item keys in display order
 var allKeys = []string{
@@ -253,9 +261,122 @@ func setupLog() {
 	log.SetOutput(f)
 }
 
+func pidLockPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "quota", "quota-bar.pid")
+}
+
+// acquireLock tries to acquire an exclusive flock on the PID file.
+// Returns the file descriptor on success, or -1 if another instance is running.
+func acquireLock() int {
+	p := pidLockPath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		log.Printf("acquireLock: mkdir: %v", err)
+		return -1
+	}
+	fd, err := syscall.Open(p, syscall.O_CREAT|syscall.O_RDWR, 0o644)
+	if err != nil {
+		log.Printf("acquireLock: open: %v", err)
+		return -1
+	}
+	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		syscall.Close(fd)
+		return -1
+	}
+	syscall.CloseOnExec(fd)
+	// Write PID
+	_ = syscall.Ftruncate(fd, 0)
+	pid := fmt.Sprintf("%d\n", os.Getpid())
+	_, _ = syscall.Write(fd, []byte(pid))
+	return fd
+}
+
+const launchLabel = "com.sky1core.quota-bar"
+
+var plistTmpl = template.Must(template.New("plist").Parse(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>{{ .Label }}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>{{ .ExePath }}</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>{{ .Path }}</string>
+		<key>_QUOTA_BAR_DAEMON</key>
+		<string>1</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+</dict>
+</plist>
+`))
+
+func launchAgentPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "LaunchAgents", launchLabel+".plist")
+}
+
+func isAutoStartEnabled() bool {
+	_, err := os.Stat(launchAgentPath())
+	return err == nil
+}
+
+func enableAutoStart() error {
+	exePath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	// Resolve symlinks to get the real path
+	exePath, err = filepath.EvalSymlinks(exePath)
+	if err != nil {
+		return err
+	}
+	p := launchAgentPath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	f, err := os.Create(p)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	pathEnv := os.Getenv("PATH")
+	if pathEnv == "" {
+		pathEnv = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+	}
+	if err := plistTmpl.Execute(f, struct{ Label, ExePath, Path string }{launchLabel, exePath, pathEnv}); err != nil {
+		os.Remove(p)
+		return err
+	}
+	if err := exec.Command("launchctl", "load", p).Run(); err != nil {
+		os.Remove(p)
+		return err
+	}
+	return nil
+}
+
+func disableAutoStart() error {
+	p := launchAgentPath()
+	_ = exec.Command("launchctl", "unload", p).Run()
+	return os.Remove(p)
+}
+
 func main() {
 	if os.Getenv("_QUOTA_BAR_DAEMON") != "1" {
-		// Fork self into background and exit parent
 		exe, err := os.Executable()
 		if err != nil {
 			log.Fatal(err)
@@ -271,6 +392,10 @@ func main() {
 		os.Exit(0)
 	}
 	setupLog()
+	if fd := acquireLock(); fd < 0 {
+		log.Printf("another instance is already running, exiting")
+		os.Exit(1)
+	}
 	log.Printf("quota-bar started (pid=%d)", os.Getpid())
 	systray.Run(onReady, onExit)
 }
@@ -278,7 +403,8 @@ func main() {
 func onExit() {}
 
 func onReady() {
-	systray.SetIcon(ui.GenIcon(50))
+	icon := ui.GenIcon(50)
+	systray.SetTemplateIcon(icon, icon)
 	systray.SetTooltip("quota-bar")
 
 	cfg := loadSettings()
@@ -317,6 +443,7 @@ func onReady() {
 	miUpdated := systray.AddMenuItem("Not yet updated", "")
 	miUpdated.Disable()
 	miRefresh := systray.AddMenuItem("Refresh", "Refresh now")
+	miAutoStart := systray.AddMenuItemCheckbox("Start at Login", "", isAutoStartEnabled())
 	miQuit := systray.AddMenuItem("Quit", "Quit")
 
 	var (
@@ -392,7 +519,8 @@ func onReady() {
 		cfgSnap := cfg
 		mu.Unlock()
 		systray.SetTitle(barTitle(cfgSnap, data, stale))
-		systray.SetIcon(ui.GenIcon(iconPct(cfgSnap, data)))
+		iconData := ui.GenIcon(iconPct(cfgSnap, data))
+		systray.SetTemplateIcon(iconData, iconData)
 
 		updatedText := "Updated " + time.Now().Format("15:04")
 		if len(stale) > 0 {
@@ -408,11 +536,11 @@ func onReady() {
 		miUpdated.SetTitle(updatedText)
 	}
 
-	refresh := func() {
+	refresh := func() bool {
 		mu.Lock()
 		if running {
 			mu.Unlock()
-			return
+			return false
 		}
 		running = true
 		mu.Unlock()
@@ -423,7 +551,9 @@ func onReady() {
 			mu.Unlock()
 		}()
 
+		log.Printf("refresh start")
 		data := fetchQuota()
+		log.Printf("refresh done")
 
 		mu.Lock()
 		// Keep last successful values for providers that failed
@@ -498,6 +628,7 @@ func onReady() {
 		mu.Unlock()
 
 		renderMenu(data)
+		return true
 	}
 
 	copyData := func(d quotaData) quotaData {
@@ -534,18 +665,35 @@ func onReady() {
 		}
 		if data.values != nil {
 			systray.SetTitle(barTitle(cfgSnap, data, stale))
-			systray.SetIcon(ui.GenIcon(iconPct(cfgSnap, data)))
+			iconData := ui.GenIcon(iconPct(cfgSnap, data))
+			systray.SetTemplateIcon(iconData, iconData)
 		} else {
 			systray.SetTitle("")
-			systray.SetIcon(ui.GenIcon(50))
+			iconData := ui.GenIcon(50)
+			systray.SetTemplateIcon(iconData, iconData)
 		}
 	}
 
 	go refresh()
-	ticker := time.NewTicker(refreshEvery)
 	go func() {
-		for range ticker.C {
-			refresh()
+		lastRefresh := time.Now()
+		for {
+			time.Sleep(30 * time.Second)
+			idleSec := idle.Seconds()
+			var interval time.Duration
+			switch {
+			case idleSec > pauseThreshold.Seconds():
+				continue // paused, just re-check idle
+			case idleSec > idleThreshold.Seconds():
+				interval = refreshIdle
+			default:
+				interval = refreshActive
+			}
+			if time.Since(lastRefresh) >= interval {
+				if refresh() {
+					lastRefresh = time.Now()
+				}
+			}
 		}
 	}()
 
@@ -566,6 +714,22 @@ func onReady() {
 				handleToggle(codexItems[1])
 			case <-miRefresh.ClickedCh:
 				go refresh()
+			case <-miAutoStart.ClickedCh:
+				if isAutoStartEnabled() {
+					if err := disableAutoStart(); err != nil {
+						log.Printf("disableAutoStart: %v", err)
+					}
+				} else {
+					if err := enableAutoStart(); err != nil {
+						log.Printf("enableAutoStart: %v", err)
+					}
+				}
+				// Reflect actual state regardless of error
+				if isAutoStartEnabled() {
+					miAutoStart.Check()
+				} else {
+					miAutoStart.Uncheck()
+				}
 			case <-miQuit.ClickedCh:
 				systray.Quit()
 				return

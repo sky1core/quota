@@ -239,6 +239,51 @@ func TestOperatorPrecedenceFix(t *testing.T) {
 	}
 }
 
+func TestParseCaptured_UsageCommand(t *testing.T) {
+	// Actual output from `/usage` command (captured 2026-03-05)
+	input := `  Settings:  Status   Config   Usage  (←/→ or tab to cycle)
+
+
+  Current session
+  █████▌                                             11% used
+  Resets 11pm (Asia/Seoul)
+
+  Current week (all models)
+  █████████████████████████████████████████▌         83% used
+  Resets 12pm (Asia/Seoul)
+
+  Current week (Sonnet only)
+  ▌                                                  1% used
+  Resets Mar 11, 7pm (Asia/Seoul)
+
+  Esc to cancel`
+	result, err := parseCaptured(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	session, ok := result["session"].(map[string]any)
+	if !ok {
+		t.Fatal("missing session")
+	}
+	if session["used"] != 11 || session["left"] != 89 {
+		t.Errorf("session: used=%v left=%v", session["used"], session["left"])
+	}
+	weekly, ok := result["weeklyAll"].(map[string]any)
+	if !ok {
+		t.Fatal("missing weeklyAll")
+	}
+	if weekly["used"] != 83 {
+		t.Errorf("weeklyAll used=%v, want 83", weekly["used"])
+	}
+	sonnet, ok := result["weeklySonnet"].(map[string]any)
+	if !ok {
+		t.Fatal("missing weeklySonnet")
+	}
+	if sonnet["used"] != 1 {
+		t.Errorf("weeklySonnet used=%v, want 1", sonnet["used"])
+	}
+}
+
 func TestAtoi(t *testing.T) {
 	tests := []struct {
 		in   string

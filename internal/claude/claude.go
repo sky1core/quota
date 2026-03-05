@@ -33,15 +33,17 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 	session := fmt.Sprintf("quota-%d", os.Getpid())
 
 	cleanup := func() {
-		out, _ := exec.Command("tmux", "list-panes", "-t", session, "-F", "#{pane_pid}").Output()
+		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanCancel()
+		out, _ := exec.CommandContext(cleanCtx, "tmux", "list-panes", "-t", session, "-F", "#{pane_pid}").Output()
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			pid := strings.TrimSpace(line)
 			if pid != "" {
-				_ = exec.Command("pkill", "-P", pid).Run()
-				_ = exec.Command("kill", pid).Run()
+				_ = exec.CommandContext(cleanCtx, "pkill", "-P", pid).Run()
+				_ = exec.CommandContext(cleanCtx, "kill", pid).Run()
 			}
 		}
-		_ = exec.Command("tmux", "kill-session", "-t", session).Run()
+		_ = exec.CommandContext(cleanCtx, "tmux", "kill-session", "-t", session).Run()
 	}
 	defer cleanup()
 
@@ -71,56 +73,71 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 		return nil, fmt.Errorf("failed to create tmux session: %w", err)
 	}
 
-	sleep := func(d time.Duration) bool {
-		select {
-		case <-ctx.Done():
-			return false
-		case <-time.After(d):
-			return true
+	// waitFor polls the tmux pane until the text matches the predicate.
+	waitFor := func(check func(string) bool) (string, error) {
+		for {
+			select {
+			case <-ctx.Done():
+				// Capture final state for diagnostics
+				out, _ := exec.Command("tmux", "capture-pane", "-t", session, "-p").Output()
+				return stripANSI(string(out)), errors.New("timeout")
+			default:
+			}
+			out, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", session, "-p").Output()
+			if err != nil {
+				return "", fmt.Errorf("failed to capture tmux pane: %w", err)
+			}
+			text := stripANSI(string(out))
+			if check(text) {
+				return text, nil
+			}
+			time.Sleep(500 * time.Millisecond)
 		}
 	}
 
-	if !sleep(6 * time.Second) {
-		return nil, errors.New("timeout waiting for claude to start")
+	// Wait for Claude CLI to be ready (prompt appears)
+	if _, err := waitFor(func(t string) bool {
+		return strings.Contains(t, "Claude Code")
+	}); err != nil {
+		return nil, fmt.Errorf("waiting for claude to start: %w", err)
 	}
 
+	// Dismiss any initial prompt
 	tmuxSend("Enter")
-	if !sleep(4 * time.Second) {
-		return nil, errors.New("timeout")
-	}
+	time.Sleep(500 * time.Millisecond)
 
-	tmuxSend("/status")
-	if !sleep(2 * time.Second) {
-		return nil, errors.New("timeout")
-	}
-
+	// Send /usage command
+	tmuxSend("/usage")
+	time.Sleep(300 * time.Millisecond)
 	tmuxSend("Enter")
-	if !sleep(5 * time.Second) {
-		return nil, errors.New("timeout")
-	}
 
-	tmuxSend("Tab")
-	if !sleep(2 * time.Second) {
-		return nil, errors.New("timeout")
-	}
-
-	tmuxSend("Tab")
-	if !sleep(7 * time.Second) {
-		return nil, errors.New("timeout")
-	}
-
-	captured, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", session, "-p").Output()
+	// Wait for usage data to fully load
+	text, err := waitFor(func(t string) bool {
+		if strings.Contains(t, "Error:") {
+			return true
+		}
+		return strings.Contains(t, "% used") && strings.Contains(t, "Esc to cancel")
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to capture tmux pane: %w", err)
+		return nil, err
 	}
 
+	// Exit claude
 	tmuxSend("Escape")
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	tmuxSend("/exit", "Enter")
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 
-	text := stripANSI(string(captured))
-	return parseCaptured(text)
+	result, err := parseCaptured(text)
+	if err != nil {
+		// Truncate for logging; keep first 500 chars of captured text.
+		preview := text
+		if len(preview) > 500 {
+			preview = preview[:500]
+		}
+		return nil, fmt.Errorf("%w\n--- captured ---\n%s", err, preview)
+	}
+	return result, nil
 }
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)

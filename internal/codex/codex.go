@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -56,6 +57,9 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "codex", "app-server")
+	if home, err := os.UserHomeDir(); err == nil {
+		cmd.Dir = home
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

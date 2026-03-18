@@ -69,7 +69,8 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 		_ = tmuxRun(args...)
 	}
 
-	if err := tmuxRun("new-session", "-d", "-s", session, "-x", "120", "-y", "40", "env", "-u", "CLAUDECODE", claudeBin); err != nil {
+	home, _ := os.UserHomeDir()
+	if err := tmuxRun("new-session", "-d", "-s", session, "-x", "120", "-y", "40", "-c", home, "env", "-u", "CLAUDECODE", claudeBin); err != nil {
 		return nil, fmt.Errorf("failed to create tmux session: %w", err)
 	}
 

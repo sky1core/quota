@@ -307,7 +307,7 @@ var plistTmpl = template.Must(template.New("plist").Parse(`<?xml version="1.0" e
 	<dict>
 		<key>PATH</key>
 		<string>{{ .Path }}</string>
-		<key>_QUOTA_BAR_DAEMON</key>
+		<key>QUOTA_BAR_DAEMON</key>
 		<string>1</string>
 	</dict>
 	<key>RunAtLoad</key>
@@ -376,13 +376,13 @@ func disableAutoStart() error {
 }
 
 func main() {
-	if os.Getenv("_QUOTA_BAR_DAEMON") != "1" {
+	if os.Getenv("QUOTA_BAR_DAEMON") != "1" {
 		exe, err := os.Executable()
 		if err != nil {
 			log.Fatal(err)
 		}
 		cmd := exec.Command(exe, os.Args[1:]...)
-		cmd.Env = append(os.Environ(), "_QUOTA_BAR_DAEMON=1")
+		cmd.Env = append(os.Environ(), "QUOTA_BAR_DAEMON=1")
 		cmd.Stdout = nil
 		cmd.Stderr = nil
 		cmd.Stdin = nil
@@ -400,7 +400,15 @@ func main() {
 	systray.Run(onReady, onExit)
 }
 
-func onExit() {}
+var intentionalQuit bool
+
+func onExit() {
+	if !intentionalQuit {
+		log.Printf("unexpected exit, exiting with code 1 for launchd restart")
+		os.Exit(1)
+	}
+	log.Printf("intentional quit, exiting normally")
+}
 
 func onReady() {
 	icon := ui.GenIcon(50)
@@ -731,6 +739,7 @@ func onReady() {
 					miAutoStart.Uncheck()
 				}
 			case <-miQuit.ClickedCh:
+				intentionalQuit = true
 				systray.Quit()
 				return
 			}

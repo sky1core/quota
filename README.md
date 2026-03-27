@@ -78,8 +78,8 @@ go build -o quota-bar ./cmd/quota-bar
 # 버전 정보를 포함하여 빌드
 go build -ldflags "-X main.version=v0.4.0" -o quota-bar ./cmd/quota-bar
 
-# 빌드 후 재서명 (macOS TCC가 Bundle ID를 인식하도록)
-codesign -s - --force quota-bar
+# (선택) 재서명하면 System Settings에서 앱 이름이 정상 표시됨
+# codesign -s - --force quota-bar
 ```
 
 ## 테스트

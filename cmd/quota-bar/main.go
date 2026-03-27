@@ -21,6 +21,8 @@ import (
 	"github.com/sky1core/quota/internal/ui"
 )
 
+var version = "dev"
+
 const (
 	refreshActive  = 3 * time.Minute
 	refreshIdle    = 30 * time.Minute
@@ -319,8 +321,14 @@ var plistTmpl = template.Must(template.New("plist").Parse(`<?xml version="1.0" e
 	</dict>
 	<key>ThrottleInterval</key>
 	<integer>10</integer>
+	<key>WorkingDirectory</key>
+	<string>{{ .Home }}</string>
 	<key>ProcessType</key>
 	<string>Interactive</string>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>com.sky1core.quota-bar</string>
+	</array>
 </dict>
 </plist>
 `))
@@ -358,7 +366,8 @@ func enableAutoStart() error {
 	if pathEnv == "" {
 		pathEnv = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 	}
-	if err := plistTmpl.Execute(f, struct{ Label, ExePath, Path string }{launchLabel, exePath, pathEnv}); err != nil {
+	home, _ := os.UserHomeDir()
+	if err := plistTmpl.Execute(f, struct{ Label, ExePath, Path, Home string }{launchLabel, exePath, pathEnv, home}); err != nil {
 		os.Remove(p)
 		return err
 	}
@@ -390,6 +399,11 @@ func main() {
 			log.Fatal(err)
 		}
 		os.Exit(0)
+	}
+	// Set CWD to home directory to prevent macOS permission dialogs
+	// (launchd starts with CWD=/ which can trigger media/downloads access prompts)
+	if home, err := os.UserHomeDir(); err == nil {
+		_ = os.Chdir(home)
 	}
 	setupLog()
 	if fd := acquireLock(); fd < 0 {
@@ -452,6 +466,8 @@ func onReady() {
 	miUpdated.Disable()
 	miRefresh := systray.AddMenuItem("Refresh", "Refresh now")
 	miAutoStart := systray.AddMenuItemCheckbox("Start at Login", "", isAutoStartEnabled())
+	miVersion := systray.AddMenuItem("quota-bar "+version, "")
+	miVersion.Disable()
 	miQuit := systray.AddMenuItem("Quit", "Quit")
 
 	var (

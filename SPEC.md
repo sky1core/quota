@@ -141,6 +141,8 @@ github.com/sky1core/quota
 ───────────────
 Updated 14:30
 Refresh
+Start at Login
+quota-bar v0.4.0
 Quit
 ```
 

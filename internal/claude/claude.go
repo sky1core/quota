@@ -70,7 +70,12 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 	}
 
 	home, _ := os.UserHomeDir()
-	if err := tmuxRun("new-session", "-d", "-s", session, "-x", "120", "-y", "40", "-c", home, "env", "-u", "CLAUDECODE", claudeBin); err != nil {
+	// Use ~/.config/quota/ as CWD instead of ~/ to prevent Claude CLI from
+	// scanning TCC-protected folders (Downloads, Photos, Music, Movies).
+	// Claude CLI treats CWD as a project root and runs readdir on it.
+	safeDir := filepath.Join(home, ".config", "quota")
+	_ = os.MkdirAll(safeDir, 0o755)
+	if err := tmuxRun("new-session", "-d", "-s", session, "-x", "120", "-y", "40", "-c", safeDir, "env", "-u", "CLAUDECODE", claudeBin); err != nil {
 		return nil, fmt.Errorf("failed to create tmux session: %w", err)
 	}
 

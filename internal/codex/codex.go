@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -58,7 +59,10 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 
 	cmd := exec.CommandContext(ctx, "codex", "app-server")
 	if home, err := os.UserHomeDir(); err == nil {
-		cmd.Dir = home
+		// Use ~/.config/quota/ as CWD to avoid TCC-protected folder access.
+		safeDir := filepath.Join(home, ".config", "quota")
+		_ = os.MkdirAll(safeDir, 0o755)
+		cmd.Dir = safeDir
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

@@ -74,6 +74,12 @@ quota-bar
 ```bash
 go build -o quota-cli ./cmd/quota-cli
 go build -o quota-bar ./cmd/quota-bar
+
+# 버전 정보를 포함하여 빌드
+go build -ldflags "-X main.version=v0.4.0" -o quota-bar ./cmd/quota-bar
+
+# 빌드 후 재서명 (macOS TCC가 Bundle ID를 인식하도록)
+codesign -s - --force quota-bar
 ```
 
 ## 테스트

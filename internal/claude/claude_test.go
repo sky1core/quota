@@ -142,9 +142,6 @@ Resets 5:59pm (Asia/Seoul)
 all models           20% used
 Resets Mar 6, 12pm (Asia/Seoul)
 Sonnet only          0% used
-Extra usage          35% used
-$17.91/$50.00 spent
-Resets Mar 6, 12pm (Asia/Seoul)
 `
 	result, err := parseCaptured(input)
 	if err != nil {
@@ -184,16 +181,9 @@ Resets Mar 6, 12pm (Asia/Seoul)
 		t.Errorf("weeklySonnet used = %v, want 0", sonnet["used"])
 	}
 
-	// extra
-	extra, ok := result["extra"].(map[string]any)
-	if !ok {
-		t.Fatal("missing extra")
-	}
-	if extra["used"] != 35 {
-		t.Errorf("extra used = %v, want 35", extra["used"])
-	}
-	if extra["spent"] != "$17.91/$50.00" {
-		t.Errorf("extra spent = %v", extra["spent"])
+	// extra should not be parsed
+	if _, ok := result["extra"]; ok {
+		t.Error("extra should not be present after parsing change")
 	}
 }
 

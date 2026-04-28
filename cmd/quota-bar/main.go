@@ -36,7 +36,6 @@ var allKeys = []string{
 	"claude_session",
 	"claude_weekly_all",
 	"claude_weekly_sonnet",
-	"claude_extra",
 	"codex_5h",
 	"codex_day",
 }
@@ -152,7 +151,6 @@ func fetchQuota() quotaData {
 			extract("session", "claude_session")
 			extract("weeklyAll", "claude_weekly_all")
 			extract("weeklySonnet", "claude_weekly_sonnet")
-			extract("extra", "claude_extra")
 		case "codex":
 			extract := func(mapKey, outKey string) {
 				if s, ok := r.data[mapKey].(map[string]any); ok {
@@ -443,7 +441,6 @@ func onReady() {
 		{"claude_session", systray.AddMenuItemCheckbox("Session  -", "", cfg.isSelected("claude_session"))},
 		{"claude_weekly_all", systray.AddMenuItemCheckbox("Weekly  -", "", cfg.isSelected("claude_weekly_all"))},
 		{"claude_weekly_sonnet", systray.AddMenuItemCheckbox("Sonnet  -", "", cfg.isSelected("claude_weekly_sonnet"))},
-		{"claude_extra", systray.AddMenuItemCheckbox("Extra  -", "", cfg.isSelected("claude_extra"))},
 	}
 
 	// -- Codex section --
@@ -481,7 +478,6 @@ func onReady() {
 		"claude_session":       "Session",
 		"claude_weekly_all":    "Weekly",
 		"claude_weekly_sonnet": "Sonnet",
-		"claude_extra":         "Extra",
 		"codex_5h":             "5h",
 		"codex_day":            "Day",
 	}
@@ -730,8 +726,6 @@ func onReady() {
 				handleToggle(claudeItems[1])
 			case <-claudeItems[2].item.ClickedCh:
 				handleToggle(claudeItems[2])
-			case <-claudeItems[3].item.ClickedCh:
-				handleToggle(claudeItems[3])
 			case <-codexItems[0].item.ClickedCh:
 				handleToggle(codexItems[0])
 			case <-codexItems[1].item.ClickedCh:

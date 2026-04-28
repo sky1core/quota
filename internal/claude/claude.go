@@ -167,10 +167,8 @@ func parseCaptured(text string) (map[string]any, error) {
 		{"Current session", "session"},
 		{"all models", "weeklyAll"},
 		{"Sonnet only", "weeklySonnet"},
-		{"Extra usage", "extra"},
 	}
 
-	spentRe := regexp.MustCompile(`(\$[\d.]+\s*/\s*\$[\d.]+)\s*spent`)
 	resetsRe := regexp.MustCompile(`(?i)Resets?\s+(.+)`)
 
 	out := map[string]any{}
@@ -214,9 +212,6 @@ func parseCaptured(text string) (map[string]any, error) {
 			}
 		}
 
-		if sm := spentRe.FindStringSubmatch(after); sm != nil {
-			entry["spent"] = strings.ReplaceAll(sm[1], " ", "")
-		}
 		if rm := resetsRe.FindStringSubmatch(after); rm != nil {
 			val := strings.TrimSpace(rm[1])
 			if len(val) > 50 {

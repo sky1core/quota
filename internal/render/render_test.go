@@ -186,7 +186,6 @@ func TestText_FullPayload(t *testing.T) {
 			"session":      map[string]any{"left": 80, "resetsIn": "2h"},
 			"weeklyAll":    map[string]any{"left": 85, "resetsIn": "5d"},
 			"weeklySonnet": map[string]any{"left": 100},
-			"extra":        map[string]any{"left": 65, "resetsIn": "6d", "spent": "$17/$50"},
 		},
 		"codex": map[string]any{
 			"fiveHour": map[string]any{"left": 90, "resetsIn": "3h"},
@@ -205,8 +204,14 @@ func TestText_FullPayload(t *testing.T) {
 	if strings.Contains(got, "(no data)") {
 		t.Error("should not show (no data) when data exists")
 	}
-	// Extra info present
-	if !strings.Contains(got, "$17/$50") {
-		t.Error("missing extra spent info")
+	// All three claude rows present
+	for _, lbl := range []string{"Session", "Weekly", "Sonnet"} {
+		if !strings.Contains(got, lbl) {
+			t.Errorf("missing claude row %q", lbl)
+		}
+	}
+	// Extra row should not be rendered
+	if strings.Contains(got, "Extra") {
+		t.Error("Extra row should not be present")
 	}
 }

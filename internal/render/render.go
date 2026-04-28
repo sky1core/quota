@@ -28,9 +28,8 @@ func Text(payload map[string]any) string {
 			"session":      "Session",
 			"weeklyAll":    "Weekly",
 			"weeklySonnet": "Sonnet",
-			"extra":        "Extra",
 		}
-		for _, k := range []string{"session", "weeklyAll", "weeklySonnet", "extra"} {
+		for _, k := range []string{"session", "weeklyAll", "weeklySonnet"} {
 			v, ok := m[k].(map[string]any)
 			if !ok {
 				continue

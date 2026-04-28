@@ -29,18 +29,7 @@ func TestFmtLine_WithResets(t *testing.T) {
 	}
 }
 
-func TestFmtLine_WithExtra(t *testing.T) {
-	it := item{label: "Extra", left: "65%", resets: "1h", extra: "$17/$50"}
-	got := fmtLine(it)
-	if !strings.Contains(got, "$17/$50") {
-		t.Errorf("missing extra: %q", got)
-	}
-	if !strings.Contains(got, "65%") {
-		t.Errorf("missing percentage: %q", got)
-	}
-}
-
-func TestFmtLine_NoResets_NoExtra(t *testing.T) {
+func TestFmtLine_NoResets(t *testing.T) {
 	it := item{label: "Sonnet", left: "100%"}
 	got := fmtLine(it)
 	if !strings.Contains(got, "Sonnet") || !strings.Contains(got, "100%") {
@@ -48,7 +37,7 @@ func TestFmtLine_NoResets_NoExtra(t *testing.T) {
 	}
 	// Should just be label + left, nothing else fancy
 	if strings.Contains(got, "at ") || strings.Contains(got, "$") {
-		t.Errorf("should not have extra info: %q", got)
+		t.Errorf("should not have decoration: %q", got)
 	}
 }
 

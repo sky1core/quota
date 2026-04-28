@@ -128,6 +128,13 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 		return nil, err
 	}
 
+	// /usage rows render asynchronously; let later rows (e.g. Sonnet only)
+	// settle before re-capturing for the final parse.
+	time.Sleep(1 * time.Second)
+	if out, capErr := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", session, "-p").Output(); capErr == nil {
+		text = stripANSI(string(out))
+	}
+
 	// Exit claude
 	tmuxSend("Escape")
 	time.Sleep(300 * time.Millisecond)

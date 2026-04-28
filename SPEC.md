@@ -184,9 +184,10 @@ Quit
 2. 스플래시(`Claude Code`) 등장까지 폴링 → Enter (초기 prompt 해제)
 3. `/usage` 입력 → Enter
 4. `% used` 와 `Esc to cancel` 이 모두 보일 때까지 폴링 (또는 `Error:` 검출 시 즉시 진행)
-5. `tmux capture-pane -t SESSION -p`로 캡처
-6. ANSI 코드 제거 → `parseCaptured()` 로 파싱
-7. Escape → `/exit` → Enter → `tmux kill-session` 클린업
+5. 1초 대기 — `/usage` 화면 행이 비동기로 그려지므로 후행 행(예: Sonnet only)이 settle하도록 추가 sleep
+6. `tmux capture-pane -t SESSION -p`로 재캡처 (이 결과를 파싱에 사용)
+7. ANSI 코드 제거 → `parseCaptured()` 로 파싱
+8. Escape → `/exit` → Enter → `tmux kill-session` 클린업
 
 **파싱 로직** (`parseCaptured`):
 - `\d+% used` 패턴을 모두 찾음

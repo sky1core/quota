@@ -42,17 +42,15 @@ github.com/sky1core/quota
 
 ```json
 {
-  "session":      { "used": 5, "left": 95, "spent": "$1.23/$5.00", "resetsIn": "4h 30m" },
-  "weeklyAll":    { "used": 10, "left": 90, "spent": "$17.91/$50.00", "resetsIn": "2d 5h" },
-  "weeklySonnet": { "used": 20, "left": 80 },
-  "extra":        { "used": 0, "left": 100, "resetsIn": "18h 20m" }
+  "session":      { "used": 5, "left": 95, "resetsIn": "4h 30m" },
+  "weeklyAll":    { "used": 10, "left": 90, "resetsIn": "2d 5h" },
+  "weeklySonnet": { "used": 20, "left": 80 }
 }
 ```
 
 각 항목:
 - `used` (int): 사용 퍼센트 (0–100)
 - `left` (int): 남은 퍼센트 (100 - used)
-- `spent` (string, optional): 금액 표시 (예: `$17.91/$50.00`)
 - `resetsIn` (string, optional): 리셋까지 남은 시간 (예: `4h 30m`, `2d 5h`)
 
 ### Codex quota
@@ -134,7 +132,6 @@ github.com/sky1core/quota
 ☐ Session 95% (4h 30m)
 ☐ Weekly 90% (2d 5h)
 ☐ Sonnet 80%
-☐ Extra 100% (18h 20m)
 ── Codex ──
 ☑ 5h 85% (2h 30m)
 ☐ Day 70% (18h 5m)
@@ -181,13 +178,16 @@ Quit
 - 내장 tmux 자동화로 Claude CLI에서 quota 조회
 
 **tmux 자동화 흐름** (내장):
-1. `tmux new-session -d -s quota-{pid} -x 120 -y 40 claude`
-2. 6초 대기 → Enter (trust dialog 해제)
-3. 4초 대기 → `/status` 입력 → 2초 대기 → Enter (autocomplete 선택)
-4. 5초 대기 → Tab (Status→Config) → 2초 대기 → Tab (Config→Usage)
-5. 7초 대기 → `tmux capture-pane -t SESSION -p`로 캡처
-6. ANSI 코드 제거 → `parseCaptured()` 로 파싱
-7. Escape → `/exit` → Enter → `tmux kill-session` 클린업
+1. `tmux new-session -d -s quota-{pid} -x 120 -y 40 -c <safeDir> env -u CLAUDECODE claude`
+   - `safeDir` = `~/.config/quota` (Claude CLI가 CWD를 readdir할 때 macOS TCC 보호 폴더 접근 방지)
+   - `CLAUDECODE` 환경변수 제거 (중첩 세션 감지 회피)
+2. 스플래시(`Claude Code`) 등장까지 폴링 → Enter (초기 prompt 해제)
+3. `/usage` 입력 → Enter
+4. `% used` 와 `Esc to cancel` 이 모두 보일 때까지 폴링 (또는 `Error:` 검출 시 즉시 진행)
+5. 1초 대기 — `/usage` 화면 행이 비동기로 그려지므로 후행 행(예: Sonnet only)이 settle하도록 추가 sleep
+6. `tmux capture-pane -t SESSION -p`로 재캡처 (이 결과를 파싱에 사용)
+7. ANSI 코드 제거 → `parseCaptured()` 로 파싱
+8. Escape → `/exit` → Enter → `tmux kill-session` 클린업
 
 **파싱 로직** (`parseCaptured`):
 - `\d+% used` 패턴을 모두 찾음
@@ -195,8 +195,8 @@ Quit
   - "Current session" → session
   - "all models" → weeklyAll
   - "Sonnet only" → weeklySonnet
-  - "Extra usage" → extra
-- 매치 이후 200자에서 spent, resets 정보 추출
+- 매치 이후 200자에서 resets 정보 추출 (`toRelative`로 상대시간 정규화)
+- 일부 라벨이 화면에 없거나 매칭이 일부만 되어도 매치된 항목만 반환 (부분 결과 허용)
 
 ### internal/codex
 

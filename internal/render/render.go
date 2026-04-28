@@ -9,10 +9,9 @@ import (
 )
 
 type item struct {
-	label   string
-	left    string
-	resets  string
-	extra   string // e.g. "$17.91/$50.00"
+	label  string
+	left   string
+	resets string
 }
 
 func Text(payload map[string]any) string {
@@ -28,9 +27,8 @@ func Text(payload map[string]any) string {
 			"session":      "Session",
 			"weeklyAll":    "Weekly",
 			"weeklySonnet": "Sonnet",
-			"extra":        "Extra",
 		}
-		for _, k := range []string{"session", "weeklyAll", "weeklySonnet", "extra"} {
+		for _, k := range []string{"session", "weeklyAll", "weeklySonnet"} {
 			v, ok := m[k].(map[string]any)
 			if !ok {
 				continue
@@ -41,9 +39,6 @@ func Text(payload map[string]any) string {
 			}
 			if r, ok := v["resetsIn"].(string); ok {
 				it.resets = r
-			}
-			if s, ok := v["spent"].(string); ok {
-				it.extra = s
 			}
 			b.WriteString(fmtLine(it))
 		}
@@ -95,9 +90,6 @@ func fmtLine(it item) string {
 		} else {
 			line += fmt.Sprintf("   (%s)", it.resets)
 		}
-	}
-	if it.extra != "" {
-		line += fmt.Sprintf("   %s", it.extra)
 	}
 	return line + "\n"
 }

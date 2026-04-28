@@ -43,7 +43,6 @@ Claude
   Session    98%   (4h 52m, at 03:59)
   Weekly     79%   (5d 12h, at Mar 6 11:06)
   Sonnet    100%
-  Extra      65%   (52m, at 23:59)   $17.91/$50.00
 
 Codex
   5h         79%   (31m, at 23:38)

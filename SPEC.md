@@ -178,9 +178,10 @@ Quit
 - 내장 tmux 자동화로 Claude CLI에서 quota 조회
 
 **tmux 자동화 흐름** (내장):
-1. `tmux new-session -d -s quota-{pid} -x 120 -y 40 -c <safeDir> env -u CLAUDECODE claude`
+1. `tmux new-session -d -s quota-{pid} -x 120 -y 40 -c <safeDir> env -u CLAUDECODE -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL claude`
    - `safeDir` = `~/.config/quota` (Claude CLI가 CWD를 readdir할 때 macOS TCC 보호 폴더 접근 방지)
-   - `CLAUDECODE` 환경변수 제거 (중첩 세션 감지 회피)
+   - `CLAUDECODE` 제거: 중첩 세션 감지 회피
+   - `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` 제거: 사용자 로그인 계정 quota를 읽도록 강제 (커스텀 엔드포인트/대체 토큰이 quota를 가로채지 않게)
 2. 스플래시(`Claude Code`) 등장까지 폴링 → Enter (초기 prompt 해제)
 3. `/usage` 입력 → Enter
 4. `% used` 와 `Esc to cancel` 이 모두 보일 때까지 폴링 (또는 `Error:` 검출 시 즉시 진행)

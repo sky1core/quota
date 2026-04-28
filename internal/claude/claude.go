@@ -47,10 +47,19 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 	}
 	defer cleanup()
 
-	// Build a clean environment without CLAUDECODE to avoid nested session detection.
+	// Build a clean environment for the spawned Claude CLI:
+	//   - CLAUDECODE: drop to avoid nested session detection.
+	//   - ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL: drop so quota is read from
+	//     the user's logged-in Claude account rather than a custom endpoint.
+	scrubKeys := map[string]bool{
+		"CLAUDECODE":           true,
+		"ANTHROPIC_AUTH_TOKEN": true,
+		"ANTHROPIC_BASE_URL":   true,
+	}
 	cleanEnv := os.Environ()
 	for i := 0; i < len(cleanEnv); {
-		if strings.HasPrefix(cleanEnv[i], "CLAUDECODE=") {
+		eq := strings.IndexByte(cleanEnv[i], '=')
+		if eq > 0 && scrubKeys[cleanEnv[i][:eq]] {
 			cleanEnv = append(cleanEnv[:i], cleanEnv[i+1:]...)
 		} else {
 			i++
@@ -75,7 +84,7 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 	// Claude CLI treats CWD as a project root and runs readdir on it.
 	safeDir := filepath.Join(home, ".config", "quota")
 	_ = os.MkdirAll(safeDir, 0o755)
-	if err := tmuxRun("new-session", "-d", "-s", session, "-x", "120", "-y", "40", "-c", safeDir, "env", "-u", "CLAUDECODE", claudeBin); err != nil {
+	if err := tmuxRun("new-session", "-d", "-s", session, "-x", "120", "-y", "40", "-c", safeDir, "env", "-u", "CLAUDECODE", "-u", "ANTHROPIC_AUTH_TOKEN", "-u", "ANTHROPIC_BASE_URL", claudeBin); err != nil {
 		return nil, fmt.Errorf("failed to create tmux session: %w", err)
 	}
 

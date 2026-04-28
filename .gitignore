@@ -1,3 +1,7 @@
 /quota-cli
 /quota-bar
 .tmp/
+
+# Local agent context files
+/AGENTS.md
+/CLAUDE.md

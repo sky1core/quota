@@ -31,11 +31,27 @@ const (
 	staleThreshold = 35 * time.Minute // > refreshIdle to avoid false stale during idle
 )
 
+// claudeExtraSlots is the number of pre-allocated menu slots for dynamic
+// Claude usage rows (per-model weekly quotas whose labels change across
+// model generations). systray cannot remove items at runtime, so unused
+// slots stay hidden.
+const claudeExtraSlots = 3
+
+func claudeExtraKey(i int) string {
+	return fmt.Sprintf("claude_extra_%d", i+1)
+}
+
+func isClaudeExtraKey(key string) bool {
+	return strings.HasPrefix(key, "claude_extra_")
+}
+
 // menu item keys in display order
 var allKeys = []string{
 	"claude_session",
 	"claude_weekly_all",
-	"claude_weekly_sonnet",
+	"claude_extra_1",
+	"claude_extra_2",
+	"claude_extra_3",
 	"codex_5h",
 	"codex_day",
 }
@@ -81,6 +97,33 @@ func loadSettings() settings {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return settings{}
 	}
+	return migrateSettings(s)
+}
+
+// migrateSettings rewrites the old fixed key for the third /usage row
+// ("claude_weekly_sonnet") to the first dynamic extra slot, once, and
+// persists the result.
+func migrateSettings(s settings) settings {
+	changed := false
+	for i, k := range s.Selected {
+		if k == "claude_weekly_sonnet" {
+			s.Selected[i] = "claude_extra_1"
+			changed = true
+		}
+	}
+	if !changed {
+		return s
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, k := range s.Selected {
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	s.Selected = out
+	saveSettings(s)
 	return s
 }
 
@@ -102,15 +145,36 @@ func saveSettings(s settings) {
 type quotaData struct {
 	values map[string]string // key -> "95%"
 	resets map[string]string // key -> "in 4h 30m"
+	labels map[string]string // dynamic slot key -> on-screen label, e.g. "claude_extra_1" -> "Fable"
 	errs   map[string]string // "claude" or "codex" -> error message
+}
+
+func newQuotaData() quotaData {
+	return quotaData{
+		values: map[string]string{},
+		resets: map[string]string{},
+		labels: map[string]string{},
+		errs:   map[string]string{},
+	}
 }
 
 func fetchQuota() quotaData {
 	timeout := 90 * time.Second
-	d := quotaData{
-		values: map[string]string{},
-		resets: map[string]string{},
-		errs:   map[string]string{},
+	d := newQuotaData()
+
+	// storeEntry copies one quota entry's display values into d under outKey.
+	storeEntry := func(e map[string]any, outKey string) {
+		if v, ok := e["left"].(int); ok {
+			d.values[outKey] = fmt.Sprintf("%d%%", v)
+		}
+		if v, ok := e["resetsIn"].(string); ok {
+			d.resets[outKey] = v
+		}
+	}
+	extract := func(data map[string]any, mapKey, outKey string) {
+		if e, ok := data[mapKey].(map[string]any); ok {
+			storeEntry(e, outKey)
+		}
 	}
 
 	type result struct {
@@ -138,32 +202,23 @@ func fetchQuota() quotaData {
 		}
 		switch r.provider {
 		case "claude":
-			extract := func(mapKey, outKey string) {
-				if s, ok := r.data[mapKey].(map[string]any); ok {
-					if v, ok := s["left"].(int); ok {
-						d.values[outKey] = fmt.Sprintf("%d%%", v)
+			extract(r.data, "session", "claude_session")
+			extract(r.data, "weeklyAll", "claude_weekly_all")
+			if extras, ok := r.data["extras"].([]map[string]any); ok {
+				for i, e := range extras {
+					if i >= claudeExtraSlots {
+						break
 					}
-					if v, ok := s["resetsIn"].(string); ok {
-						d.resets[outKey] = v
+					key := claudeExtraKey(i)
+					if lbl, ok := e["label"].(string); ok && lbl != "" {
+						d.labels[key] = lbl
 					}
+					storeEntry(e, key)
 				}
 			}
-			extract("session", "claude_session")
-			extract("weeklyAll", "claude_weekly_all")
-			extract("weeklySonnet", "claude_weekly_sonnet")
 		case "codex":
-			extract := func(mapKey, outKey string) {
-				if s, ok := r.data[mapKey].(map[string]any); ok {
-					if v, ok := s["left"].(int); ok {
-						d.values[outKey] = fmt.Sprintf("%d%%", v)
-					}
-					if v, ok := s["resetsIn"].(string); ok {
-						d.resets[outKey] = v
-					}
-				}
-			}
-			extract("fiveHour", "codex_5h")
-			extract("day", "codex_day")
+			extract(r.data, "fiveHour", "codex_5h")
+			extract(r.data, "day", "codex_day")
 		}
 	}
 
@@ -440,7 +495,12 @@ func onReady() {
 	claudeItems := []menuItem{
 		{"claude_session", systray.AddMenuItemCheckbox("Session  -", "", cfg.isSelected("claude_session"))},
 		{"claude_weekly_all", systray.AddMenuItemCheckbox("Weekly  -", "", cfg.isSelected("claude_weekly_all"))},
-		{"claude_weekly_sonnet", systray.AddMenuItemCheckbox("Sonnet  -", "", cfg.isSelected("claude_weekly_sonnet"))},
+	}
+	for i := 0; i < claudeExtraSlots; i++ {
+		key := claudeExtraKey(i)
+		mi := systray.AddMenuItemCheckbox("-", "", cfg.isSelected(key))
+		mi.Hide()
+		claudeItems = append(claudeItems, menuItem{key, mi})
 	}
 
 	// -- Codex section --
@@ -474,12 +534,11 @@ func onReady() {
 		lastSuccessAt = map[string]time.Time{}
 	)
 
-	labels := map[string]string{
-		"claude_session":       "Session",
-		"claude_weekly_all":    "Weekly",
-		"claude_weekly_sonnet": "Sonnet",
-		"codex_5h":             "5h",
-		"codex_day":            "Day",
+	staticLabels := map[string]string{
+		"claude_session":    "Session",
+		"claude_weekly_all": "Weekly",
+		"codex_5h":          "5h",
+		"codex_day":         "Day",
 	}
 
 	getStaleProviders := func() map[string]bool {
@@ -499,7 +558,18 @@ func onReady() {
 		mu.Unlock()
 
 		for _, mi := range allItems {
-			lbl := labels[mi.key]
+			lbl := staticLabels[mi.key]
+			if lbl == "" {
+				lbl = data.labels[mi.key]
+			}
+			if isClaudeExtraKey(mi.key) {
+				// Dynamic slot: no label means no such row on screen.
+				if lbl == "" {
+					mi.item.Hide()
+					continue
+				}
+				mi.item.Show()
+			}
 			val := data.values[mi.key]
 			if val == "" {
 				val = "-"
@@ -576,39 +646,60 @@ func onReady() {
 		log.Printf("refresh done")
 
 		mu.Lock()
-		// Keep last successful values for providers that failed
-		if lastOK.values != nil {
-			if _, hasErr := data.errs["claude"]; hasErr {
-				for _, k := range allKeys {
-					if strings.HasPrefix(k, "claude_") {
-						if v, ok := lastOK.values[k]; ok {
-							if _, exists := data.values[k]; !exists {
-								data.values[k] = v
-							}
-						}
-						if v, ok := lastOK.resets[k]; ok {
-							if _, exists := data.resets[k]; !exists {
-								data.resets[k] = v
-							}
-						}
+		// carryProvider fills a failed provider's missing keys from the last
+		// successful snapshot.
+		carryProvider := func(prefix string) {
+			for _, k := range allKeys {
+				if !strings.HasPrefix(k, prefix) {
+					continue
+				}
+				if v, ok := lastOK.values[k]; ok {
+					if _, exists := data.values[k]; !exists {
+						data.values[k] = v
+					}
+				}
+				if v, ok := lastOK.resets[k]; ok {
+					if _, exists := data.resets[k]; !exists {
+						data.resets[k] = v
+					}
+				}
+				if v, ok := lastOK.labels[k]; ok {
+					if _, exists := data.labels[k]; !exists {
+						data.labels[k] = v
 					}
 				}
 			}
-			if _, hasErr := data.errs["codex"]; hasErr {
-				for _, k := range allKeys {
-					if strings.HasPrefix(k, "codex_") {
-						if v, ok := lastOK.values[k]; ok {
-							if _, exists := data.values[k]; !exists {
-								data.values[k] = v
-							}
-						}
-						if v, ok := lastOK.resets[k]; ok {
-							if _, exists := data.resets[k]; !exists {
-								data.resets[k] = v
-							}
-						}
-					}
+		}
+		// snapshotProvider replaces the provider's keys in lastOK with the
+		// fresh result. Delete first so keys that vanished from the screen
+		// (e.g. a retired extras row) don't linger and resurrect on a later
+		// failed refresh.
+		snapshotProvider := func(prefix string) {
+			for _, k := range allKeys {
+				if !strings.HasPrefix(k, prefix) {
+					continue
 				}
+				delete(lastOK.values, k)
+				delete(lastOK.resets, k)
+				delete(lastOK.labels, k)
+				if v, ok := data.values[k]; ok {
+					lastOK.values[k] = v
+				}
+				if v, ok := data.resets[k]; ok {
+					lastOK.resets[k] = v
+				}
+				if v, ok := data.labels[k]; ok {
+					lastOK.labels[k] = v
+				}
+			}
+		}
+		// Keep last successful values for providers that failed
+		if lastOK.values != nil {
+			if _, hasErr := data.errs["claude"]; hasErr {
+				carryProvider("claude_")
+			}
+			if _, hasErr := data.errs["codex"]; hasErr {
+				carryProvider("codex_")
 			}
 		}
 		// Update lastOK and lastSuccessAt for successful providers
@@ -616,34 +707,16 @@ func onReady() {
 		if _, hasErr := data.errs["claude"]; !hasErr && hasProviderData(data, "claude_") {
 			lastSuccessAt["claude"] = now
 			if lastOK.values == nil {
-				lastOK = quotaData{values: map[string]string{}, resets: map[string]string{}, errs: map[string]string{}}
+				lastOK = newQuotaData()
 			}
-			for _, k := range allKeys {
-				if strings.HasPrefix(k, "claude_") {
-					if v, ok := data.values[k]; ok {
-						lastOK.values[k] = v
-					}
-					if v, ok := data.resets[k]; ok {
-						lastOK.resets[k] = v
-					}
-				}
-			}
+			snapshotProvider("claude_")
 		}
 		if _, hasErr := data.errs["codex"]; !hasErr && hasProviderData(data, "codex_") {
 			lastSuccessAt["codex"] = now
 			if lastOK.values == nil {
-				lastOK = quotaData{values: map[string]string{}, resets: map[string]string{}, errs: map[string]string{}}
+				lastOK = newQuotaData()
 			}
-			for _, k := range allKeys {
-				if strings.HasPrefix(k, "codex_") {
-					if v, ok := data.values[k]; ok {
-						lastOK.values[k] = v
-					}
-					if v, ok := data.resets[k]; ok {
-						lastOK.resets[k] = v
-					}
-				}
-			}
+			snapshotProvider("codex_")
 		}
 		mu.Unlock()
 
@@ -655,6 +728,7 @@ func onReady() {
 		c := quotaData{
 			values: make(map[string]string, len(d.values)),
 			resets: make(map[string]string, len(d.resets)),
+			labels: make(map[string]string, len(d.labels)),
 			errs:   make(map[string]string, len(d.errs)),
 		}
 		for k, v := range d.values {
@@ -662,6 +736,9 @@ func onReady() {
 		}
 		for k, v := range d.resets {
 			c.resets[k] = v
+		}
+		for k, v := range d.labels {
+			c.labels[k] = v
 		}
 		for k, v := range d.errs {
 			c.errs[k] = v
@@ -717,19 +794,22 @@ func onReady() {
 		}
 	}()
 
+	// Funnel all checkbox clicks into one channel so toggles are handled
+	// serially, alongside the other menu actions.
+	toggleCh := make(chan menuItem)
+	for _, mi := range allItems {
+		go func(mi menuItem) {
+			for range mi.item.ClickedCh {
+				toggleCh <- mi
+			}
+		}(mi)
+	}
+
 	go func() {
 		for {
 			select {
-			case <-claudeItems[0].item.ClickedCh:
-				handleToggle(claudeItems[0])
-			case <-claudeItems[1].item.ClickedCh:
-				handleToggle(claudeItems[1])
-			case <-claudeItems[2].item.ClickedCh:
-				handleToggle(claudeItems[2])
-			case <-codexItems[0].item.ClickedCh:
-				handleToggle(codexItems[0])
-			case <-codexItems[1].item.ClickedCh:
-				handleToggle(codexItems[1])
+			case mi := <-toggleCh:
+				handleToggle(mi)
 			case <-miRefresh.ClickedCh:
 				go refresh()
 			case <-miAutoStart.ClickedCh:

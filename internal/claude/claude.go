@@ -12,6 +12,14 @@ import (
 	"time"
 )
 
+// /usage settle timing: minimum grace before the first re-capture, poll
+// interval between captures, and the hard cap on total settle wait.
+const (
+	usageSettleMin  = 2 * time.Second
+	usageSettlePoll = 500 * time.Millisecond
+	usageSettleMax  = 8 * time.Second
+)
+
 // GetQuota fetches Claude Code quota via tmux automation.
 func GetQuota(timeout time.Duration) (map[string]any, error) {
 	if _, err := exec.LookPath("tmux"); err != nil {
@@ -137,11 +145,24 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 		return nil, err
 	}
 
-	// /usage rows render asynchronously; let later rows (e.g. Sonnet only)
-	// settle before re-capturing for the final parse.
-	time.Sleep(1 * time.Second)
-	if out, capErr := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", session, "-p").Output(); capErr == nil {
-		text = stripANSI(string(out))
+	// /usage rows render asynchronously; wait for the screen to settle
+	// (two consecutive captures identical) before parsing, so late rows
+	// (e.g. per-model weekly) are included. Bounded so an animated element
+	// cannot stall the fetch forever.
+	settleDeadline := time.Now().Add(usageSettleMax)
+	time.Sleep(usageSettleMin)
+	for {
+		out, capErr := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", session, "-p").Output()
+		if capErr != nil {
+			break
+		}
+		cur := stripANSI(string(out))
+		settled := cur == text
+		text = cur
+		if settled || !time.Now().Before(settleDeadline) {
+			break
+		}
+		time.Sleep(usageSettlePoll)
 	}
 
 	// Exit claude
@@ -168,81 +189,138 @@ func stripANSI(s string) string {
 	return ansiRe.ReplaceAllString(s, "")
 }
 
+// usedLineRe matches a usage bar line like "██  4% used".
+var usedLineRe = regexp.MustCompile(`(\d+)%\s*used`)
+
+// resetsLineRe matches a reset line like "Resets Jul 6 at 11:59am (Asia/Seoul)".
+var resetsLineRe = regexp.MustCompile(`(?i)^Resets?\s+(.+)`)
+
+// weeklyLabelRe extracts the model name from a weekly row label,
+// e.g. "Current week (Fable)" → "Fable".
+var weeklyLabelRe = regexp.MustCompile(`^Current week \((.+)\)$`)
+
+// parseCaptured parses the /usage screen line by line. "Current session" and
+// "Current week (all models)" are structural fixed keys; any other usage row
+// (per-model weekly quotas whose names change across model generations) is
+// returned in the "extras" array with its on-screen label.
 func parseCaptured(text string) (map[string]any, error) {
-	usedRe := regexp.MustCompile(`(\d+)%\s*used`)
-	matches := usedRe.FindAllStringSubmatchIndex(text, -1)
-	if len(matches) == 0 {
-		return nil, errors.New("could not parse claude quota from captured output")
-	}
-
-	type labelDef struct {
-		search string
-		key    string
-	}
-	labels := []labelDef{
-		{"Current session", "session"},
-		{"all models", "weeklyAll"},
-		{"Sonnet only", "weeklySonnet"},
-	}
-
-	resetsRe := regexp.MustCompile(`(?i)Resets?\s+(.+)`)
+	lines := strings.Split(text, "\n")
 
 	out := map[string]any{}
+	extras := []map[string]any{}
 	seen := map[string]bool{}
 
-	for _, m := range matches {
-		pos := m[0]
-		pctStr := text[m[2]:m[3]]
-		pct := atoi(pctStr)
-
-		start := pos - 200
-		if start < 0 {
-			start = 0
-		}
-		before := text[start:pos]
-
-		var key string
-		bestPos := -1
-		for _, l := range labels {
-			idx := strings.LastIndex(before, l.search)
-			if idx > bestPos {
-				bestPos = idx
-				key = l.key
-			}
-		}
-		if key == "" || seen[key] {
+	for i, line := range lines {
+		m := usedLineRe.FindStringSubmatchIndex(line)
+		if m == nil {
 			continue
 		}
-		seen[key] = true
+		pct := atoi(line[m[2]:m[3]])
+
+		// Label: same-line text before the bar, or the nearest line above.
+		label := stripBarChars(line[:m[0]])
+		if label == "" {
+			label = labelAbove(lines, i)
+		}
+		if label == "" {
+			continue
+		}
 
 		entry := map[string]any{"used": pct, "left": 100 - pct}
-
-		end := m[1] + 200
-		if end > len(text) {
-			end = len(text)
+		if r := resetsBelow(lines, i); r != "" {
+			entry["resetsIn"] = toRelative(r)
 		}
-		after := text[m[1]:end]
-		for _, l := range labels {
-			if idx := strings.Index(after, l.search); idx > 0 && l.key != key {
-				after = after[:idx]
+
+		switch {
+		case strings.Contains(label, "Current session"):
+			if !seen["session"] {
+				seen["session"] = true
+				out["session"] = entry
+			}
+		case strings.Contains(label, "all models"):
+			if !seen["weeklyAll"] {
+				seen["weeklyAll"] = true
+				out["weeklyAll"] = entry
+			}
+		default:
+			name := extraName(label)
+			if !seen["extra:"+name] {
+				seen["extra:"+name] = true
+				entry["label"] = name
+				extras = append(extras, entry)
 			}
 		}
-
-		if rm := resetsRe.FindStringSubmatch(after); rm != nil {
-			val := strings.TrimSpace(rm[1])
-			if len(val) > 50 {
-				val = val[:50]
-			}
-			entry["resetsIn"] = toRelative(val)
-		}
-
-		out[key] = entry
 	}
 
+	if len(extras) > 0 {
+		out["extras"] = extras
+	}
 	if len(out) == 0 {
 		return nil, errors.New("could not parse claude quota from captured output")
 	}
 	return out, nil
+}
+
+// stripBarChars removes progress-bar block characters (U+2580–U+259F) and
+// whitespace, leaving any same-line label text.
+func stripBarChars(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= 0x2580 && r <= 0x259F {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// labelAbove returns the nearest non-blank line above lines[i], which in the
+// /usage layout is the row label. Looks at most 3 lines up; a bar or Resets
+// line there means the block is malformed, so no label.
+func labelAbove(lines []string, i int) string {
+	for j := i - 1; j >= 0 && j >= i-3; j-- {
+		t := strings.TrimSpace(lines[j])
+		if t == "" {
+			continue
+		}
+		if usedLineRe.MatchString(t) || resetsLineRe.MatchString(t) {
+			return ""
+		}
+		return t
+	}
+	return ""
+}
+
+// resetsBelow returns the reset text from the nearest non-blank line below
+// lines[i], or "" if that line is not a Resets row.
+func resetsBelow(lines []string, i int) string {
+	for j := i + 1; j < len(lines) && j <= i+3; j++ {
+		t := strings.TrimSpace(lines[j])
+		if t == "" {
+			continue
+		}
+		rm := resetsLineRe.FindStringSubmatch(t)
+		if rm == nil {
+			return ""
+		}
+		val := strings.TrimSpace(rm[1])
+		if len(val) > 50 {
+			val = val[:50]
+		}
+		return val
+	}
+	return ""
+}
+
+// extraName returns the display name for a dynamic quota row: the text inside
+// "Current week (...)" when present, otherwise the label as shown on screen.
+func extraName(label string) string {
+	if m := weeklyLabelRe.FindStringSubmatch(label); m != nil {
+		if name := strings.TrimSpace(m[1]); name != "" {
+			return name
+		}
+	}
+	return label
 }
 
 // toRelative converts a resets string to relative time.

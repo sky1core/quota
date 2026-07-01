@@ -21,26 +21,34 @@ func Text(payload map[string]any) string {
 
 	var b strings.Builder
 
+	writeEntry := func(label string, v map[string]any) {
+		it := item{label: label}
+		if left, ok := v["left"].(int); ok {
+			it.left = fmt.Sprintf("%d%%", left)
+		}
+		if r, ok := v["resetsIn"].(string); ok {
+			it.resets = r
+		}
+		b.WriteString(fmtLine(it))
+	}
+
 	b.WriteString("Claude\n")
 	if m, ok := claude.(map[string]any); ok {
-		labels := map[string]string{
-			"session":      "Session",
-			"weeklyAll":    "Weekly",
-			"weeklySonnet": "Sonnet",
+		fixed := []struct{ key, label string }{
+			{"session", "Session"},
+			{"weeklyAll", "Weekly"},
 		}
-		for _, k := range []string{"session", "weeklyAll", "weeklySonnet"} {
-			v, ok := m[k].(map[string]any)
-			if !ok {
-				continue
+		for _, f := range fixed {
+			if v, ok := m[f.key].(map[string]any); ok {
+				writeEntry(f.label, v)
 			}
-			it := item{label: labels[k]}
-			if left, ok := v["left"].(int); ok {
-				it.left = fmt.Sprintf("%d%%", left)
+		}
+		if extras, ok := m["extras"].([]map[string]any); ok {
+			for _, e := range extras {
+				if lbl, ok := e["label"].(string); ok && lbl != "" {
+					writeEntry(lbl, e)
+				}
 			}
-			if r, ok := v["resetsIn"].(string); ok {
-				it.resets = r
-			}
-			b.WriteString(fmtLine(it))
 		}
 	} else {
 		b.WriteString("  (no data)\n")
@@ -53,18 +61,9 @@ func Text(payload map[string]any) string {
 			{"day", "Day"},
 		}
 		for _, ci := range codexItems {
-			v, ok := m[ci.key].(map[string]any)
-			if !ok {
-				continue
+			if v, ok := m[ci.key].(map[string]any); ok {
+				writeEntry(ci.label, v)
 			}
-			it := item{label: ci.label}
-			if left, ok := v["left"].(int); ok {
-				it.left = fmt.Sprintf("%d%%", left)
-			}
-			if r, ok := v["resetsIn"].(string); ok {
-				it.resets = r
-			}
-			b.WriteString(fmtLine(it))
 		}
 	} else {
 		b.WriteString("  (no data)\n")

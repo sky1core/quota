@@ -172,9 +172,11 @@ func TestText_TimestampFormat(t *testing.T) {
 func TestText_FullPayload(t *testing.T) {
 	payload := map[string]any{
 		"claude": map[string]any{
-			"session":      map[string]any{"left": 80, "resetsIn": "2h"},
-			"weeklyAll":    map[string]any{"left": 85, "resetsIn": "5d"},
-			"weeklySonnet": map[string]any{"left": 100},
+			"session":   map[string]any{"left": 80, "resetsIn": "2h"},
+			"weeklyAll": map[string]any{"left": 85, "resetsIn": "5d"},
+			"extras": []map[string]any{
+				{"label": "Fable", "left": 100},
+			},
 		},
 		"codex": map[string]any{
 			"fiveHour": map[string]any{"left": 90, "resetsIn": "3h"},
@@ -193,14 +195,28 @@ func TestText_FullPayload(t *testing.T) {
 	if strings.Contains(got, "(no data)") {
 		t.Error("should not show (no data) when data exists")
 	}
-	// All three claude rows present
-	for _, lbl := range []string{"Session", "Weekly", "Sonnet"} {
+	// All three claude rows present; extras use their on-screen label
+	for _, lbl := range []string{"Session", "Weekly", "Fable"} {
 		if !strings.Contains(got, lbl) {
 			t.Errorf("missing claude row %q", lbl)
 		}
 	}
-	// Extra row should not be rendered
-	if strings.Contains(got, "Extra") {
-		t.Error("Extra row should not be present")
+	if !strings.Contains(got, "100%") {
+		t.Error("missing extras value")
+	}
+}
+
+func TestText_ExtrasWithoutLabelSkipped(t *testing.T) {
+	payload := map[string]any{
+		"claude": map[string]any{
+			"session": map[string]any{"left": 80},
+			"extras": []map[string]any{
+				{"left": 55}, // no label → skipped
+			},
+		},
+	}
+	got := Text(payload)
+	if strings.Contains(got, "55%") {
+		t.Errorf("label-less extra should be skipped: %q", got)
 	}
 }

@@ -42,9 +42,11 @@ github.com/sky1core/quota
 
 ```json
 {
-  "session":      { "used": 5, "left": 95, "resetsIn": "4h 30m" },
-  "weeklyAll":    { "used": 10, "left": 90, "resetsIn": "2d 5h" },
-  "weeklySonnet": { "used": 20, "left": 80 }
+  "session":   { "used": 5, "left": 95, "resetsIn": "4h 30m" },
+  "weeklyAll": { "used": 10, "left": 90, "resetsIn": "2d 5h" },
+  "extras": [
+    { "label": "Fable", "used": 20, "left": 80, "resetsIn": "2d 5h" }
+  ]
 }
 ```
 
@@ -52,6 +54,13 @@ github.com/sky1core/quota
 - `used` (int): 사용 퍼센트 (0–100)
 - `left` (int): 남은 퍼센트 (100 - used)
 - `resetsIn` (string, optional): 리셋까지 남은 시간 (예: `4h 30m`, `2d 5h`)
+
+`session`(Current session)과 `weeklyAll`(Current week (all models))은 구조적 고정 키다.
+그 외의 `/usage` 행은 모델 세대에 따라 라벨이 바뀌므로(예: `Sonnet only` → `Fable`)
+고정 키 대신 `extras` 배열(`[]map[string]any`)로 반환한다:
+- `label` (string): 화면에 표시된 라벨. `Current week (X)` 형식이면 괄호 안 `X`, 아니면 라벨 줄 전체
+- 화면 표시 순서를 유지한다
+- 같은 라벨이 중복 등장하면 첫 항목만 채택
 
 ### Codex quota
 
@@ -131,7 +140,7 @@ github.com/sky1core/quota
 ── Claude ──
 ☐ Session 95% (4h 30m)
 ☐ Weekly 90% (2d 5h)
-☐ Sonnet 80%
+☐ Fable 80%
 ── Codex ──
 ☑ 5h 85% (2h 30m)
 ☐ Day 70% (18h 5m)
@@ -147,10 +156,18 @@ Quit
 - 에러 발생 시 해당 LLM 영역에 에러 메시지 표시
 - 마지막 갱신 시간은 하단에 표시
 
+**Claude 동적 슬롯 (extras)**:
+- Claude 섹션의 `Session`/`Weekly`는 고정 항목, 그 아래에 동적 슬롯 3개(`claude_extra_1`~`claude_extra_3`)를 숨김 상태로 미리 만든다 (systray는 런타임 항목 제거 불가).
+- `extras` 배열의 항목을 순서대로 슬롯에 채우고, 라벨은 화면에서 읽은 `label`을 그대로 쓴다. 데이터 없는 슬롯은 숨긴다.
+- 설정 저장 키는 슬롯 위치 기준(`claude_extra_N`)이다 — 모델명이 바뀌어도 체크 선택이 유지된다.
+- 3개를 초과하는 extras는 표시하지 않는다.
+
 **설정 파일**: `~/.config/quota/quota-bar.json`
 ```json
 { "selected": ["codex_5h", "claude_session"] }
 ```
+
+- 마이그레이션: 로드 시 구 키 `claude_weekly_sonnet`이 있으면 `claude_extra_1`로 1회 치환 후 저장한다 (중복 제거 포함).
 
 **에러 처리**:
 - refresh 실패 시 이전 성공 데이터(lastOK)를 유지하고 에러 메시지만 표시
@@ -185,19 +202,24 @@ Quit
 2. 스플래시(`Claude Code`) 등장까지 폴링 → Enter (초기 prompt 해제)
 3. `/usage` 입력 → Enter
 4. `% used` 와 `Esc to cancel` 이 모두 보일 때까지 폴링 (또는 `Error:` 검출 시 즉시 진행)
-5. 1초 대기 — `/usage` 화면 행이 비동기로 그려지므로 후행 행(예: Sonnet only)이 settle하도록 추가 sleep
-6. `tmux capture-pane -t SESSION -p`로 재캡처 (이 결과를 파싱에 사용)
+5. settle 대기 — `/usage` 화면 행이 비동기로 그려지므로 최소 2초 대기 후 500ms 간격으로 재캡처하며,
+   연속 두 캡처가 동일해질 때까지 폴링한다 (최대 8초 상한, 애니메이션으로 인한 무한 대기 방지)
+6. 마지막 캡처 결과를 파싱에 사용
 7. ANSI 코드 제거 → `parseCaptured()` 로 파싱
 8. Escape → `/exit` → Enter → `tmux kill-session` 클린업
 
-**파싱 로직** (`parseCaptured`):
-- `\d+% used` 패턴을 모두 찾음
-- 각 매치에서 200자 이전 텍스트에서 가장 가까운 라벨 매칭:
-  - "Current session" → session
-  - "all models" → weeklyAll
-  - "Sonnet only" → weeklySonnet
-- 매치 이후 200자에서 resets 정보 추출 (`toRelative`로 상대시간 정규화)
-- 일부 라벨이 화면에 없거나 매칭이 일부만 되어도 매치된 항목만 반환 (부분 결과 허용)
+**파싱 로직** (`parseCaptured`) — 줄 단위 파싱:
+- `\d+% used` 를 포함한 줄을 모두 찾음 (진행 바 줄)
+- 라벨 결정 (순서대로):
+  1. 같은 줄에서 매치 앞부분의 바 문자(U+2580–U+259F)와 공백을 제거한 나머지 텍스트
+  2. 없으면 위쪽으로 가장 가까운 비어있지 않은 줄 (최대 3줄, 바/Resets 줄이면 무효)
+- 라벨 분류:
+  - `Current session` 포함 → `session`
+  - `all models` 포함 → `weeklyAll`
+  - 그 외 → `extras` 항목. 이름은 `Current week (X)` 형식이면 `X`, 아니면 라벨 전체
+- resets: 진행 바 줄 아래쪽으로 가장 가까운 비어있지 않은 줄이 `Resets ...` 형식이면 추출 (`toRelative`로 상대시간 정규화)
+- 일부 행이 화면에 없거나 매칭이 일부만 되어도 매치된 항목만 반환 (부분 결과 허용)
+- 하단 "What's contributing" 섹션의 `NN% of ...` 텍스트는 `% used` 패턴이 아니므로 매치되지 않는다
 
 ### internal/codex
 

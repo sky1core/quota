@@ -1,6 +1,6 @@
 module github.com/sky1core/quota
 
-go 1.25.8
+go 1.25.11
 
 require github.com/getlantern/systray v1.2.2
 

@@ -172,18 +172,19 @@ Sonnet only          0% used
 		t.Errorf("weeklyAll used = %v, want 20", weekly["used"])
 	}
 
-	// weeklySonnet
-	sonnet, ok := result["weeklySonnet"].(map[string]any)
+	// third row is a dynamic extra with its on-screen label
+	extras, ok := result["extras"].([]map[string]any)
 	if !ok {
-		t.Fatal("missing weeklySonnet")
+		t.Fatal("missing extras")
 	}
-	if sonnet["used"] != 0 {
-		t.Errorf("weeklySonnet used = %v, want 0", sonnet["used"])
+	if len(extras) != 1 {
+		t.Fatalf("extras len = %d, want 1", len(extras))
 	}
-
-	// extra should not be parsed
-	if _, ok := result["extra"]; ok {
-		t.Error("extra should not be present after parsing change")
+	if extras[0]["label"] != "Sonnet only" {
+		t.Errorf("extras[0] label = %v, want Sonnet only", extras[0]["label"])
+	}
+	if extras[0]["used"] != 0 {
+		t.Errorf("extras[0] used = %v, want 0", extras[0]["used"])
 	}
 }
 
@@ -265,12 +266,167 @@ func TestParseCaptured_UsageCommand(t *testing.T) {
 	if weekly["used"] != 83 {
 		t.Errorf("weeklyAll used=%v, want 83", weekly["used"])
 	}
-	sonnet, ok := result["weeklySonnet"].(map[string]any)
+	extras, ok := result["extras"].([]map[string]any)
 	if !ok {
-		t.Fatal("missing weeklySonnet")
+		t.Fatal("missing extras")
 	}
-	if sonnet["used"] != 1 {
-		t.Errorf("weeklySonnet used=%v, want 1", sonnet["used"])
+	if len(extras) != 1 {
+		t.Fatalf("extras len = %d, want 1", len(extras))
+	}
+	if extras[0]["label"] != "Sonnet only" {
+		t.Errorf("extras[0] label = %v, want Sonnet only", extras[0]["label"])
+	}
+	if extras[0]["used"] != 1 {
+		t.Errorf("extras[0] used=%v, want 1", extras[0]["used"])
+	}
+	if _, ok := extras[0]["resetsIn"].(string); !ok {
+		t.Error("extras[0] should have resetsIn")
+	}
+}
+
+func TestParseCaptured_UsageFableCapture(t *testing.T) {
+	// Actual output from `/usage` (captured 2026-07-02): third row label
+	// changed from "Current week (Sonnet only)" to "Current week (Fable)".
+	// Includes the full screen to prove the bottom "% of usage" section
+	// does not produce false matches.
+	input := `
+ ▐▛███▜▌   Claude Code v2.1.198
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Settings  Status   Config   Usage   Stats
+
+   Session
+
+   Total cost:            $0.0000
+   Total duration (API):  0s
+   Total duration (wall): 1s
+   Total code changes:    0 lines added, 0 lines removed
+   Usage:                 0 input, 0 output, 0 cache read, 0 cache write
+
+   Current session
+   ██                                                 4% used
+   Resets 12:09pm (Asia/Seoul)
+
+   Current week (all models)
+   ▌                                                  1% used
+   Resets Jul 6 at 11:59am (Asia/Seoul)
+
+   Current week (Fable)
+   █                                                  2% used
+   Resets Jul 6 at 11:59am (Asia/Seoul)
+
+   What's contributing to your limits usage?
+   Approximate, based on local sessions on this machine — does not include other devices or claude.ai
+
+   Last 24h · these are independent characteristics of your usage, not a breakdown
+
+   20% of your usage came from /donas
+    Heavy skills can be scoped down or run with a cheaper model via skill
+    frontmatter.
+
+   Skills                  % of usage
+   /donas                         20%
+
+   d to day · w to week
+
+   Esc to cancel`
+	result, err := parseCaptured(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	session, ok := result["session"].(map[string]any)
+	if !ok {
+		t.Fatal("missing session")
+	}
+	if session["used"] != 4 || session["left"] != 96 {
+		t.Errorf("session: used=%v left=%v, want 4/96", session["used"], session["left"])
+	}
+	if r, ok := session["resetsIn"].(string); !ok || strings.Contains(r, "pm") {
+		t.Errorf("session resetsIn should be relative, got %v", session["resetsIn"])
+	}
+
+	weekly, ok := result["weeklyAll"].(map[string]any)
+	if !ok {
+		t.Fatal("missing weeklyAll")
+	}
+	if weekly["used"] != 1 {
+		t.Errorf("weeklyAll used=%v, want 1", weekly["used"])
+	}
+
+	extras, ok := result["extras"].([]map[string]any)
+	if !ok {
+		t.Fatal("missing extras")
+	}
+	if len(extras) != 1 {
+		t.Fatalf("extras len = %d, want 1 (bottom section must not match)", len(extras))
+	}
+	if extras[0]["label"] != "Fable" {
+		t.Errorf("extras[0] label = %v, want Fable", extras[0]["label"])
+	}
+	if extras[0]["used"] != 2 || extras[0]["left"] != 98 {
+		t.Errorf("extras[0]: used=%v left=%v, want 2/98", extras[0]["used"], extras[0]["left"])
+	}
+	if _, ok := extras[0]["resetsIn"].(string); !ok {
+		t.Error("extras[0] should have resetsIn")
+	}
+}
+
+func TestParseCaptured_MultipleExtras(t *testing.T) {
+	input := `
+   Current session
+   ██                                                 4% used
+   Resets 12:09pm (Asia/Seoul)
+
+   Current week (all models)
+   ▌                                                  1% used
+   Resets Jul 6 at 11:59am (Asia/Seoul)
+
+   Current week (Fable)
+   █                                                  2% used
+   Resets Jul 6 at 11:59am (Asia/Seoul)
+
+   Current week (Opus)
+   █████                                              10% used
+
+   Esc to cancel`
+	result, err := parseCaptured(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	extras, ok := result["extras"].([]map[string]any)
+	if !ok {
+		t.Fatal("missing extras")
+	}
+	if len(extras) != 2 {
+		t.Fatalf("extras len = %d, want 2", len(extras))
+	}
+	// Screen order preserved
+	if extras[0]["label"] != "Fable" || extras[1]["label"] != "Opus" {
+		t.Errorf("extras order = %v, %v; want Fable, Opus", extras[0]["label"], extras[1]["label"])
+	}
+	if extras[1]["used"] != 10 {
+		t.Errorf("extras[1] used = %v, want 10", extras[1]["used"])
+	}
+	if _, ok := extras[1]["resetsIn"]; ok {
+		t.Error("extras[1] has no Resets row, resetsIn should be absent")
+	}
+}
+
+func TestExtraName(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"Current week (Fable)", "Fable"},
+		{"Current week (Sonnet only)", "Sonnet only"},
+		// degenerate empty parens must not yield an empty label
+		{"Current week (   )", "Current week (   )"},
+		{"Some other row", "Some other row"},
+	}
+	for _, tt := range tests {
+		got := extraName(tt.in)
+		if got != tt.want {
+			t.Errorf("extraName(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }
 

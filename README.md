@@ -51,6 +51,27 @@ Codex
 Generated: 2026-02-28T23:06:50+09:00
 ```
 
+#### 여러 Claude 계정 조회 (선택)
+
+Claude 계정은 `CLAUDE_CONFIG_DIR`로 구분된다. 기본 계정 외에 추가 계정을 함께 보려면
+`account` 서브커맨드로 등록한다 (파일을 직접 편집할 필요 없음):
+
+```bash
+quota-cli account add claude-2 ~/.claude-2   # 계정 등록
+quota-cli account list                       # 등록된 계정 확인
+quota-cli account rm claude-2                # 계정 제거
+```
+
+- `key`(`claude-2`)는 `claude-<N>` 형식이어야 한다(소비자가 추가 provider로 인식). 형식·중복은 `add`가 검증한다.
+- `configDir`(`~/.claude-2`)는 해당 계정의 Claude config 디렉터리다(`~` 확장 지원).
+
+등록하면 `quota-cli`가 기본 계정과 추가 계정을 함께 조회해 각각 `claude`, `claude-2` … 로 출력한다.
+설정은 `~/.config/quota/config.json`에 저장되며, 직접 편집해도 된다:
+
+```json
+{ "claudeAccounts": [ { "key": "claude-2", "configDir": "~/.claude-2" } ] }
+```
+
 ### quota-bar
 
 ```bash
@@ -58,6 +79,10 @@ quota-bar
 ```
 
 메뉴바에서 항목을 체크하면 상단 바에 남은 %를 표시.
+
+`quota-cli account add`로 추가 계정을 등록해 두면, quota-bar도 계정별 그룹(`Claude`, `Claude 2`, …)으로
+나눠 표시한다. quota-cli와 같은 `config.json`을 공유한다. 단, systray는 런타임에 메뉴 항목을 바꿀 수
+없으므로 **계정 목록 변경은 quota-bar 재시작 후 반영**된다.
 
 사용자 활동에 따라 갱신 주기가 자동 조절된다:
 - 활성 사용 중: 3분

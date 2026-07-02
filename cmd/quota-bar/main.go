@@ -17,6 +17,7 @@ import (
 
 	"github.com/sky1core/quota/internal/claude"
 	"github.com/sky1core/quota/internal/codex"
+	"github.com/sky1core/quota/internal/config"
 	"github.com/sky1core/quota/internal/idle"
 	"github.com/sky1core/quota/internal/ui"
 )
@@ -31,29 +32,34 @@ const (
 	staleThreshold = 35 * time.Minute // > refreshIdle to avoid false stale during idle
 )
 
-// claudeExtraSlots is the number of pre-allocated menu slots for dynamic
-// Claude usage rows (per-model weekly quotas whose labels change across
-// model generations). systray cannot remove items at runtime, so unused
-// slots stay hidden.
+// claudeExtraSlots is the number of pre-allocated menu slots per Claude account
+// for dynamic usage rows (per-model weekly quotas whose labels change across
+// model generations). systray cannot remove items at runtime, so unused slots
+// stay hidden.
 const claudeExtraSlots = 3
 
-func claudeExtraKey(i int) string {
-	return fmt.Sprintf("claude_extra_%d", i+1)
+// Menu item keys are "<provider>_<suffix>" where provider is an account key
+// ("claude", "claude-2", …) or "codex". Account keys match ^claude-\d+$, so
+// they never contain "_"; the first "_" always separates provider from suffix.
+// The default account keeps the historical keys ("claude_session",
+// "claude_weekly_all", "claude_extra_1"..) so existing quota-bar.json selections
+// stay valid.
+
+// itemKey builds a menu key for a provider and fixed suffix, e.g.
+// itemKey("claude-2", "session") == "claude-2_session".
+func itemKey(provider, suffix string) string {
+	return provider + "_" + suffix
 }
 
+// extraItemKey builds the key for a Claude account's i-th (0-based) dynamic
+// extra slot, e.g. extraItemKey("claude", 0) == "claude_extra_1".
+func extraItemKey(provider string, i int) string {
+	return fmt.Sprintf("%s_extra_%d", provider, i+1)
+}
+
+// isClaudeExtraKey reports whether key is a dynamic extra slot for any account.
 func isClaudeExtraKey(key string) bool {
-	return strings.HasPrefix(key, "claude_extra_")
-}
-
-// menu item keys in display order
-var allKeys = []string{
-	"claude_session",
-	"claude_weekly_all",
-	"claude_extra_1",
-	"claude_extra_2",
-	"claude_extra_3",
-	"codex_5h",
-	"codex_day",
+	return strings.Contains(key, "_extra_")
 }
 
 type settings struct {
@@ -146,7 +152,7 @@ type quotaData struct {
 	values map[string]string // key -> "95%"
 	resets map[string]string // key -> "in 4h 30m"
 	labels map[string]string // dynamic slot key -> on-screen label, e.g. "claude_extra_1" -> "Fable"
-	errs   map[string]string // "claude" or "codex" -> error message
+	errs   map[string]string // provider key (account key or "codex") -> error message
 }
 
 func newQuotaData() quotaData {
@@ -158,7 +164,13 @@ func newQuotaData() quotaData {
 	}
 }
 
-func fetchQuota() quotaData {
+// fetchQuota queries every Claude account plus Codex in parallel and stores the
+// results under per-provider keys. Claude accounts write "<key>_session",
+// "<key>_weekly_all", and "<key>_extra_N" (+ label); Codex writes "codex_5h" /
+// "codex_day". A provider's failure is recorded under d.errs[<provider key>].
+// Fetches run concurrently; results are consumed serially from a buffered
+// channel, so the store maps are only ever touched by this goroutine.
+func fetchQuota(accounts []config.ResolvedAccount) quotaData {
 	timeout := 90 * time.Second
 	d := newQuotaData()
 
@@ -178,45 +190,48 @@ func fetchQuota() quotaData {
 	}
 
 	type result struct {
-		provider string
+		provider string // account key ("claude", "claude-2", …) or "codex"
+		claude   bool
 		data     map[string]any
 		err      error
 	}
-	ch := make(chan result, 2)
+	ch := make(chan result, len(accounts)+1)
 
-	go func() {
-		cq, err := claude.GetQuota(timeout)
-		ch <- result{"claude", cq, err}
-	}()
+	for _, a := range accounts {
+		go func(a config.ResolvedAccount) {
+			cq, err := claude.GetQuotaForConfigDir(timeout, a.ConfigDir)
+			ch <- result{provider: a.Key, claude: true, data: cq, err: err}
+		}(a)
+	}
 	go func() {
 		kq, err := codex.GetQuota(timeout)
-		ch <- result{"codex", kq, err}
+		ch <- result{provider: "codex", claude: false, data: kq, err: err}
 	}()
 
-	for i := 0; i < 2; i++ {
+	total := len(accounts) + 1
+	for i := 0; i < total; i++ {
 		r := <-ch
 		if r.err != nil {
 			log.Printf("fetch %s error: %v", r.provider, r.err)
 			d.errs[r.provider] = r.err.Error()
 			continue
 		}
-		switch r.provider {
-		case "claude":
-			extract(r.data, "session", "claude_session")
-			extract(r.data, "weeklyAll", "claude_weekly_all")
+		if r.claude {
+			extract(r.data, "session", itemKey(r.provider, "session"))
+			extract(r.data, "weeklyAll", itemKey(r.provider, "weekly_all"))
 			if extras, ok := r.data["extras"].([]map[string]any); ok {
-				for i, e := range extras {
-					if i >= claudeExtraSlots {
+				for j, e := range extras {
+					if j >= claudeExtraSlots {
 						break
 					}
-					key := claudeExtraKey(i)
+					key := extraItemKey(r.provider, j)
 					if lbl, ok := e["label"].(string); ok && lbl != "" {
 						d.labels[key] = lbl
 					}
 					storeEntry(e, key)
 				}
 			}
-		case "codex":
+		} else {
 			extract(r.data, "fiveHour", "codex_5h")
 			extract(r.data, "day", "codex_day")
 		}
@@ -226,7 +241,7 @@ func fetchQuota() quotaData {
 }
 
 // iconPct returns the lowest percentage among selected items, or 50 if none.
-func iconPct(cfg settings, data quotaData) int {
+func iconPct(cfg settings, data quotaData, allKeys []string) int {
 	min := -1
 	for _, key := range allKeys {
 		if cfg.isSelected(key) {
@@ -246,7 +261,7 @@ func iconPct(cfg settings, data quotaData) int {
 }
 
 // hasProviderData returns true if quotaData has at least one value for the given prefix.
-func hasProviderData(d quotaData, prefix string) bool {
+func hasProviderData(d quotaData, prefix string, allKeys []string) bool {
 	for _, k := range allKeys {
 		if strings.HasPrefix(k, prefix) {
 			if _, ok := d.values[k]; ok {
@@ -257,15 +272,14 @@ func hasProviderData(d quotaData, prefix string) bool {
 	return false
 }
 
-// providerOf returns "claude" or "codex" for a given key.
+// providerOf returns the provider portion of a menu key: the text before the
+// first "_". Account keys (^claude-\d+$) and "codex" contain no "_", so
+// "claude_session"→"claude", "claude-2_extra_1"→"claude-2", "codex_5h"→"codex".
 func providerOf(key string) string {
-	if strings.HasPrefix(key, "claude_") {
-		return "claude"
-	}
-	return "codex"
+	return strings.SplitN(key, "_", 2)[0]
 }
 
-func barTitle(cfg settings, data quotaData, staleProviders map[string]bool) string {
+func barTitle(cfg settings, data quotaData, staleProviders map[string]bool, allKeys []string) string {
 	var parts []string
 	for _, key := range allKeys {
 		if cfg.isSelected(key) {
@@ -484,39 +498,80 @@ func onReady() {
 
 	cfg := loadSettings()
 
-	// -- Claude section --
-	miClaudeHeader := systray.AddMenuItem("── Claude ──", "")
-	miClaudeHeader.Disable()
-
-	miClaudeErr := systray.AddMenuItem("", "")
-	miClaudeErr.Hide()
-	miClaudeErr.Disable()
-
-	claudeItems := []menuItem{
-		{"claude_session", systray.AddMenuItemCheckbox("Session  -", "", cfg.isSelected("claude_session"))},
-		{"claude_weekly_all", systray.AddMenuItemCheckbox("Weekly  -", "", cfg.isSelected("claude_weekly_all"))},
+	// Resolve the Claude accounts to show. systray cannot add or remove menu
+	// items at runtime, so the account set (and therefore the menu layout) is
+	// fixed here at onReady from the config as it exists now. Editing
+	// ~/.config/quota/config.json requires restarting quota-bar to take effect.
+	appCfg, cfgErr := config.Load()
+	if cfgErr != nil {
+		log.Printf("config load: %v (default account only)", cfgErr)
 	}
-	for i := 0; i < claudeExtraSlots; i++ {
-		key := claudeExtraKey(i)
-		mi := systray.AddMenuItemCheckbox("-", "", cfg.isSelected(key))
-		mi.Hide()
-		claudeItems = append(claudeItems, menuItem{key, mi})
+	accounts, skipped := appCfg.ResolveAccounts()
+	for _, s := range skipped {
+		log.Printf("config: %s", s)
+	}
+
+	// providers lists every provider key in refresh/stale order: each Claude
+	// account key followed by "codex".
+	providers := make([]string, 0, len(accounts)+1)
+	for _, a := range accounts {
+		providers = append(providers, a.Key)
+	}
+	providers = append(providers, "codex")
+
+	var (
+		allItems     []menuItem                       // every checkbox row, in display order
+		allKeys      []string                         // every menu key, in display order
+		errItems     = map[string]*systray.MenuItem{} // provider key -> hidden error row
+		staticLabels = map[string]string{}            // fixed-label keys -> on-screen label
+	)
+
+	// -- Per-account Claude sections --
+	for _, a := range accounts {
+		header := systray.AddMenuItem("── "+a.Label+" ──", "")
+		header.Disable()
+
+		errItem := systray.AddMenuItem("", "")
+		errItem.Hide()
+		errItem.Disable()
+		errItems[a.Key] = errItem
+
+		sessionKey := itemKey(a.Key, "session")
+		weeklyKey := itemKey(a.Key, "weekly_all")
+		staticLabels[sessionKey] = "Session"
+		staticLabels[weeklyKey] = "Weekly"
+
+		allItems = append(allItems,
+			menuItem{sessionKey, systray.AddMenuItemCheckbox("Session  -", "", cfg.isSelected(sessionKey))},
+			menuItem{weeklyKey, systray.AddMenuItemCheckbox("Weekly  -", "", cfg.isSelected(weeklyKey))},
+		)
+		allKeys = append(allKeys, sessionKey, weeklyKey)
+
+		for i := 0; i < claudeExtraSlots; i++ {
+			key := extraItemKey(a.Key, i)
+			mi := systray.AddMenuItemCheckbox("-", "", cfg.isSelected(key))
+			mi.Hide()
+			allItems = append(allItems, menuItem{key, mi})
+			allKeys = append(allKeys, key)
+		}
 	}
 
 	// -- Codex section --
-	miCodexHeader := systray.AddMenuItem("── Codex ──", "")
-	miCodexHeader.Disable()
+	codexHeader := systray.AddMenuItem("── Codex ──", "")
+	codexHeader.Disable()
 
-	miCodexErr := systray.AddMenuItem("", "")
-	miCodexErr.Hide()
-	miCodexErr.Disable()
+	codexErr := systray.AddMenuItem("", "")
+	codexErr.Hide()
+	codexErr.Disable()
+	errItems["codex"] = codexErr
 
-	codexItems := []menuItem{
-		{"codex_5h", systray.AddMenuItemCheckbox("5h: -", "", cfg.isSelected("codex_5h"))},
-		{"codex_day", systray.AddMenuItemCheckbox("Day: -", "", cfg.isSelected("codex_day"))},
-	}
-
-	allItems := append(claudeItems, codexItems...)
+	staticLabels["codex_5h"] = "5h"
+	staticLabels["codex_day"] = "Day"
+	allItems = append(allItems,
+		menuItem{"codex_5h", systray.AddMenuItemCheckbox("5h: -", "", cfg.isSelected("codex_5h"))},
+		menuItem{"codex_day", systray.AddMenuItemCheckbox("Day: -", "", cfg.isSelected("codex_day"))},
+	)
+	allKeys = append(allKeys, "codex_5h", "codex_day")
 
 	systray.AddSeparator()
 	miUpdated := systray.AddMenuItem("Not yet updated", "")
@@ -534,17 +589,10 @@ func onReady() {
 		lastSuccessAt = map[string]time.Time{}
 	)
 
-	staticLabels := map[string]string{
-		"claude_session":    "Session",
-		"claude_weekly_all": "Weekly",
-		"codex_5h":          "5h",
-		"codex_day":         "Day",
-	}
-
 	getStaleProviders := func() map[string]bool {
 		now := time.Now()
 		sp := map[string]bool{}
-		for _, p := range []string{"claude", "codex"} {
+		for _, p := range providers {
 			if t, ok := lastSuccessAt[p]; ok && now.Sub(t) > staleThreshold {
 				sp[p] = true
 			}
@@ -585,31 +633,24 @@ func onReady() {
 			}
 		}
 
-		if e, ok := data.errs["claude"]; ok {
-			if len(e) > 120 {
-				e = e[:120] + "…"
+		// One error row per provider (each Claude account + codex).
+		for prov, item := range errItems {
+			if e, ok := data.errs[prov]; ok {
+				if len(e) > 120 {
+					e = e[:120] + "…"
+				}
+				item.SetTitle("  Error: " + e)
+				item.Show()
+			} else {
+				item.Hide()
 			}
-			miClaudeErr.SetTitle("  Error: " + e)
-			miClaudeErr.Show()
-		} else {
-			miClaudeErr.Hide()
-		}
-
-		if e, ok := data.errs["codex"]; ok {
-			if len(e) > 120 {
-				e = e[:120] + "…"
-			}
-			miCodexErr.SetTitle("  Error: " + e)
-			miCodexErr.Show()
-		} else {
-			miCodexErr.Hide()
 		}
 
 		mu.Lock()
 		cfgSnap := cfg
 		mu.Unlock()
-		systray.SetTitle(barTitle(cfgSnap, data, stale))
-		iconData := ui.GenIcon(iconPct(cfgSnap, data))
+		systray.SetTitle(barTitle(cfgSnap, data, stale, allKeys))
+		iconData := ui.GenIcon(iconPct(cfgSnap, data, allKeys))
 		systray.SetTemplateIcon(iconData, iconData)
 
 		updatedText := "Updated " + time.Now().Format("15:04")
@@ -642,12 +683,13 @@ func onReady() {
 		}()
 
 		log.Printf("refresh start")
-		data := fetchQuota()
+		data := fetchQuota(accounts)
 		log.Printf("refresh done")
 
 		mu.Lock()
 		// carryProvider fills a failed provider's missing keys from the last
-		// successful snapshot.
+		// successful snapshot. prefix is exactly "<provider>_"; since account
+		// keys never contain "_", "claude_" cannot match "claude-2_" rows.
 		carryProvider := func(prefix string) {
 			for _, k := range allKeys {
 				if !strings.HasPrefix(k, prefix) {
@@ -693,30 +735,24 @@ func onReady() {
 				}
 			}
 		}
-		// Keep last successful values for providers that failed
+		// Keep last successful values for providers that failed this round.
 		if lastOK.values != nil {
-			if _, hasErr := data.errs["claude"]; hasErr {
-				carryProvider("claude_")
-			}
-			if _, hasErr := data.errs["codex"]; hasErr {
-				carryProvider("codex_")
+			for _, p := range providers {
+				if _, hasErr := data.errs[p]; hasErr {
+					carryProvider(p + "_")
+				}
 			}
 		}
-		// Update lastOK and lastSuccessAt for successful providers
+		// Update lastOK and lastSuccessAt for providers that succeeded.
 		now := time.Now()
-		if _, hasErr := data.errs["claude"]; !hasErr && hasProviderData(data, "claude_") {
-			lastSuccessAt["claude"] = now
-			if lastOK.values == nil {
-				lastOK = newQuotaData()
+		for _, p := range providers {
+			if _, hasErr := data.errs[p]; !hasErr && hasProviderData(data, p+"_", allKeys) {
+				lastSuccessAt[p] = now
+				if lastOK.values == nil {
+					lastOK = newQuotaData()
+				}
+				snapshotProvider(p + "_")
 			}
-			snapshotProvider("claude_")
-		}
-		if _, hasErr := data.errs["codex"]; !hasErr && hasProviderData(data, "codex_") {
-			lastSuccessAt["codex"] = now
-			if lastOK.values == nil {
-				lastOK = newQuotaData()
-			}
-			snapshotProvider("codex_")
 		}
 		mu.Unlock()
 
@@ -761,8 +797,8 @@ func onReady() {
 			mi.item.Uncheck()
 		}
 		if data.values != nil {
-			systray.SetTitle(barTitle(cfgSnap, data, stale))
-			iconData := ui.GenIcon(iconPct(cfgSnap, data))
+			systray.SetTitle(barTitle(cfgSnap, data, stale, allKeys))
+			iconData := ui.GenIcon(iconPct(cfgSnap, data, allKeys))
 			systray.SetTemplateIcon(iconData, iconData)
 		} else {
 			systray.SetTitle("")

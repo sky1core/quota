@@ -3,6 +3,7 @@ package render
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +16,6 @@ type item struct {
 }
 
 func Text(payload map[string]any) string {
-	claude := payload["claude"]
 	codex := payload["codex"]
 	errs, _ := payload["errors"].([]any)
 
@@ -32,8 +32,7 @@ func Text(payload map[string]any) string {
 		b.WriteString(fmtLine(it))
 	}
 
-	b.WriteString("Claude\n")
-	if m, ok := claude.(map[string]any); ok {
+	writeClaudeBody := func(m map[string]any) {
 		fixed := []struct{ key, label string }{
 			{"session", "Session"},
 			{"weeklyAll", "Weekly"},
@@ -50,8 +49,22 @@ func Text(payload map[string]any) string {
 				}
 			}
 		}
-	} else {
+	}
+
+	// Claude accounts: default "claude" plus any "claude-N", in stable order.
+	claudeKeys := claudeAccountKeys(payload)
+	if len(claudeKeys) == 0 {
+		b.WriteString("Claude\n")
 		b.WriteString("  (no data)\n")
+	} else {
+		for i, k := range claudeKeys {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(claudeLabel(k) + "\n")
+			m, _ := payload[k].(map[string]any)
+			writeClaudeBody(m)
+		}
 	}
 
 	b.WriteString("\nCodex\n")
@@ -79,6 +92,53 @@ func Text(payload map[string]any) string {
 	b.WriteString("\n")
 	b.WriteString("Generated: " + time.Now().Format(time.RFC3339))
 	return b.String()
+}
+
+// claudeAccountKeys returns the payload keys that hold a Claude account's quota
+// ("claude" and any "claude-N"), ordered with the default first then by numeric
+// suffix, with a string tiebreak for non-numeric suffixes.
+func claudeAccountKeys(payload map[string]any) []string {
+	var keys []string
+	for k, v := range payload {
+		if k != "claude" && !strings.HasPrefix(k, "claude-") {
+			continue
+		}
+		if _, ok := v.(map[string]any); ok {
+			keys = append(keys, k)
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		oi, oj := claudeOrder(keys[i]), claudeOrder(keys[j])
+		if oi != oj {
+			return oi < oj
+		}
+		return keys[i] < keys[j]
+	})
+	return keys
+}
+
+func claudeOrder(k string) int {
+	if k == "claude" {
+		return 0
+	}
+	if strings.HasPrefix(k, "claude-") {
+		if n, err := strconv.Atoi(k[len("claude-"):]); err == nil {
+			return n
+		}
+	}
+	return 1 << 30 // unknown suffix sorts last
+}
+
+// claudeLabel renders a Claude account key as a section header.
+// "claude" → "Claude", "claude-2" → "Claude 2".
+func claudeLabel(k string) string {
+	if k == "claude" {
+		return "Claude"
+	}
+	if strings.HasPrefix(k, "claude-") {
+		return "Claude " + k[len("claude-"):]
+	}
+	return k
 }
 
 func fmtLine(it item) string {

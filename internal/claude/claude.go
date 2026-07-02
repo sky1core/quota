@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,8 +21,15 @@ const (
 	usageSettleMax  = 8 * time.Second
 )
 
-// GetQuota fetches Claude Code quota via tmux automation.
+// GetQuota fetches Claude Code quota for the default account via tmux automation.
 func GetQuota(timeout time.Duration) (map[string]any, error) {
+	return GetQuotaForConfigDir(timeout, "")
+}
+
+// GetQuotaForConfigDir fetches Claude Code quota for the account identified by
+// configDir (its CLAUDE_CONFIG_DIR). An empty configDir queries the default
+// account, identical to GetQuota.
+func GetQuotaForConfigDir(timeout time.Duration, configDir string) (map[string]any, error) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		return nil, errors.New("tmux not found in PATH")
 	}
@@ -38,7 +46,13 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	// Unique session per account so parallel queries don't collide on the name.
 	session := fmt.Sprintf("quota-%d", os.Getpid())
+	if configDir != "" {
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(configDir))
+		session = fmt.Sprintf("quota-%d-%08x", os.Getpid(), h.Sum32())
+	}
 
 	cleanup := func() {
 		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -92,7 +106,7 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 	// Claude CLI treats CWD as a project root and runs readdir on it.
 	safeDir := filepath.Join(home, ".config", "quota")
 	_ = os.MkdirAll(safeDir, 0o755)
-	if err := tmuxRun("new-session", "-d", "-s", session, "-x", "120", "-y", "40", "-c", safeDir, "env", "-u", "CLAUDECODE", "-u", "ANTHROPIC_AUTH_TOKEN", "-u", "ANTHROPIC_BASE_URL", claudeBin); err != nil {
+	if err := tmuxRun(claudeSessionArgs(session, safeDir, configDir, claudeBin)...); err != nil {
 		return nil, fmt.Errorf("failed to create tmux session: %w", err)
 	}
 
@@ -181,6 +195,23 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 		return nil, fmt.Errorf("%w\n--- captured ---\n%s", err, preview)
 	}
 	return result, nil
+}
+
+// claudeSessionArgs builds the `tmux new-session` argument list that launches
+// the Claude CLI. When configDir is non-empty it injects CLAUDE_CONFIG_DIR to
+// select a specific account. Ordering is load-bearing:
+//   - env's -u options must precede any NAME=VALUE assignment (macOS/BSD env
+//     stops option parsing at the first non-option argument).
+//   - CLAUDE_CONFIG_DIR is passed on the command line rather than inherited,
+//     because an existing tmux server does not forward it to the new pane via
+//     update-environment; command-line injection is server-state-independent.
+func claudeSessionArgs(session, safeDir, configDir, claudeBin string) []string {
+	args := []string{"new-session", "-d", "-s", session, "-x", "120", "-y", "40", "-c", safeDir,
+		"env", "-u", "CLAUDECODE", "-u", "ANTHROPIC_AUTH_TOKEN", "-u", "ANTHROPIC_BASE_URL"}
+	if configDir != "" {
+		args = append(args, "CLAUDE_CONFIG_DIR="+configDir)
+	}
+	return append(args, claudeBin)
 }
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)

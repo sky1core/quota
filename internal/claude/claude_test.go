@@ -430,6 +430,51 @@ func TestExtraName(t *testing.T) {
 	}
 }
 
+func TestClaudeSessionArgs_ConfigDirOrder(t *testing.T) {
+	args := claudeSessionArgs("sess", "/safe", "/cfgdir", "/bin/claude")
+
+	idx := func(v string) int {
+		for i, a := range args {
+			if a == v {
+				return i
+			}
+		}
+		return -1
+	}
+	lastU := -1
+	for i, a := range args {
+		if a == "-u" {
+			lastU = i
+		}
+	}
+	envIdx := idx("env")
+	cfgIdx := idx("CLAUDE_CONFIG_DIR=/cfgdir")
+	binIdx := idx("/bin/claude")
+
+	if envIdx < 0 || lastU < 0 || cfgIdx < 0 || binIdx < 0 {
+		t.Fatalf("missing expected args: %v", args)
+	}
+	// env < all -u options < CLAUDE_CONFIG_DIR= < claude binary (macOS env rule)
+	if !(envIdx < lastU && lastU < cfgIdx && cfgIdx < binIdx) {
+		t.Errorf("wrong order: env=%d lastU=%d cfg=%d bin=%d (%v)", envIdx, lastU, cfgIdx, binIdx, args)
+	}
+	if args[len(args)-1] != "/bin/claude" {
+		t.Errorf("claude binary must be last, got %q", args[len(args)-1])
+	}
+}
+
+func TestClaudeSessionArgs_NoConfigDir(t *testing.T) {
+	args := claudeSessionArgs("sess", "/safe", "", "/bin/claude")
+	for _, a := range args {
+		if strings.HasPrefix(a, "CLAUDE_CONFIG_DIR") {
+			t.Errorf("must not inject CLAUDE_CONFIG_DIR when configDir empty: %v", args)
+		}
+	}
+	if args[len(args)-1] != "/bin/claude" {
+		t.Errorf("claude binary must be last, got %q", args[len(args)-1])
+	}
+}
+
 func TestAtoi(t *testing.T) {
 	tests := []struct {
 		in   string

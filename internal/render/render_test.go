@@ -206,6 +206,70 @@ func TestText_FullPayload(t *testing.T) {
 	}
 }
 
+func TestText_MultipleClaudeAccounts(t *testing.T) {
+	payload := map[string]any{
+		"claude": map[string]any{
+			"session": map[string]any{"left": 90, "resetsIn": "3h"},
+		},
+		"claude-2": map[string]any{
+			"session": map[string]any{"left": 50},
+			"extras":  []map[string]any{{"label": "Fable", "left": 80}},
+		},
+	}
+	got := Text(payload)
+
+	c1 := strings.Index(got, "Claude\n")
+	c2 := strings.Index(got, "Claude 2\n")
+	if c1 < 0 {
+		t.Fatalf("missing default Claude header: %q", got)
+	}
+	if c2 < 0 {
+		t.Fatalf("missing Claude 2 header: %q", got)
+	}
+	if c1 > c2 {
+		t.Errorf("default Claude must come before Claude 2 (c1=%d c2=%d)", c1, c2)
+	}
+	if !strings.Contains(got, "Fable") || !strings.Contains(got, "80%") {
+		t.Errorf("missing claude-2 Fable extra: %q", got)
+	}
+	if !strings.Contains(got, "90%") || !strings.Contains(got, "50%") {
+		t.Errorf("missing per-account session values: %q", got)
+	}
+}
+
+func TestClaudeAccountKeys_Order(t *testing.T) {
+	payload := map[string]any{
+		"claude-10": map[string]any{},
+		"claude-2":  map[string]any{},
+		"claude":    map[string]any{},
+		"codex":     map[string]any{}, // must be excluded
+		"errors":    []any{},          // non-map, excluded
+	}
+	got := claudeAccountKeys(payload)
+	want := []string{"claude", "claude-2", "claude-10"} // numeric, not lexical
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestClaudeLabel(t *testing.T) {
+	cases := map[string]string{
+		"claude":    "Claude",
+		"claude-2":  "Claude 2",
+		"claude-10": "Claude 10",
+	}
+	for k, want := range cases {
+		if got := claudeLabel(k); got != want {
+			t.Errorf("claudeLabel(%q) = %q, want %q", k, got, want)
+		}
+	}
+}
+
 func TestText_ExtrasWithoutLabelSkipped(t *testing.T) {
 	payload := map[string]any{
 		"claude": map[string]any{

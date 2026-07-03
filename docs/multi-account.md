@@ -31,8 +31,7 @@ CLAUDE_CONFIG_DIR="$HOME/.claude-2" claude auth login
 CLAUDE_CONFIG_DIR="$HOME/.claude-2" claude auth status
 ```
 
-> 이미 `~/.claude-2`에 두 번째 계정이 로그인돼 있다면(예: 다른 도구가 이미 만들어 둔 경우)
-> 이 단계는 건너뛰어도 된다.
+> 이미 그 경로에 두 번째 계정이 로그인돼 있다면 이 단계는 건너뛴다.
 
 ### 편의: shell alias로 두 번째 계정 상시 사용
 

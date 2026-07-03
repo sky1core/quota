@@ -53,6 +53,9 @@ Generated: 2026-02-28T23:06:50+09:00
 
 #### 여러 Claude 계정 조회 (선택)
 
+두 번째 Claude 계정 로그인부터 quota-bar 표시까지 전체 순서는
+**[docs/multi-account.md](docs/multi-account.md)** 참고.
+
 Claude 계정은 `CLAUDE_CONFIG_DIR`로 구분된다. 기본 계정 외에 추가 계정을 함께 보려면
 `account` 서브커맨드로 등록한다 (파일을 직접 편집할 필요 없음):
 

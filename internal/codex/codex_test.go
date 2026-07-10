@@ -53,6 +53,30 @@ func TestWinToEntry_PastResetsAt(t *testing.T) {
 	if resetsIn != "0m" {
 		t.Errorf("past resetsAt should be 0m, got %q", resetsIn)
 	}
+	if _, ok := got["resetsAt"]; ok {
+		t.Error("resetsAt key should be absent for a past (already reset) window")
+	}
+}
+
+func TestWinToEntry_ResetsAtPreserved(t *testing.T) {
+	future := time.Now().Add(3 * time.Hour).Unix()
+	w := &rateLimitWindow{UsedPercent: 10, ResetsAt: &future}
+	got := winToEntry(w)
+	at, ok := got["resetsAt"].(time.Time)
+	if !ok {
+		t.Fatalf("resetsAt should be time.Time, got %T", got["resetsAt"])
+	}
+	if at.Unix() != future {
+		t.Errorf("resetsAt = %d, want %d (exact epoch preserved)", at.Unix(), future)
+	}
+}
+
+func TestWinToEntry_NoResetsAtKeyWhenNil(t *testing.T) {
+	w := &rateLimitWindow{UsedPercent: 30}
+	got := winToEntry(w)
+	if _, ok := got["resetsAt"]; ok {
+		t.Error("resetsAt key should be absent when ResetsAt is nil")
+	}
 }
 
 func TestWinToEntry_FullUsed(t *testing.T) {

@@ -120,6 +120,58 @@ func TestFmtDuration_Negative(t *testing.T) {
 	}
 }
 
+func TestParseReset_AbsoluteHasAt(t *testing.T) {
+	rel, at, hasAt := parseReset("Mar 6, 10am (Asia/Seoul)")
+	if !hasAt {
+		t.Fatal("absolute reset should yield hasAt=true")
+	}
+	if rel == "" {
+		t.Error("relative should be non-empty")
+	}
+	loc, err := time.LoadLocation("Asia/Seoul")
+	if err != nil {
+		t.Skip("tzdata unavailable")
+	}
+	seoul := at.In(loc)
+	if seoul.Hour() != 10 || seoul.Minute() != 0 {
+		t.Errorf("reset instant = %v, want 10:00 in Asia/Seoul", seoul)
+	}
+}
+
+func TestParseReset_RelativeNoAt(t *testing.T) {
+	if _, _, hasAt := parseReset("4h 30m (Asia/Seoul)"); hasAt {
+		t.Error("already-relative input should not yield an absolute instant")
+	}
+}
+
+func TestParseReset_UnparseableNoAt(t *testing.T) {
+	rel, _, hasAt := parseReset("something weird")
+	if hasAt {
+		t.Error("unparseable input should not yield an absolute instant")
+	}
+	if rel != "something weird" {
+		t.Errorf("unparseable relative = %q, want passthrough", rel)
+	}
+}
+
+func TestParseCaptured_ResetsAt(t *testing.T) {
+	input := `
+Current session      40% used
+Resets Mar 6, 12pm (Asia/Seoul)
+`
+	result, err := parseCaptured(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, ok := result["session"].(map[string]any)
+	if !ok {
+		t.Fatal("missing session")
+	}
+	if _, ok := session["resetsAt"].(time.Time); !ok {
+		t.Errorf("session should carry resetsAt time.Time, got %T", session["resetsAt"])
+	}
+}
+
 func TestParseCaptured_Empty(t *testing.T) {
 	_, err := parseCaptured("")
 	if err == nil {

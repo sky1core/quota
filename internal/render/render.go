@@ -10,9 +10,18 @@ import (
 )
 
 type item struct {
-	label  string
-	left   string
-	resets string
+	label   string
+	left    string
+	resets  string
+	resetAt time.Time
+	hasAt   bool
+}
+
+// FormatResetAt renders an absolute reset instant for display: local timezone,
+// 24-hour clock, always with the date, year omitted, e.g. "Jul 6 15:04".
+// Shared by the CLI (render) and quota-bar so the format stays identical.
+func FormatResetAt(t time.Time) string {
+	return t.Local().Format("Jan 2 15:04")
 }
 
 func Text(payload map[string]any) string {
@@ -28,6 +37,10 @@ func Text(payload map[string]any) string {
 		}
 		if r, ok := v["resetsIn"].(string); ok {
 			it.resets = r
+		}
+		if at, ok := v["resetsAt"].(time.Time); ok {
+			it.resetAt = at
+			it.hasAt = true
 		}
 		b.WriteString(fmtLine(it))
 	}
@@ -144,8 +157,16 @@ func claudeLabel(k string) string {
 func fmtLine(it item) string {
 	line := fmt.Sprintf("  %-9s %4s", it.label, it.left)
 	if it.resets != "" {
-		if end, ok := endTime(it.resets); ok {
-			line += fmt.Sprintf("   (%s, at %s)", it.resets, end)
+		// Prefer the exact reset instant (resetsAt); fall back to reconstructing
+		// it from the relative string when the source gave us no absolute time.
+		at := ""
+		if it.hasAt {
+			at = FormatResetAt(it.resetAt)
+		} else if end, ok := endTime(it.resets); ok {
+			at = end
+		}
+		if at != "" {
+			line += fmt.Sprintf("   (%s, at %s)", it.resets, at)
 		} else {
 			line += fmt.Sprintf("   (%s)", it.resets)
 		}

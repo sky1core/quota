@@ -19,6 +19,7 @@ import (
 	"github.com/sky1core/quota/internal/codex"
 	"github.com/sky1core/quota/internal/config"
 	"github.com/sky1core/quota/internal/idle"
+	"github.com/sky1core/quota/internal/render"
 	"github.com/sky1core/quota/internal/ui"
 )
 
@@ -64,6 +65,10 @@ func isClaudeExtraKey(key string) bool {
 
 type settings struct {
 	Selected []string `json:"selected"`
+	// ShowResetTime displays each row's reset as an absolute clock time
+	// (e.g. "Jul 6 15:04") instead of the relative time left. Toggled from the
+	// menu; default false keeps the historical relative display.
+	ShowResetTime bool `json:"showResetTime"`
 }
 
 func (s settings) isSelected(key string) bool {
@@ -149,18 +154,20 @@ func saveSettings(s settings) {
 }
 
 type quotaData struct {
-	values map[string]string // key -> "95%"
-	resets map[string]string // key -> "in 4h 30m"
-	labels map[string]string // dynamic slot key -> on-screen label, e.g. "claude_extra_1" -> "Fable"
-	errs   map[string]string // provider key (account key or "codex") -> error message
+	values    map[string]string // key -> "95%"
+	resets    map[string]string // key -> "4h 30m" (relative time left)
+	resetsAbs map[string]string // key -> "Jul 6 15:04" (absolute reset time, when known)
+	labels    map[string]string // dynamic slot key -> on-screen label, e.g. "claude_extra_1" -> "Fable"
+	errs      map[string]string // provider key (account key or "codex") -> error message
 }
 
 func newQuotaData() quotaData {
 	return quotaData{
-		values: map[string]string{},
-		resets: map[string]string{},
-		labels: map[string]string{},
-		errs:   map[string]string{},
+		values:    map[string]string{},
+		resets:    map[string]string{},
+		resetsAbs: map[string]string{},
+		labels:    map[string]string{},
+		errs:      map[string]string{},
 	}
 }
 
@@ -181,6 +188,9 @@ func fetchQuota(accounts []config.ResolvedAccount) quotaData {
 		}
 		if v, ok := e["resetsIn"].(string); ok {
 			d.resets[outKey] = v
+		}
+		if v, ok := e["resetsAt"].(time.Time); ok {
+			d.resetsAbs[outKey] = render.FormatResetAt(v)
 		}
 	}
 	extract := func(data map[string]any, mapKey, outKey string) {
@@ -270,6 +280,27 @@ func hasProviderData(d quotaData, prefix string, allKeys []string) bool {
 		}
 	}
 	return false
+}
+
+// rowTitle composes a checkbox row's on-screen title from its label, value and
+// reset string. Empty reset omits the parentheses. This is the exact text the
+// menu shows, extracted so the relative↔absolute switch is unit-testable.
+func rowTitle(label, value, reset string) string {
+	if reset != "" {
+		return fmt.Sprintf("%s %s (%s)", label, value, reset)
+	}
+	return fmt.Sprintf("%s %s", label, value)
+}
+
+// resetText picks the reset string shown in a row. When the user enabled clock
+// mode and the row has a known absolute time, that is used; otherwise the
+// relative time left (which is also the fallback for rows without a resetsAt,
+// e.g. codex responses lacking resetsAt).
+func resetText(showResetTime bool, rel, abs string) string {
+	if showResetTime && abs != "" {
+		return abs
+	}
+	return rel
 }
 
 // providerOf returns the provider portion of a menu key: the text before the
@@ -576,6 +607,7 @@ func onReady() {
 	systray.AddSeparator()
 	miUpdated := systray.AddMenuItem("Not yet updated", "")
 	miUpdated.Disable()
+	miResetMode := systray.AddMenuItemCheckbox("Reset as clock time", "리셋을 남은시간 대신 절대 시각으로 표시", cfg.ShowResetTime)
 	miRefresh := systray.AddMenuItem("Refresh", "Refresh now")
 	miAutoStart := systray.AddMenuItemCheckbox("Start at Login", "", isAutoStartEnabled())
 	miVersion := systray.AddMenuItem("quota-bar "+version, "")
@@ -600,11 +632,11 @@ func onReady() {
 		return sp
 	}
 
-	renderMenu := func(data quotaData) {
-		mu.Lock()
-		stale := getStaleProviders()
-		mu.Unlock()
-
+	// renderRows repaints only the per-item checkbox titles (label, value,
+	// reset). It touches neither the error rows nor the "Updated" line, so a
+	// pure display-mode change (showResetTime) can reuse it without wiping the
+	// currently shown errors or faking a fresh update time.
+	renderRows := func(data quotaData, stale map[string]bool, showResetTime bool) {
 		for _, mi := range allItems {
 			lbl := staticLabels[mi.key]
 			if lbl == "" {
@@ -625,13 +657,18 @@ func onReady() {
 			if stale[providerOf(mi.key)] && val != "-" {
 				val += "?"
 			}
-			r := data.resets[mi.key]
-			if r != "" {
-				mi.item.SetTitle(fmt.Sprintf("%s %s (%s)", lbl, val, r))
-			} else {
-				mi.item.SetTitle(fmt.Sprintf("%s %s", lbl, val))
-			}
+			r := resetText(showResetTime, data.resets[mi.key], data.resetsAbs[mi.key])
+			mi.item.SetTitle(rowTitle(lbl, val, r))
 		}
+	}
+
+	renderMenu := func(data quotaData) {
+		mu.Lock()
+		stale := getStaleProviders()
+		showResetTime := cfg.ShowResetTime
+		mu.Unlock()
+
+		renderRows(data, stale, showResetTime)
 
 		// One error row per provider (each Claude account + codex).
 		for prov, item := range errItems {
@@ -705,6 +742,11 @@ func onReady() {
 						data.resets[k] = v
 					}
 				}
+				if v, ok := lastOK.resetsAbs[k]; ok {
+					if _, exists := data.resetsAbs[k]; !exists {
+						data.resetsAbs[k] = v
+					}
+				}
 				if v, ok := lastOK.labels[k]; ok {
 					if _, exists := data.labels[k]; !exists {
 						data.labels[k] = v
@@ -723,12 +765,16 @@ func onReady() {
 				}
 				delete(lastOK.values, k)
 				delete(lastOK.resets, k)
+				delete(lastOK.resetsAbs, k)
 				delete(lastOK.labels, k)
 				if v, ok := data.values[k]; ok {
 					lastOK.values[k] = v
 				}
 				if v, ok := data.resets[k]; ok {
 					lastOK.resets[k] = v
+				}
+				if v, ok := data.resetsAbs[k]; ok {
+					lastOK.resetsAbs[k] = v
 				}
 				if v, ok := data.labels[k]; ok {
 					lastOK.labels[k] = v
@@ -762,16 +808,20 @@ func onReady() {
 
 	copyData := func(d quotaData) quotaData {
 		c := quotaData{
-			values: make(map[string]string, len(d.values)),
-			resets: make(map[string]string, len(d.resets)),
-			labels: make(map[string]string, len(d.labels)),
-			errs:   make(map[string]string, len(d.errs)),
+			values:    make(map[string]string, len(d.values)),
+			resets:    make(map[string]string, len(d.resets)),
+			resetsAbs: make(map[string]string, len(d.resetsAbs)),
+			labels:    make(map[string]string, len(d.labels)),
+			errs:      make(map[string]string, len(d.errs)),
 		}
 		for k, v := range d.values {
 			c.values[k] = v
 		}
 		for k, v := range d.resets {
 			c.resets[k] = v
+		}
+		for k, v := range d.resetsAbs {
+			c.resetsAbs[k] = v
 		}
 		for k, v := range d.labels {
 			c.labels[k] = v
@@ -846,6 +896,22 @@ func onReady() {
 			select {
 			case mi := <-toggleCh:
 				handleToggle(mi)
+			case <-miResetMode.ClickedCh:
+				mu.Lock()
+				cfg.ShowResetTime = !cfg.ShowResetTime
+				saveSettings(cfg)
+				on := cfg.ShowResetTime
+				stale := getStaleProviders()
+				data := copyData(lastOK)
+				mu.Unlock()
+				if on {
+					miResetMode.Check()
+				} else {
+					miResetMode.Uncheck()
+				}
+				// Repaint row titles only — leave error rows, the "Updated"
+				// line, bar title and icon (all mode-independent) untouched.
+				renderRows(data, stale, on)
 			case <-miRefresh.ClickedCh:
 				go refresh()
 			case <-miAutoStart.ClickedCh:

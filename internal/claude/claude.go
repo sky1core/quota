@@ -259,7 +259,11 @@ func parseCaptured(text string) (map[string]any, error) {
 
 		entry := map[string]any{"used": pct, "left": 100 - pct}
 		if r := resetsBelow(lines, i); r != "" {
-			entry["resetsIn"] = toRelative(r)
+			rel, at, hasAt := parseReset(r)
+			entry["resetsIn"] = rel
+			if hasAt {
+				entry["resetsAt"] = at
+			}
 		}
 
 		switch {
@@ -354,11 +358,14 @@ func extraName(label string) string {
 	return label
 }
 
-// toRelative converts a resets string to relative time.
-// Already relative: "in 4h 30m" → "4h 30m"
-// Absolute: "Mar 6, 12pm (Asia/Seoul)" → tries to parse and convert to "2d 5h"
-// If parsing fails, returns the original string cleaned up.
-func toRelative(s string) string {
+// parseReset normalizes a resets string into a relative "time left" string and,
+// when the input is an absolute timestamp we can parse, the exact reset instant.
+//
+//	Already relative ("in 4h 30m" → "4h 30m"): at is zero, hasAt is false.
+//	Absolute ("Mar 6, 12pm (Asia/Seoul)"): relative is derived and at is the
+//	  parsed instant in the given (or local) timezone, hasAt is true.
+//	Unparseable: relative is the cleaned string, at is zero, hasAt is false.
+func parseReset(s string) (relative string, at time.Time, hasAt bool) {
 	// Extract timezone from parens if present, e.g. "(Asia/Seoul)"
 	var loc *time.Location
 	if i := strings.Index(s, " ("); i > 0 {
@@ -370,11 +377,11 @@ func toRelative(s string) string {
 		s = strings.TrimSpace(s[:i])
 	}
 
-	// Already relative: "in 4h 30m" or "4h 30m"
+	// Already relative: "in 4h 30m" or "4h 30m" — no absolute instant available.
 	s = strings.TrimPrefix(s, "in ")
 	relRe := regexp.MustCompile(`^\d+[dhm]\s`)
 	if relRe.MatchString(s + " ") {
-		return s
+		return s, time.Time{}, false
 	}
 
 	// Try to parse absolute time like "Mar 6, 12pm" or "Mar 6 at 12pm"
@@ -414,10 +421,19 @@ func toRelative(s string) string {
 				t = t.AddDate(1, 0, 0)
 			}
 		}
-		return fmtDuration(t.Sub(now))
+		return fmtDuration(t.Sub(now)), t, true
 	}
 
-	return s
+	return s, time.Time{}, false
+}
+
+// toRelative returns only the relative "time left" portion of parseReset.
+// Already relative: "in 4h 30m" → "4h 30m"
+// Absolute: "Mar 6, 12pm (Asia/Seoul)" → tries to parse and convert to "2d 5h"
+// If parsing fails, returns the original string cleaned up.
+func toRelative(s string) string {
+	rel, _, _ := parseReset(s)
+	return rel
 }
 
 func fmtDuration(d time.Duration) string {

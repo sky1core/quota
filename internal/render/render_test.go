@@ -41,6 +41,43 @@ func TestFmtLine_NoResets(t *testing.T) {
 	}
 }
 
+func TestFormatResetAt(t *testing.T) {
+	// Built in Local so FormatReset's .Local() is a no-op and the date/time
+	// are stable regardless of the test machine's timezone.
+	tm := time.Date(2026, 7, 6, 15, 4, 0, 0, time.Local)
+	if got := FormatResetAt(tm); got != "Jul 6 15:04" {
+		t.Errorf("FormatResetAt = %q, want %q", got, "Jul 6 15:04")
+	}
+}
+
+func TestFmtLine_ResetsAtIsExact(t *testing.T) {
+	// With resetsAt present, the absolute time is taken verbatim from it
+	// (a fixed 2026 date), NOT reconstructed from "5d 15h" (which would be
+	// now-relative). So the literal fixed date must appear.
+	at := time.Date(2026, 7, 6, 15, 4, 0, 0, time.Local)
+	it := item{label: "Weekly", left: "83%", resets: "5d 15h", resetAt: at, hasAt: true}
+	got := fmtLine(it)
+	if !strings.Contains(got, "at Jul 6 15:04") {
+		t.Errorf("fmtLine should use resetsAt exactly (at Jul 6 15:04): %q", got)
+	}
+	if !strings.Contains(got, "5d 15h") {
+		t.Errorf("fmtLine should keep the relative string too: %q", got)
+	}
+}
+
+func TestText_ResetsAtFormatted(t *testing.T) {
+	at := time.Date(2026, 7, 6, 15, 4, 0, 0, time.Local)
+	payload := map[string]any{
+		"claude": map[string]any{
+			"session": map[string]any{"left": 80, "resetsIn": "2h", "resetsAt": at},
+		},
+	}
+	got := Text(payload)
+	if !strings.Contains(got, "at Jul 6 15:04") {
+		t.Errorf("Text should render resetsAt: %q", got)
+	}
+}
+
 func TestEndTime_Hours(t *testing.T) {
 	end, ok := endTime("2h 30m")
 	if !ok {

@@ -172,25 +172,32 @@ func winToEntry(w *rateLimitWindow) map[string]any {
 		return nil
 	}
 	left := 100 - w.UsedPercent
-	var resetsIn any = nil
+	entry := map[string]any{"left": left, "resetsIn": nil}
 	if w.ResetsAt != nil {
-		delta := time.Unix(*w.ResetsAt, 0).Sub(time.Now())
-		if delta < 0 {
-			delta = 0
+		at := time.Unix(*w.ResetsAt, 0)
+		delta := at.Sub(time.Now())
+		if delta <= 0 {
+			// Window already reset; a stale past instant is meaningless, so
+			// report 0m and omit resetsAt (matches the Claude path, which only
+			// ever yields a future reset instant).
+			entry["resetsIn"] = "0m"
+			return entry
 		}
 		mins := int(delta.Minutes())
 		d := mins / (60 * 24)
 		h := (mins / 60) % 24
 		m := mins % 60
 		if d > 0 {
-			resetsIn = fmt.Sprintf("%dd %dh", d, h)
+			entry["resetsIn"] = fmt.Sprintf("%dd %dh", d, h)
 		} else if h > 0 {
-			resetsIn = fmt.Sprintf("%dh %dm", h, m)
+			entry["resetsIn"] = fmt.Sprintf("%dh %dm", h, m)
 		} else {
-			resetsIn = fmt.Sprintf("%dm", m)
+			entry["resetsIn"] = fmt.Sprintf("%dm", m)
 		}
+		// Exact future reset instant, preserved alongside the relative string.
+		entry["resetsAt"] = at
 	}
-	return map[string]any{"left": left, "resetsIn": resetsIn}
+	return entry
 }
 
 func buildOutput(rr rateLimitsResponse) (map[string]any, error) {

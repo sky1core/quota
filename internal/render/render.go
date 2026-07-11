@@ -48,7 +48,6 @@ func formatError(e any) string {
 }
 
 func Text(payload map[string]any) string {
-	codex := payload["codex"]
 	errs, _ := payload["errors"].([]any)
 
 	var b strings.Builder
@@ -87,6 +86,21 @@ func Text(payload map[string]any) string {
 		}
 	}
 
+	writeCodexBody := func(m map[string]any) {
+		codexItems := []struct{ key, label string }{
+			{"fiveHour", "5h"},
+			{"day", "Day"},
+		}
+		for _, ci := range codexItems {
+			if v, ok := m[ci.key].(map[string]any); ok {
+				writeEntry(ci.label, v)
+			}
+		}
+		if rc, ok := m["resetCredits"].(map[string]any); ok {
+			b.WriteString(fmtResetCredits(rc))
+		}
+	}
+
 	// Claude accounts: default "claude" plus any "claude-N", in stable order.
 	claudeKeys := claudeAccountKeys(payload)
 	if len(claudeKeys) == 0 {
@@ -103,22 +117,17 @@ func Text(payload map[string]any) string {
 		}
 	}
 
-	b.WriteString("\nCodex\n")
-	if m, ok := codex.(map[string]any); ok {
-		codexItems := []struct{ key, label string }{
-			{"fiveHour", "5h"},
-			{"day", "Day"},
-		}
-		for _, ci := range codexItems {
-			if v, ok := m[ci.key].(map[string]any); ok {
-				writeEntry(ci.label, v)
-			}
-		}
-		if rc, ok := m["resetCredits"].(map[string]any); ok {
-			b.WriteString(fmtResetCredits(rc))
-		}
-	} else {
+	// Codex accounts: default "codex" plus any "codex-N", in stable order.
+	codexKeys := codexAccountKeys(payload)
+	if len(codexKeys) == 0 {
+		b.WriteString("\nCodex\n")
 		b.WriteString("  (no data)\n")
+	} else {
+		for _, k := range codexKeys {
+			b.WriteString("\n" + codexLabel(k) + "\n")
+			m, _ := payload[k].(map[string]any)
+			writeCodexBody(m)
+		}
 	}
 
 	if len(errs) > 0 {
@@ -176,6 +185,54 @@ func claudeLabel(k string) string {
 	}
 	if strings.HasPrefix(k, "claude-") {
 		return "Claude " + k[len("claude-"):]
+	}
+	return k
+}
+
+// codexAccountKeys returns the payload keys that hold a Codex account's quota
+// ("codex" and any "codex-N"), ordered with the default first then by numeric
+// suffix, with a string tiebreak for non-numeric suffixes. Mirrors
+// claudeAccountKeys.
+func codexAccountKeys(payload map[string]any) []string {
+	var keys []string
+	for k, v := range payload {
+		if k != "codex" && !strings.HasPrefix(k, "codex-") {
+			continue
+		}
+		if _, ok := v.(map[string]any); ok {
+			keys = append(keys, k)
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		oi, oj := codexOrder(keys[i]), codexOrder(keys[j])
+		if oi != oj {
+			return oi < oj
+		}
+		return keys[i] < keys[j]
+	})
+	return keys
+}
+
+func codexOrder(k string) int {
+	if k == "codex" {
+		return 0
+	}
+	if strings.HasPrefix(k, "codex-") {
+		if n, err := strconv.Atoi(k[len("codex-"):]); err == nil {
+			return n
+		}
+	}
+	return 1 << 30 // unknown suffix sorts last
+}
+
+// codexLabel renders a Codex account key as a section header.
+// "codex" → "Codex", "codex-2" → "Codex 2".
+func codexLabel(k string) string {
+	if k == "codex" {
+		return "Codex"
+	}
+	if strings.HasPrefix(k, "codex-") {
+		return "Codex " + k[len("codex-"):]
 	}
 	return k
 }

@@ -69,7 +69,18 @@ type rpcResp struct {
 	Error   any             `json:"error"`
 }
 
+// GetQuota fetches Codex quota for the default account (the process's CODEX_HOME,
+// or ~/.codex when unset).
 func GetQuota(timeout time.Duration) (map[string]any, error) {
+	return GetQuotaForHome(timeout, "")
+}
+
+// GetQuotaForHome fetches Codex quota for the account identified by codexHome
+// (its CODEX_HOME). An empty codexHome queries the default account, identical to
+// GetQuota. codexHome must be an already-expanded absolute path; callers expand
+// "~" via config.ExpandTilde before passing it here (mirrors the Claude
+// GetQuotaForConfigDir contract).
+func GetQuotaForHome(timeout time.Duration, codexHome string) (map[string]any, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -79,6 +90,11 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 		safeDir := filepath.Join(home, ".config", "quota")
 		_ = os.MkdirAll(safeDir, 0o755)
 		cmd.Dir = safeDir
+	}
+	if codexHome != "" {
+		// Select a specific account by CODEX_HOME. Appended last so it wins over
+		// any inherited CODEX_HOME (exec uses the last value for a duplicate key).
+		cmd.Env = append(os.Environ(), "CODEX_HOME="+codexHome)
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

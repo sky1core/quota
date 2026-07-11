@@ -87,11 +87,12 @@ const claudeExtraSlots = 3
 const resetCreditSlots = 8
 
 // Menu item keys are "<provider>_<suffix>" where provider is an account key
-// ("claude", "claude-2", …) or "codex". Account keys match ^claude-\d+$, so
-// they never contain "_"; the first "_" always separates provider from suffix.
-// The default account keeps the historical keys ("claude_session",
-// "claude_weekly_all", "claude_extra_1"..) so existing quota-bar.json selections
-// stay valid.
+// ("claude", "claude-2", …, "codex", "codex-2", …). Account keys match
+// ^claude-\d+$ / ^codex-\d+$ (or the bare defaults "claude"/"codex"), so they
+// never contain "_"; the first "_" always separates provider from suffix. The
+// default accounts keep the historical keys ("claude_session",
+// "claude_weekly_all", "claude_extra_1".., "codex_5h", "codex_day") so existing
+// quota-bar.json selections stay valid.
 
 // itemKey builds a menu key for a provider and fixed suffix, e.g.
 // itemKey("claude-2", "session") == "claude-2_session".
@@ -252,12 +253,14 @@ type quotaData struct {
 	resets    map[string]string // key -> "4h 30m" (relative time left)
 	resetsAbs map[string]string // key -> "Jul 6 15:04" (absolute reset time, when known)
 	labels    map[string]string // dynamic slot key -> on-screen label, e.g. "claude_extra_1" -> "Fable"
-	errs      map[string]string // provider key (account key or "codex") -> error message
-	// Codex reset credits (초기화권). Display-only, codex-only, not part of the
-	// keyed bar-selection machinery. Usable grants, soonest-expiry first; empty
-	// means no usable credits (the Reset credits row is hidden). Stored unformatted so
-	// the row text can follow the "Reset as clock time" toggle like other rows.
-	codexResetRows []resetRow
+	errs      map[string]string // provider key (Claude/Codex account key) -> error message
+	// Codex reset credits (초기화권), keyed by Codex account key ("codex",
+	// "codex-2", …). Display-only, not part of the keyed bar-selection machinery.
+	// Each value is that account's usable grants, soonest-expiry first; a
+	// missing/empty entry hides that account's Reset credits row. Stored
+	// unformatted so the row text can follow the "Reset as clock time" toggle like
+	// other rows.
+	codexResetRows map[string][]resetRow
 }
 
 // resetRow is one usable Codex reset credit for display. rel is the relative
@@ -272,21 +275,24 @@ type resetRow struct {
 
 func newQuotaData() quotaData {
 	return quotaData{
-		values:    map[string]string{},
-		resets:    map[string]string{},
-		resetsAbs: map[string]string{},
-		labels:    map[string]string{},
-		errs:      map[string]string{},
+		values:         map[string]string{},
+		resets:         map[string]string{},
+		resetsAbs:      map[string]string{},
+		labels:         map[string]string{},
+		errs:           map[string]string{},
+		codexResetRows: map[string][]resetRow{},
 	}
 }
 
-// fetchQuota queries every Claude account plus Codex in parallel and stores the
-// results under per-provider keys. Claude accounts write "<key>_session",
-// "<key>_weekly_all", and "<key>_extra_N" (+ label); Codex writes "codex_5h" /
-// "codex_day". A provider's failure is recorded under d.errs[<provider key>].
-// Fetches run concurrently; results are consumed serially from a buffered
-// channel, so the store maps are only ever touched by this goroutine.
-func fetchQuota(accounts []config.ResolvedAccount) quotaData {
+// fetchQuota queries every Claude account plus every Codex account in parallel
+// and stores the results under per-provider keys. Claude accounts write
+// "<key>_session", "<key>_weekly_all", and "<key>_extra_N" (+ label); Codex
+// accounts write "<key>_5h" / "<key>_day" (default "codex_5h"/"codex_day") and
+// their reset credits under d.codexResetRows[<key>]. A provider's failure is
+// recorded under d.errs[<provider key>]. Fetches run concurrently; results are
+// consumed serially from a buffered channel, so the store maps are only ever
+// touched by this goroutine.
+func fetchQuota(accounts []config.ResolvedAccount, codexAccounts []config.ResolvedCodexAccount) quotaData {
 	timeout := 90 * time.Second
 	d := newQuotaData()
 
@@ -309,12 +315,12 @@ func fetchQuota(accounts []config.ResolvedAccount) quotaData {
 	}
 
 	type result struct {
-		provider string // account key ("claude", "claude-2", …) or "codex"
+		provider string // account key ("claude", "claude-2", …, "codex", "codex-2", …)
 		claude   bool
 		data     map[string]any
 		err      error
 	}
-	ch := make(chan result, len(accounts)+1)
+	ch := make(chan result, len(accounts)+len(codexAccounts))
 
 	for _, a := range accounts {
 		go func(a config.ResolvedAccount) {
@@ -322,12 +328,14 @@ func fetchQuota(accounts []config.ResolvedAccount) quotaData {
 			ch <- result{provider: a.Key, claude: true, data: cq, err: err}
 		}(a)
 	}
-	go func() {
-		kq, err := codex.GetQuota(timeout)
-		ch <- result{provider: "codex", claude: false, data: kq, err: err}
-	}()
+	for _, a := range codexAccounts {
+		go func(a config.ResolvedCodexAccount) {
+			kq, err := codex.GetQuotaForHome(timeout, a.Home)
+			ch <- result{provider: a.Key, claude: false, data: kq, err: err}
+		}(a)
+	}
 
-	total := len(accounts) + 1
+	total := len(accounts) + len(codexAccounts)
 	for i := 0; i < total; i++ {
 		r := <-ch
 		if r.err != nil {
@@ -351,10 +359,10 @@ func fetchQuota(accounts []config.ResolvedAccount) quotaData {
 				}
 			}
 		} else {
-			extract(r.data, "fiveHour", "codex_5h")
-			extract(r.data, "day", "codex_day")
+			extract(r.data, "fiveHour", itemKey(r.provider, "5h"))
+			extract(r.data, "day", itemKey(r.provider, "day"))
 			if rc, ok := r.data["resetCredits"].(map[string]any); ok {
-				d.codexResetRows = resetCreditRows(rc)
+				d.codexResetRows[r.provider] = resetCreditRows(rc)
 			}
 		}
 	}
@@ -463,8 +471,9 @@ func resetText(showResetTime bool, rel, abs string) string {
 }
 
 // providerOf returns the provider portion of a menu key: the text before the
-// first "_". Account keys (^claude-\d+$) and "codex" contain no "_", so
-// "claude_session"→"claude", "claude-2_extra_1"→"claude-2", "codex_5h"→"codex".
+// first "_". Account keys (^claude-\d+$ / ^codex-\d+$ and the bare defaults)
+// contain no "_", so "claude_session"→"claude", "claude-2_extra_1"→"claude-2",
+// "codex_5h"→"codex", "codex-2_day"→"codex-2".
 func providerOf(key string) string {
 	return strings.SplitN(key, "_", 2)[0]
 }
@@ -710,14 +719,20 @@ func onReady() {
 	for _, s := range skipped {
 		log.Printf("config: %s", s)
 	}
+	codexAccounts, codexSkipped := appCfg.ResolveCodexAccounts()
+	for _, s := range codexSkipped {
+		log.Printf("config: %s", s)
+	}
 
 	// providers lists every provider key in refresh/stale order: each Claude
-	// account key followed by "codex".
-	providers := make([]string, 0, len(accounts)+1)
+	// account key followed by each Codex account key.
+	providers := make([]string, 0, len(accounts)+len(codexAccounts))
 	for _, a := range accounts {
 		providers = append(providers, a.Key)
 	}
-	providers = append(providers, "codex")
+	for _, a := range codexAccounts {
+		providers = append(providers, a.Key)
+	}
 
 	var (
 		allItems     []menuItem                       // every checkbox row, in display order
@@ -756,37 +771,51 @@ func onReady() {
 		}
 	}
 
-	// -- Codex section --
-	codexHeader := systray.AddMenuItem("── Codex ──", "")
-	codexHeader.Disable()
+	// -- Per-account Codex sections --
+	// Each Codex account (default "codex" plus any "codex-N") gets its own header,
+	// error row, 5h/Day checkboxes, and Reset credits parent+submenu. Keyed by the
+	// account key so "codex_5h"/"codex_day" stay backward-compatible for the
+	// default account. miResetsByKey/resetChildrenByKey let renderRows paint each
+	// account's reset credits independently.
+	miResetsByKey := map[string]*systray.MenuItem{}
+	resetChildrenByKey := map[string][]*systray.MenuItem{}
+	for _, a := range codexAccounts {
+		header := systray.AddMenuItem("── "+a.Label+" ──", "")
+		header.Disable()
 
-	codexErr := systray.AddMenuItem("", "")
-	codexErr.Hide()
-	codexErr.Disable()
-	errItems["codex"] = codexErr
+		errItem := systray.AddMenuItem("", "")
+		errItem.Hide()
+		errItem.Disable()
+		errItems[a.Key] = errItem
 
-	staticLabels["codex_5h"] = "5h"
-	staticLabels["codex_day"] = "Day"
-	allItems = append(allItems,
-		menuItem{"codex_5h", systray.AddMenuItemCheckbox("5h: -", "", cfg.isSelected("codex_5h"))},
-		menuItem{"codex_day", systray.AddMenuItemCheckbox("Day: -", "", cfg.isSelected("codex_day"))},
-	)
-	allKeys = append(allKeys, "codex_5h", "codex_day")
+		fiveHourKey := itemKey(a.Key, "5h")
+		dayKey := itemKey(a.Key, "day")
+		staticLabels[fiveHourKey] = "5h"
+		staticLabels[dayKey] = "Day"
+		allItems = append(allItems,
+			menuItem{fiveHourKey, systray.AddMenuItemCheckbox("5h: -", "", cfg.isSelected(fiveHourKey))},
+			menuItem{dayKey, systray.AddMenuItemCheckbox("Day: -", "", cfg.isSelected(dayKey))},
+		)
+		allKeys = append(allKeys, fiveHourKey, dayKey)
 
-	// Codex reset credits (초기화권): a parent row whose submenu lists each usable
-	// credit's expiry. Display-only — not a checkbox, never shown in the top bar.
-	// The parent opens the submenu; children are info rows. Both are left enabled
-	// (not disabled) so the text renders at full contrast instead of the greyed,
-	// hard-to-read disabled style; their clicks simply go unhandled (harmless —
-	// systray drops sends on an unread channel). Both start hidden until a
-	// refresh brings data.
-	miResets := systray.AddMenuItem("Reset credits: -", "")
-	miResets.Hide()
-	resetChildren := make([]*systray.MenuItem, resetCreditSlots)
-	for i := 0; i < resetCreditSlots; i++ {
-		ch := miResets.AddSubMenuItem("", "")
-		ch.Hide()
-		resetChildren[i] = ch
+		// Codex reset credits (초기화권): a parent row whose submenu lists each usable
+		// credit's expiry. Display-only — not a checkbox, never shown in the top bar.
+		// The parent opens the submenu; children are info rows. Both are left enabled
+		// (not disabled) so the text renders at full contrast instead of the greyed,
+		// hard-to-read disabled style; their clicks simply go unhandled (harmless —
+		// systray drops sends on an unread channel). Both start hidden until a
+		// refresh brings data. A fixed slot pool (resetCreditSlots) is pre-allocated
+		// because systray cannot add items at runtime.
+		miResets := systray.AddMenuItem("Reset credits: -", "")
+		miResets.Hide()
+		children := make([]*systray.MenuItem, resetCreditSlots)
+		for i := 0; i < resetCreditSlots; i++ {
+			ch := miResets.AddSubMenuItem("", "")
+			ch.Hide()
+			children[i] = ch
+		}
+		miResetsByKey[a.Key] = miResets
+		resetChildrenByKey[a.Key] = children
 	}
 
 	systray.AddSeparator()
@@ -846,22 +875,27 @@ func onReady() {
 			mi.item.SetTitle(rowTitle(lbl, val, r))
 		}
 
-		// Codex reset-credit rows follow the same relative↔clock switch. Painted
-		// here (not in renderMenu) so the toggle repaints them too. Parent + all
-		// children hide when there are no usable credits.
-		parent, children := resetRowTitles(data.codexResetRows, showResetTime)
-		if parent == "" {
-			miResets.Hide()
-		} else {
-			miResets.SetTitle(parent)
-			miResets.Show()
-		}
-		for i, ch := range resetChildren {
-			if i < len(children) {
-				ch.SetTitle(children[i])
-				ch.Show()
+		// Codex reset-credit rows (one block per Codex account) follow the same
+		// relative↔clock switch. Painted here (not in renderMenu) so the toggle
+		// repaints them too. Each account's parent + all children hide when that
+		// account has no usable credits.
+		for _, a := range codexAccounts {
+			parent, children := resetRowTitles(data.codexResetRows[a.Key], showResetTime)
+			mi := miResetsByKey[a.Key]
+			if parent == "" {
+				mi.Hide()
 			} else {
-				ch.Hide()
+				mi.SetTitle(parent)
+				mi.Show()
+			}
+			chs := resetChildrenByKey[a.Key]
+			for i, ch := range chs {
+				if i < len(children) {
+					ch.SetTitle(children[i])
+					ch.Show()
+				} else {
+					ch.Hide()
+				}
 			}
 		}
 	}
@@ -874,7 +908,7 @@ func onReady() {
 
 		renderRows(data, stale, showResetTime)
 
-		// One error row per provider (each Claude account + codex).
+		// One error row per provider (each Claude account + each Codex account).
 		for prov, item := range errItems {
 			if e, ok := data.errs[prov]; ok {
 				if len(e) > 120 {
@@ -924,7 +958,7 @@ func onReady() {
 		}()
 
 		log.Printf("refresh start")
-		data := fetchQuota(accounts)
+		data := fetchQuota(accounts, codexAccounts)
 		log.Printf("refresh done")
 
 		mu.Lock()
@@ -1004,16 +1038,20 @@ func onReady() {
 				snapshotProvider(p + "_")
 			}
 		}
-		// Codex reset credits ride outside the keyed carry machinery. On codex
-		// success take the fresh value (even empty = credits all gone/expired);
-		// on codex failure keep whatever we last showed.
-		if _, codexFailed := data.errs["codex"]; codexFailed {
-			data.codexResetRows = lastOK.codexResetRows
-		} else {
-			if lastOK.values == nil {
-				lastOK = newQuotaData()
+		// Codex reset credits ride outside the keyed carry machinery. Per Codex
+		// account: on success take the fresh value (even empty = credits all
+		// gone/expired); on failure keep whatever we last showed for that account.
+		for _, a := range codexAccounts {
+			if _, failed := data.errs[a.Key]; failed {
+				if lastOK.codexResetRows != nil {
+					data.codexResetRows[a.Key] = lastOK.codexResetRows[a.Key]
+				}
+			} else {
+				if lastOK.values == nil {
+					lastOK = newQuotaData()
+				}
+				lastOK.codexResetRows[a.Key] = data.codexResetRows[a.Key]
 			}
-			lastOK.codexResetRows = data.codexResetRows
 		}
 		mu.Unlock()
 
@@ -1023,11 +1061,12 @@ func onReady() {
 
 	copyData := func(d quotaData) quotaData {
 		c := quotaData{
-			values:    make(map[string]string, len(d.values)),
-			resets:    make(map[string]string, len(d.resets)),
-			resetsAbs: make(map[string]string, len(d.resetsAbs)),
-			labels:    make(map[string]string, len(d.labels)),
-			errs:      make(map[string]string, len(d.errs)),
+			values:         make(map[string]string, len(d.values)),
+			resets:         make(map[string]string, len(d.resets)),
+			resetsAbs:      make(map[string]string, len(d.resetsAbs)),
+			labels:         make(map[string]string, len(d.labels)),
+			errs:           make(map[string]string, len(d.errs)),
+			codexResetRows: make(map[string][]resetRow, len(d.codexResetRows)),
 		}
 		for k, v := range d.values {
 			c.values[k] = v
@@ -1044,8 +1083,8 @@ func onReady() {
 		for k, v := range d.errs {
 			c.errs[k] = v
 		}
-		if d.codexResetRows != nil {
-			c.codexResetRows = append([]resetRow(nil), d.codexResetRows...)
+		for k, rows := range d.codexResetRows {
+			c.codexResetRows[k] = append([]resetRow(nil), rows...)
 		}
 		return c
 	}

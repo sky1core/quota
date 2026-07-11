@@ -23,9 +23,21 @@ type ClaudeAccount struct {
 	ConfigDir string `json:"configDir"`
 }
 
+// CodexAccount is an additional Codex account to query, beyond the default
+// logged-in account. Accounts are distinguished by their Codex home directory.
+type CodexAccount struct {
+	// Key is the top-level output key (e.g. "codex-2"). Must be unique and
+	// must not collide with "codex".
+	Key string `json:"key"`
+	// Home is the account's CODEX_HOME, stored verbatim as the user wrote it
+	// (e.g. "~/.codex-alt"). Callers expand "~" via ExpandTilde at use time.
+	Home string `json:"home"`
+}
+
 // Config is the parsed ~/.config/quota/config.json.
 type Config struct {
 	ClaudeAccounts []ClaudeAccount `json:"claudeAccounts"`
+	CodexAccounts  []CodexAccount  `json:"codexAccounts"`
 }
 
 // Path returns the config file location.
@@ -127,6 +139,68 @@ func (c Config) ResolveAccounts() ([]ResolvedAccount, []string) {
 			seenKey[a.Key] = true
 			seenDir[exp] = true
 			accounts = append(accounts, ResolvedAccount{Key: a.Key, ConfigDir: exp, Label: accountLabel(a.Key)})
+		}
+	}
+	return accounts, skipped
+}
+
+// CodexExtraKeyRe constrains additional (non-default) Codex account keys to
+// "codex-<N>", mirroring ClaudeExtraKeyRe. This yields a recognizable output key
+// and a deterministic display label. Shared by quota-cli's `account add`
+// validation and by ResolveCodexAccounts so add-time and query-time rules stay
+// in sync.
+var CodexExtraKeyRe = regexp.MustCompile(`^codex-\d+$`)
+
+// ResolvedCodexAccount is a validated Codex account to query.
+type ResolvedCodexAccount struct {
+	Key   string // "codex" (default) or "codex-2"
+	Home  string // expanded CODEX_HOME; "" for the default account
+	Label string // "Codex", "Codex 2"
+}
+
+// codexAccountLabel returns the human display label for a Codex account key:
+// "codex" → "Codex"; "codex-2" → "Codex 2". The caller guarantees key is either
+// "codex" or matches CodexExtraKeyRe.
+func codexAccountLabel(key string) string {
+	if key == "codex" {
+		return "Codex"
+	}
+	return "Codex " + strings.TrimPrefix(key, "codex-")
+}
+
+// ResolveCodexAccounts returns the Codex accounts to query: the default "codex"
+// account first, then each valid extra account, plus a human-readable message
+// for every skipped entry. It mirrors ResolveAccounts (Claude). Skip rules,
+// applied in order, are:
+//   - empty key or home;
+//   - key not matching CodexExtraKeyRe (e.g. "codex-<N>");
+//   - duplicate key (including a collision with the default "codex");
+//   - duplicate home after ExpandTilde (two entries pointing at the same
+//     CODEX_HOME are the same account — redundant).
+//
+// The default account is always {Key:"codex", Home:"", Label:"Codex"} and always
+// leads the slice. Extra homes are tilde-expanded in the returned Home; the
+// default account keeps an empty Home (inherits the process CODEX_HOME).
+func (c Config) ResolveCodexAccounts() ([]ResolvedCodexAccount, []string) {
+	accounts := []ResolvedCodexAccount{{Key: "codex", Home: "", Label: "Codex"}}
+	var skipped []string
+	seenKey := map[string]bool{"codex": true}
+	seenDir := map[string]bool{}
+	for _, a := range c.CodexAccounts {
+		exp := ExpandTilde(a.Home)
+		switch {
+		case a.Key == "" || a.Home == "":
+			skipped = append(skipped, fmt.Sprintf("codex account skipped: empty key or home (key=%q)", a.Key))
+		case !CodexExtraKeyRe.MatchString(a.Key):
+			skipped = append(skipped, fmt.Sprintf("codex account key %q must match codex-<N> (e.g. codex-2), skipped", a.Key))
+		case seenKey[a.Key]:
+			skipped = append(skipped, fmt.Sprintf("codex account key %q is a duplicate, skipped", a.Key))
+		case seenDir[exp]:
+			skipped = append(skipped, fmt.Sprintf("codex account %q home %q duplicates another account, skipped", a.Key, a.Home))
+		default:
+			seenKey[a.Key] = true
+			seenDir[exp] = true
+			accounts = append(accounts, ResolvedCodexAccount{Key: a.Key, Home: exp, Label: codexAccountLabel(a.Key)})
 		}
 	}
 	return accounts, skipped

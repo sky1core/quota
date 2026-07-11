@@ -48,6 +48,10 @@ func runQuery() {
 	for _, s := range skipped {
 		addErr("config", s)
 	}
+	codexAccounts, codexSkipped := cfg.ResolveCodexAccounts()
+	for _, s := range codexSkipped {
+		addErr("config", s)
+	}
 
 	var wg sync.WaitGroup
 
@@ -67,19 +71,21 @@ func runQuery() {
 		}(a)
 	}
 
-	// Query Codex in parallel with Claude.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		kq, err := codex.GetQuota(timeout)
-		if err != nil {
-			addErr("codex", err.Error())
-			return
-		}
-		mu.Lock()
-		out["codex"] = kq
-		mu.Unlock()
-	}()
+	// Query all Codex accounts in parallel with Claude.
+	for _, a := range codexAccounts {
+		wg.Add(1)
+		go func(a config.ResolvedCodexAccount) {
+			defer wg.Done()
+			kq, err := codex.GetQuotaForHome(timeout, a.Home)
+			if err != nil {
+				addErr(a.Key, err.Error())
+				return
+			}
+			mu.Lock()
+			out[a.Key] = kq
+			mu.Unlock()
+		}(a)
+	}
 
 	wg.Wait()
 
@@ -105,12 +111,15 @@ func runQuery() {
 
 func printAccountUsage() {
 	fmt.Fprint(os.Stderr, `usage:
-  quota-cli account list                    등록된 Claude 계정 목록
-  quota-cli account add <key> <configDir>   계정 추가 (key는 claude-<N> 형식)
-  quota-cli account rm  <key>               계정 제거
+  quota-cli account list              등록된 계정 목록 (Claude / Codex)
+  quota-cli account add <key> <dir>   계정 추가
+                                      key는 claude-<N> 또는 codex-<N> 형식
+                                      dir은 Claude=CLAUDE_CONFIG_DIR, Codex=CODEX_HOME (~ 확장)
+  quota-cli account rm  <key>         계정 제거
 
 예시:
   quota-cli account add claude-2 ~/.claude-2
+  quota-cli account add codex-2  ~/.codex-alt
 `)
 }
 
@@ -140,13 +149,18 @@ func accountList() int {
 		return 1
 	}
 	fmt.Println("config:", config.Path())
+	fmt.Println("Claude")
 	fmt.Printf("  %-12s %s\n", "claude", "(기본 계정)")
-	if len(cfg.ClaudeAccounts) == 0 {
-		fmt.Println("  (추가 계정 없음 — 'quota-cli account add'로 등록)")
-		return 0
-	}
 	for _, a := range cfg.ClaudeAccounts {
 		fmt.Printf("  %-12s %s\n", a.Key, a.ConfigDir)
+	}
+	fmt.Println("Codex")
+	fmt.Printf("  %-12s %s\n", "codex", "(기본 계정)")
+	for _, a := range cfg.CodexAccounts {
+		fmt.Printf("  %-12s %s\n", a.Key, a.Home)
+	}
+	if len(cfg.ClaudeAccounts) == 0 && len(cfg.CodexAccounts) == 0 {
+		fmt.Println("(추가 계정 없음 — 'quota-cli account add <claude-N|codex-N> <dir>'로 등록)")
 	}
 	return 0
 }
@@ -173,9 +187,33 @@ func validateNewAccount(existing []config.ClaudeAccount, key, dir string) error 
 	return nil
 }
 
+// validateNewCodexAccount is the Codex sibling of validateNewAccount. The key
+// format rule is shared with query-time resolution via config.CodexExtraKeyRe.
+// home uniqueness is compared after tilde expansion.
+func validateNewCodexAccount(existing []config.CodexAccount, key, home string) error {
+	if key == "" || home == "" {
+		return fmt.Errorf("key와 home 모두 필요")
+	}
+	if !config.CodexExtraKeyRe.MatchString(key) {
+		return fmt.Errorf("key %q는 codex-<N> 형식이어야 함 (예: codex-2)", key)
+	}
+	exp := config.ExpandTilde(home)
+	for _, a := range existing {
+		if a.Key == key {
+			return fmt.Errorf("key %q는 이미 등록됨", key)
+		}
+		if config.ExpandTilde(a.Home) == exp {
+			return fmt.Errorf("home이 기존 계정 %q와 동일한 위치를 가리킴", a.Key)
+		}
+	}
+	return nil
+}
+
+// accountAdd routes by key prefix: claude-<N> adds a Claude account, codex-<N> a
+// Codex account. The provider is encoded in the key, matching the config schema.
 func accountAdd(args []string) int {
 	if len(args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: quota-cli account add <key> <configDir>")
+		fmt.Fprintln(os.Stderr, "usage: quota-cli account add <key> <dir>")
 		return 2
 	}
 	key, dir := args[0], args[1]
@@ -185,17 +223,28 @@ func accountAdd(args []string) int {
 		fmt.Fprintln(os.Stderr, "config load error:", err)
 		return 1
 	}
+
+	switch {
+	case config.ClaudeExtraKeyRe.MatchString(key):
+		return claudeAccountAdd(cfg, key, dir)
+	case config.CodexExtraKeyRe.MatchString(key):
+		return codexAccountAdd(cfg, key, dir)
+	default:
+		fmt.Fprintf(os.Stderr, "거부: key %q는 claude-<N> 또는 codex-<N> 형식이어야 함 (예: claude-2, codex-2)\n", key)
+		return 1
+	}
+}
+
+func claudeAccountAdd(cfg config.Config, key, dir string) int {
 	if err := validateNewAccount(cfg.ClaudeAccounts, key, dir); err != nil {
 		fmt.Fprintln(os.Stderr, "거부:", err)
 		return 1
 	}
-
 	// Warn (do not fail) if the config dir doesn't exist yet.
 	exp := config.ExpandTilde(dir)
 	if fi, statErr := os.Stat(exp); statErr != nil || !fi.IsDir() {
 		fmt.Fprintf(os.Stderr, "경고: %s 가 없거나 디렉터리가 아님 — 해당 계정이 로그인돼 있는지 확인하세요\n", exp)
 	}
-
 	cfg.ClaudeAccounts = append(cfg.ClaudeAccounts, config.ClaudeAccount{Key: key, ConfigDir: dir})
 	if err := config.Save(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "config save error:", err)
@@ -206,6 +255,29 @@ func accountAdd(args []string) int {
 	return 0
 }
 
+func codexAccountAdd(cfg config.Config, key, dir string) int {
+	if err := validateNewCodexAccount(cfg.CodexAccounts, key, dir); err != nil {
+		fmt.Fprintln(os.Stderr, "거부:", err)
+		return 1
+	}
+	// Warn (do not fail) if the CODEX_HOME doesn't exist yet.
+	exp := config.ExpandTilde(dir)
+	if fi, statErr := os.Stat(exp); statErr != nil || !fi.IsDir() {
+		fmt.Fprintf(os.Stderr, "경고: %s 가 없거나 디렉터리가 아님 — 해당 CODEX_HOME에 로그인돼 있는지 확인하세요\n", exp)
+	}
+	cfg.CodexAccounts = append(cfg.CodexAccounts, config.CodexAccount{Key: key, Home: dir})
+	if err := config.Save(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "config save error:", err)
+		return 1
+	}
+	fmt.Printf("등록됨: %s → %s\n", key, dir)
+	fmt.Println("확인: quota-cli   (해당 CODEX_HOME에 로그인 안 돼 있으면 그 계정만 errors로 표시됨)")
+	return 0
+}
+
+// accountRemove routes by key prefix: codex-<N> removes a Codex account,
+// everything else is looked up among Claude accounts (an unknown key simply is
+// not found).
 func accountRemove(args []string) int {
 	if len(args) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: quota-cli account rm <key>")
@@ -218,20 +290,33 @@ func accountRemove(args []string) int {
 		fmt.Fprintln(os.Stderr, "config load error:", err)
 		return 1
 	}
-	kept := make([]config.ClaudeAccount, 0, len(cfg.ClaudeAccounts))
+
 	found := false
-	for _, a := range cfg.ClaudeAccounts {
-		if a.Key == key {
-			found = true
-			continue
+	if config.CodexExtraKeyRe.MatchString(key) {
+		kept := make([]config.CodexAccount, 0, len(cfg.CodexAccounts))
+		for _, a := range cfg.CodexAccounts {
+			if a.Key == key {
+				found = true
+				continue
+			}
+			kept = append(kept, a)
 		}
-		kept = append(kept, a)
+		cfg.CodexAccounts = kept
+	} else {
+		kept := make([]config.ClaudeAccount, 0, len(cfg.ClaudeAccounts))
+		for _, a := range cfg.ClaudeAccounts {
+			if a.Key == key {
+				found = true
+				continue
+			}
+			kept = append(kept, a)
+		}
+		cfg.ClaudeAccounts = kept
 	}
 	if !found {
 		fmt.Fprintf(os.Stderr, "계정 %q 없음\n", key)
 		return 1
 	}
-	cfg.ClaudeAccounts = kept
 	if err := config.Save(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "config save error:", err)
 		return 1

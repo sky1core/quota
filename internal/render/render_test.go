@@ -338,6 +338,77 @@ func TestText_MultipleClaudeAccounts(t *testing.T) {
 	}
 }
 
+func TestText_MultipleCodexAccounts(t *testing.T) {
+	at := time.Date(2026, 7, 12, 10, 42, 0, 0, time.Local)
+	payload := map[string]any{
+		"codex": map[string]any{
+			"fiveHour": map[string]any{"left": 90, "resetsIn": "3h"},
+		},
+		"codex-2": map[string]any{
+			"fiveHour": map[string]any{"left": 40},
+			"resetCredits": map[string]any{
+				"available": 1,
+				"items": []map[string]any{
+					{"title": "Full reset (Weekly + 5 hr)", "expiresIn": "1d 0h", "expiresAt": at},
+				},
+			},
+		},
+	}
+	got := Text(payload)
+
+	c1 := strings.Index(got, "Codex\n")
+	c2 := strings.Index(got, "Codex 2\n")
+	if c1 < 0 {
+		t.Fatalf("missing default Codex header: %q", got)
+	}
+	if c2 < 0 {
+		t.Fatalf("missing Codex 2 header: %q", got)
+	}
+	if c1 > c2 {
+		t.Errorf("default Codex must come before Codex 2 (c1=%d c2=%d)", c1, c2)
+	}
+	if !strings.Contains(got, "90%") || !strings.Contains(got, "40%") {
+		t.Errorf("missing per-account 5h values: %q", got)
+	}
+	// Reset credits belong only to codex-2's section.
+	if !strings.Contains(got, "Reset credits: 1") {
+		t.Errorf("missing codex-2 reset credits: %q", got)
+	}
+}
+
+func TestCodexAccountKeys_Order(t *testing.T) {
+	payload := map[string]any{
+		"codex-10": map[string]any{},
+		"codex-2":  map[string]any{},
+		"codex":    map[string]any{},
+		"claude":   map[string]any{}, // must be excluded
+		"errors":   []any{},          // non-map, excluded
+	}
+	got := codexAccountKeys(payload)
+	want := []string{"codex", "codex-2", "codex-10"} // numeric, not lexical
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestCodexLabel(t *testing.T) {
+	cases := map[string]string{
+		"codex":    "Codex",
+		"codex-2":  "Codex 2",
+		"codex-10": "Codex 10",
+	}
+	for k, want := range cases {
+		if got := codexLabel(k); got != want {
+			t.Errorf("codexLabel(%q) = %q, want %q", k, got, want)
+		}
+	}
+}
+
 func TestClaudeAccountKeys_Order(t *testing.T) {
 	payload := map[string]any{
 		"claude-10": map[string]any{},

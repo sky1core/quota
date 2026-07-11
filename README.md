@@ -105,12 +105,14 @@ quota-bar
 go build -o quota-cli ./cmd/quota-cli
 go build -o quota-bar ./cmd/quota-bar
 
-# 버전 정보를 포함하여 빌드
-go build -ldflags "-X main.version=v0.4.0" -o quota-bar ./cmd/quota-bar
-
 # (선택) 재서명하면 System Settings에서 앱 이름이 정상 표시됨
 # codesign -s - --force quota-bar
 ```
+
+**버전 표시**: quota-bar 메뉴의 버전은 별도 플래그 없이 빌드 정보에서 자동으로 읽는다.
+- `go install .../cmd/quota-bar@v0.7.0` → 태그 버전(`v0.7.0`) 표시
+- 로컬 `go build`/`go install ./cmd/quota-bar` → 커밋 해시(예: `438784f`) 표시
+- 명시 지정이 필요하면 여전히 `-ldflags "-X main.version=vX.Y.Z"`로 덮어쓸 수 있다.
 
 ## 테스트
 

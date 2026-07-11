@@ -2,10 +2,39 @@ package main
 
 import (
 	"encoding/json"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestResolveVersion(t *testing.T) {
+	biVersioned := &debug.BuildInfo{Main: debug.Module{Version: "v0.7.0"}}
+	biLocal := &debug.BuildInfo{
+		Main:     debug.Module{Version: "(devel)"},
+		Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: "438784f550e2ffb48f703fa668ec5df3d94b1018"}},
+	}
+	biBare := &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}}
+
+	cases := []struct {
+		name   string
+		ldflag string
+		bi     *debug.BuildInfo
+		ok     bool
+		want   string
+	}{
+		{"ldflags override wins", "v9.9.9", biVersioned, true, "v9.9.9"},
+		{"module version from @install", "", biVersioned, true, "v0.7.0"},
+		{"local build -> short vcs revision", "", biLocal, true, "438784f"},
+		{"devel without vcs -> dev", "", biBare, true, "dev"},
+		{"no build info -> dev", "", nil, false, "dev"},
+	}
+	for _, c := range cases {
+		if got := resolveVersion(c.ldflag, c.bi, c.ok); got != c.want {
+			t.Errorf("%s: resolveVersion(%q, …) = %q, want %q", c.name, c.ldflag, got, c.want)
+		}
+	}
+}
 
 func TestResetText(t *testing.T) {
 	cases := []struct {

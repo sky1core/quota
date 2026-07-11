@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,7 +24,41 @@ import (
 	"github.com/sky1core/quota/internal/ui"
 )
 
-var version = "dev"
+// version can be pinned at build time with -ldflags "-X main.version=vX.Y.Z".
+// When left empty, versionString() derives it from the embedded build info, so a
+// plain `go install <module>/cmd/quota-bar@vX.Y.Z` shows the tag with no ldflags.
+var version = ""
+
+// versionString resolves the version shown in the menu.
+func versionString() string {
+	bi, ok := debug.ReadBuildInfo()
+	return resolveVersion(version, bi, ok)
+}
+
+// resolveVersion picks the version string from, in order: an explicit ldflags
+// override; the module version of a `@version` install; the VCS revision of a
+// local build; else "dev". Pure (takes build info as args) so it is testable.
+func resolveVersion(ldflag string, bi *debug.BuildInfo, ok bool) string {
+	if ldflag != "" {
+		return ldflag
+	}
+	if !ok || bi == nil {
+		return "dev"
+	}
+	if v := bi.Main.Version; v != "" && v != "(devel)" {
+		return v // installed via `go install …@vX.Y.Z`
+	}
+	for _, s := range bi.Settings {
+		if s.Key == "vcs.revision" && s.Value != "" {
+			rev := s.Value
+			if len(rev) > 7 {
+				rev = rev[:7]
+			}
+			return rev // local build: short commit hash
+		}
+	}
+	return "dev"
+}
 
 const (
 	// defaultRefreshActive/defaultRefreshIdle are the built-in refresh cadences,
@@ -760,7 +795,7 @@ func onReady() {
 	miResetMode := systray.AddMenuItemCheckbox("Reset as clock time", "리셋을 남은시간 대신 절대 시각으로 표시", cfg.ShowResetTime)
 	miRefresh := systray.AddMenuItem("Refresh", "Refresh now")
 	miAutoStart := systray.AddMenuItemCheckbox("Start at Login", "", isAutoStartEnabled())
-	miVersion := systray.AddMenuItem("quota-bar "+version, "")
+	miVersion := systray.AddMenuItem("quota-bar "+versionString(), "")
 	miVersion.Disable()
 	miQuit := systray.AddMenuItem("Quit", "Quit")
 

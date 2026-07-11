@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -145,6 +146,82 @@ func TestResetRowTitles_ModeSwitch(t *testing.T) {
 			t.Errorf("want empty/nil, got parent=%q children=%v", parent, children)
 		}
 	})
+}
+
+func TestSettings_RefreshIntervals(t *testing.T) {
+	// Absent (zero value) → built-in defaults, not an implicit fallback.
+	var d settings
+	if got := d.activeInterval(); got != defaultRefreshActive {
+		t.Errorf("default activeInterval = %s, want %s", got, defaultRefreshActive)
+	}
+	if got := d.idleInterval(); got != defaultRefreshIdle {
+		t.Errorf("default idleInterval = %s, want %s", got, defaultRefreshIdle)
+	}
+
+	// Positive config values are applied verbatim.
+	s := settings{RefreshActiveMinutes: 15, RefreshIdleMinutes: 45}
+	if got := s.activeInterval(); got != 15*time.Minute {
+		t.Errorf("activeInterval = %s, want 15m", got)
+	}
+	if got := s.idleInterval(); got != 45*time.Minute {
+		t.Errorf("idleInterval = %s, want 45m", got)
+	}
+
+	// Zero / negative fall back to the default (never 0-length intervals).
+	bad := settings{RefreshActiveMinutes: 0, RefreshIdleMinutes: -5}
+	if got := bad.activeInterval(); got != defaultRefreshActive {
+		t.Errorf("zero activeInterval = %s, want default %s", got, defaultRefreshActive)
+	}
+	if got := bad.idleInterval(); got != defaultRefreshIdle {
+		t.Errorf("negative idleInterval = %s, want default %s", got, defaultRefreshIdle)
+	}
+}
+
+func TestSettings_StaleThreshold(t *testing.T) {
+	// Default: max(3m, 30m) + 5m = 35m (unchanged from the old hardcoded value).
+	var d settings
+	if got := d.staleThreshold(); got != 35*time.Minute {
+		t.Errorf("default staleThreshold = %s, want 35m", got)
+	}
+	// Inverted config (active > idle): must trail the larger (active) interval,
+	// otherwise a normally-refreshed provider would be flagged stale.
+	inv := settings{RefreshActiveMinutes: 60, RefreshIdleMinutes: 10}
+	if got := inv.staleThreshold(); got != 65*time.Minute {
+		t.Errorf("staleThreshold(active=60,idle=10) = %s, want 65m (max+5m)", got)
+	}
+	// Longer idle: trails idle.
+	slow := settings{RefreshActiveMinutes: 3, RefreshIdleMinutes: 120}
+	if got := slow.staleThreshold(); got != 125*time.Minute {
+		t.Errorf("staleThreshold(idle=120) = %s, want 125m", got)
+	}
+}
+
+func TestSettings_RefreshIntervalsRoundTrip(t *testing.T) {
+	b, err := json.Marshal(settings{RefreshActiveMinutes: 30, RefreshIdleMinutes: 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s settings
+	if err := json.Unmarshal(b, &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.activeInterval() != 30*time.Minute || s.idleInterval() != 60*time.Minute {
+		t.Errorf("round-trip lost intervals: active=%s idle=%s", s.activeInterval(), s.idleInterval())
+	}
+
+	// A file that omits the keys must default (relative to the built-ins), and
+	// omitempty must keep them out of a re-marshaled default config.
+	var legacy settings
+	if err := json.Unmarshal([]byte(`{"selected":["codex_5h"]}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.activeInterval() != defaultRefreshActive || legacy.idleInterval() != defaultRefreshIdle {
+		t.Error("absent interval keys should resolve to built-in defaults")
+	}
+	out, _ := json.Marshal(legacy)
+	if strings.Contains(string(out), "refreshActiveMinutes") || strings.Contains(string(out), "refreshIdleMinutes") {
+		t.Errorf("unset intervals should be omitted from JSON, got %s", out)
+	}
 }
 
 // ShowResetTime must survive a JSON round-trip so the toggle persists across

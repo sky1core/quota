@@ -89,9 +89,11 @@ quota-bar
 없으므로 **계정 목록 변경은 quota-bar 재시작 후 반영**된다.
 
 사용자 활동에 따라 갱신 주기가 자동 조절된다:
-- 활성 사용 중: 3분
-- 10분 이상 idle: 30분
+- 활성 사용 중: 3분 (`refreshActiveMinutes`로 변경 가능)
+- 10분 이상 idle: 30분 (`refreshIdleMinutes`로 변경 가능)
 - 1시간 이상 idle: 정지 (복귀 시 자동 재개)
+
+두 주기는 `quota-bar.json`에 값을 쓰면 그 값을, 없으면 위 기본값을 쓴다. 변경은 재시작 후 반영된다.
 
 설정 파일: `~/.config/quota/quota-bar.json`
 

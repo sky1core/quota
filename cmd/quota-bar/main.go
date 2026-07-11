@@ -26,11 +26,17 @@ import (
 var version = "dev"
 
 const (
-	refreshActive  = 3 * time.Minute
-	refreshIdle    = 30 * time.Minute
-	idleThreshold  = 10 * time.Minute
-	pauseThreshold = 1 * time.Hour
-	staleThreshold = 35 * time.Minute // > refreshIdle to avoid false stale during idle
+	// defaultRefreshActive/defaultRefreshIdle are the built-in refresh cadences,
+	// used when quota-bar.json does not override them (refreshActiveMinutes /
+	// refreshIdleMinutes).
+	defaultRefreshActive = 3 * time.Minute
+	defaultRefreshIdle   = 30 * time.Minute
+	idleThreshold        = 10 * time.Minute
+	pauseThreshold       = 1 * time.Hour
+	// staleMargin is added to the slower of the two (possibly configured) refresh
+	// cadences to derive the stale threshold, so no normally-refreshed provider
+	// trips a false "stale" warning regardless of which interval is larger.
+	staleMargin = 5 * time.Minute
 )
 
 // claudeExtraSlots is the number of pre-allocated menu slots per Claude account
@@ -75,6 +81,37 @@ type settings struct {
 	// (e.g. "Jul 6 15:04") instead of the relative time left. Toggled from the
 	// menu; default false keeps the historical relative display.
 	ShowResetTime bool `json:"showResetTime"`
+	// RefreshActiveMinutes / RefreshIdleMinutes override the built-in refresh
+	// cadences (defaultRefreshActive / defaultRefreshIdle). They are only read
+	// from the config file — there is no menu control. Absent or <= 0 means
+	// "use the built-in default" (explicit default, never an implicit fallback).
+	RefreshActiveMinutes int `json:"refreshActiveMinutes,omitempty"`
+	RefreshIdleMinutes   int `json:"refreshIdleMinutes,omitempty"`
+}
+
+// activeInterval / idleInterval resolve the effective refresh cadences: the
+// configured minutes when set to a positive value, otherwise the built-in
+// default.
+func (s settings) activeInterval() time.Duration {
+	if s.RefreshActiveMinutes > 0 {
+		return time.Duration(s.RefreshActiveMinutes) * time.Minute
+	}
+	return defaultRefreshActive
+}
+
+func (s settings) idleInterval() time.Duration {
+	if s.RefreshIdleMinutes > 0 {
+		return time.Duration(s.RefreshIdleMinutes) * time.Minute
+	}
+	return defaultRefreshIdle
+}
+
+// staleThreshold is the age past which a provider's last success is flagged
+// stale. It trails the slower of the two cadences by staleMargin so a
+// normally-refreshed provider is never marked stale, whichever interval is
+// larger.
+func (s settings) staleThreshold() time.Duration {
+	return max(s.activeInterval(), s.idleInterval()) + staleMargin
 }
 
 func (s settings) isSelected(key string) bool {
@@ -600,6 +637,16 @@ func onReady() {
 
 	cfg := loadSettings()
 
+	// Effective refresh cadences (config override or built-in default), fixed at
+	// startup like the account layout. Editing quota-bar.json requires a restart.
+	// The stale threshold trails the *slower* of the two configured cadences by
+	// staleMargin, so no normally-refreshed provider is ever marked stale — even
+	// if the active interval is configured longer than the idle one.
+	refreshActiveDur := cfg.activeInterval()
+	refreshIdleDur := cfg.idleInterval()
+	staleThresholdDur := cfg.staleThreshold()
+	log.Printf("refresh cadence: active=%s idle=%s (stale>%s)", refreshActiveDur, refreshIdleDur, staleThresholdDur)
+
 	// Resolve the Claude accounts to show. systray cannot add or remove menu
 	// items at runtime, so the account set (and therefore the menu layout) is
 	// fixed here at onReady from the config as it exists now. Editing
@@ -712,7 +759,7 @@ func onReady() {
 		now := time.Now()
 		sp := map[string]bool{}
 		for _, p := range providers {
-			if t, ok := lastSuccessAt[p]; ok && now.Sub(t) > staleThreshold {
+			if t, ok := lastSuccessAt[p]; ok && now.Sub(t) > staleThresholdDur {
 				sp[p] = true
 			}
 		}
@@ -988,9 +1035,9 @@ func onReady() {
 			case idleSec > pauseThreshold.Seconds():
 				continue // paused, just re-check idle
 			case idleSec > idleThreshold.Seconds():
-				interval = refreshIdle
+				interval = refreshIdleDur
 			default:
-				interval = refreshActive
+				interval = refreshActiveDur
 			}
 			if time.Since(lastRefresh) >= interval {
 				if refresh() {

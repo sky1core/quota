@@ -213,18 +213,44 @@ func TestText_ResetCreditsAbsent(t *testing.T) {
 }
 
 func TestText_WithErrors(t *testing.T) {
+	// Production shape: quota-cli appends map[string]any{"provider","error"},
+	// so the test must feed maps (not strings) to catch a raw map-dump regression.
 	payload := map[string]any{
-		"errors": []any{"claude: timeout", "codex: not found"},
+		"errors": []any{
+			map[string]any{"provider": "claude", "error": "timeout"},
+			map[string]any{"provider": "codex", "error": "not found"},
+		},
 	}
 	got := Text(payload)
 	if !strings.Contains(got, "Errors") {
 		t.Error("missing Errors section")
 	}
+	if strings.Contains(got, "map[") {
+		t.Errorf("errors must not be dumped as a raw Go map: %q", got)
+	}
 	if !strings.Contains(got, "claude: timeout") {
-		t.Error("missing claude error")
+		t.Errorf("missing/ill-formatted claude error: %q", got)
 	}
 	if !strings.Contains(got, "codex: not found") {
-		t.Error("missing codex error")
+		t.Errorf("missing/ill-formatted codex error: %q", got)
+	}
+}
+
+func TestFormatError(t *testing.T) {
+	cases := []struct {
+		name string
+		in   any
+		want string
+	}{
+		{"provider+error", map[string]any{"provider": "claude", "error": "timeout"}, "claude: timeout"},
+		{"error only", map[string]any{"error": "boom"}, "boom"},
+		{"provider only", map[string]any{"provider": "codex"}, "codex"},
+		{"non-map falls back", "raw string", "raw string"},
+	}
+	for _, c := range cases {
+		if got := formatError(c.in); got != c.want {
+			t.Errorf("%s: formatError(%v) = %q, want %q", c.name, c.in, got, c.want)
+		}
 	}
 }
 

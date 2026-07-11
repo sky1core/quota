@@ -188,7 +188,10 @@ func winToEntry(w *rateLimitWindow) map[string]any {
 		return nil
 	}
 	left := 100 - w.UsedPercent
-	entry := map[string]any{"left": left, "resetsIn": nil}
+	// resetsIn is only added when known; an unknown reset omits the key entirely
+	// (like resetsAt) rather than emitting a JSON null, which would violate the
+	// string contract. Consumers already treat a missing key as "unknown".
+	entry := map[string]any{"left": left}
 	if w.ResetsAt != nil {
 		at := time.Unix(*w.ResetsAt, 0)
 		delta := at.Sub(time.Now())

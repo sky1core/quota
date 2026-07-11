@@ -24,6 +24,29 @@ func FormatResetAt(t time.Time) string {
 	return t.Local().Format("Jan 2 15:04")
 }
 
+// formatError renders one entry from the payload's "errors" list for humans.
+// quota-cli emits map[string]any{"provider":.., "error":..}; render that as
+// "provider: error" instead of dumping the raw Go map (e.g. "map[error:… provider:…]").
+// Anything unexpected falls back to %v so nothing is ever dropped.
+func formatError(e any) string {
+	m, ok := e.(map[string]any)
+	if !ok {
+		return fmt.Sprintf("%v", e)
+	}
+	prov, _ := m["provider"].(string)
+	msg, _ := m["error"].(string)
+	switch {
+	case prov != "" && msg != "":
+		return prov + ": " + msg
+	case prov != "":
+		return prov
+	case msg != "":
+		return msg
+	default:
+		return fmt.Sprintf("%v", e)
+	}
+}
+
 func Text(payload map[string]any) string {
 	codex := payload["codex"]
 	errs, _ := payload["errors"].([]any)
@@ -101,7 +124,7 @@ func Text(payload map[string]any) string {
 	if len(errs) > 0 {
 		b.WriteString("\nErrors\n")
 		for _, e := range errs {
-			b.WriteString(fmt.Sprintf("  - %v\n", e))
+			b.WriteString("  - " + formatError(e) + "\n")
 		}
 	}
 

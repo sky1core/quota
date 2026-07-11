@@ -2,6 +2,7 @@ package codex
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,8 +22,17 @@ func TestWinToEntry_Basic(t *testing.T) {
 	if got["left"] != 70 {
 		t.Errorf("left = %v, want 70", got["left"])
 	}
-	if got["resetsIn"] != nil {
-		t.Errorf("resetsIn should be nil without ResetsAt, got %v", got["resetsIn"])
+	// Unknown reset: the key must be absent (not present-as-nil), otherwise
+	// --json would serialize "resetsIn": null, violating the string contract.
+	if _, ok := got["resetsIn"]; ok {
+		t.Errorf("resetsIn key should be absent without ResetsAt, got %v", got["resetsIn"])
+	}
+	b, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "resetsIn") {
+		t.Errorf("resetsIn must not appear in JSON when unknown: %s", b)
 	}
 }
 

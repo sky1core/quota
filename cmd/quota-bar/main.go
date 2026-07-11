@@ -143,12 +143,28 @@ func settingsPath() string {
 }
 
 func loadSettings() settings {
-	b, err := os.ReadFile(settingsPath())
+	p := settingsPath()
+	b, err := os.ReadFile(p)
 	if err != nil {
+		// A missing file is the normal first-run case; anything else (e.g. a
+		// permission error) is worth surfacing rather than silently defaulting.
+		if !os.IsNotExist(err) {
+			log.Printf("loadSettings: read %s: %v (using defaults)", p, err)
+		}
 		return settings{}
 	}
 	var s settings
 	if err := json.Unmarshal(b, &s); err != nil {
+		// The file exists but is corrupt. Do NOT silently reset — a later
+		// saveSettings would overwrite it and destroy the user's selections and
+		// interval config. Preserve the original and log loudly so it can be
+		// recovered.
+		bak := p + ".corrupt"
+		if renameErr := os.Rename(p, bak); renameErr != nil {
+			log.Printf("loadSettings: parse %s: %v (using defaults; could not back up: %v)", p, err, renameErr)
+		} else {
+			log.Printf("loadSettings: parse %s: %v (using defaults; original preserved at %s)", p, err, bak)
+		}
 		return settings{}
 	}
 	return migrateSettings(s)

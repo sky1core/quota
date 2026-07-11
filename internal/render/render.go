@@ -91,6 +91,9 @@ func Text(payload map[string]any) string {
 				writeEntry(ci.label, v)
 			}
 		}
+		if rc, ok := m["resetCredits"].(map[string]any); ok {
+			b.WriteString(fmtResetCredits(rc))
+		}
 	} else {
 		b.WriteString("  (no data)\n")
 	}
@@ -152,6 +155,21 @@ func claudeLabel(k string) string {
 		return "Claude " + k[len("claude-"):]
 	}
 	return k
+}
+
+// fmtResetCredits renders the Codex reset-credit (초기화권) summary line:
+// the number of usable grants plus, when known, the soonest expiry instant.
+// "Reset credits" mirrors Codex's own term (the rateLimitResetCredits field).
+// items are expected soonest-expiry first (as internal/codex emits them).
+func fmtResetCredits(rc map[string]any) string {
+	n, _ := rc["available"].(int)
+	line := fmt.Sprintf("  Reset credits: %d", n)
+	if items, ok := rc["items"].([]map[string]any); ok && len(items) > 0 {
+		if at, ok := items[0]["expiresAt"].(time.Time); ok {
+			line += fmt.Sprintf("   (expires %s)", FormatResetAt(at))
+		}
+	}
+	return line + "\n"
 }
 
 func fmtLine(it item) string {

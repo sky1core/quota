@@ -174,6 +174,44 @@ func TestText_WithCodex(t *testing.T) {
 	}
 }
 
+func TestText_WithResetCredits(t *testing.T) {
+	at := time.Date(2026, 7, 12, 10, 42, 0, 0, time.Local)
+	payload := map[string]any{
+		"codex": map[string]any{
+			"fiveHour": map[string]any{"left": 90, "resetsIn": "3h"},
+			"resetCredits": map[string]any{
+				"available": 4,
+				"items": []map[string]any{
+					{"title": "Full reset (Weekly + 5 hr)", "expiresIn": "1d 0h", "expiresAt": at},
+				},
+			},
+		},
+	}
+	got := Text(payload)
+	if !strings.Contains(got, "Reset credits: 4") {
+		t.Errorf("missing Reset credits row with count: %q", got)
+	}
+	if !strings.Contains(got, "(expires Jul 12 10:42)") {
+		t.Errorf("missing soonest expiry (without \"next\"): %q", got)
+	}
+	if strings.Contains(got, "next") {
+		t.Errorf("should not contain the word \"next\": %q", got)
+	}
+}
+
+func TestText_ResetCreditsAbsent(t *testing.T) {
+	// No resetCredits key → no Reset credits row.
+	payload := map[string]any{
+		"codex": map[string]any{
+			"fiveHour": map[string]any{"left": 90, "resetsIn": "3h"},
+		},
+	}
+	got := Text(payload)
+	if strings.Contains(got, "Reset credits") {
+		t.Errorf("should not render Reset credits row when absent: %q", got)
+	}
+}
+
 func TestText_WithErrors(t *testing.T) {
 	payload := map[string]any{
 		"errors": []any{"claude: timeout", "codex: not found"},

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -16,6 +17,21 @@ import (
 type rateLimitsResponse struct {
 	RateLimitsByLimitId map[string]rateLimitSnapshot `json:"rateLimitsByLimitId"`
 	RateLimits          rateLimitSnapshot            `json:"rateLimits"`
+	// ResetCredits are one-shot "rate limit reset" grants (초기화권) that sit at
+	// the top level of the response, alongside (not inside) the per-limit
+	// snapshots. Each grant has its own expiry.
+	ResetCredits *resetCreditsSnapshot `json:"rateLimitResetCredits"`
+}
+
+type resetCreditsSnapshot struct {
+	AvailableCount int                `json:"availableCount"`
+	Credits        []resetCreditEntry `json:"credits"`
+}
+
+type resetCreditEntry struct {
+	Title     string `json:"title"`
+	Status    string `json:"status"`
+	ExpiresAt *int64 `json:"expiresAt"`
 }
 
 type rateLimitSnapshot struct {
@@ -183,21 +199,29 @@ func winToEntry(w *rateLimitWindow) map[string]any {
 			entry["resetsIn"] = "0m"
 			return entry
 		}
-		mins := int(delta.Minutes())
-		d := mins / (60 * 24)
-		h := (mins / 60) % 24
-		m := mins % 60
-		if d > 0 {
-			entry["resetsIn"] = fmt.Sprintf("%dd %dh", d, h)
-		} else if h > 0 {
-			entry["resetsIn"] = fmt.Sprintf("%dh %dm", h, m)
-		} else {
-			entry["resetsIn"] = fmt.Sprintf("%dm", m)
-		}
+		entry["resetsIn"] = fmtDurMins(int(delta.Minutes()))
 		// Exact future reset instant, preserved alongside the relative string.
 		entry["resetsAt"] = at
 	}
 	return entry
+}
+
+// fmtDurMins renders a non-negative minute count as a coarse "Nd Nh" / "Nh Nm" /
+// "Nm" remaining-time string (the same shape used for rate-limit resets).
+func fmtDurMins(mins int) string {
+	if mins < 0 {
+		mins = 0
+	}
+	d := mins / (60 * 24)
+	h := (mins / 60) % 24
+	m := mins % 60
+	if d > 0 {
+		return fmt.Sprintf("%dd %dh", d, h)
+	}
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	return fmt.Sprintf("%dm", m)
 }
 
 func buildOutput(rr rateLimitsResponse) (map[string]any, error) {
@@ -225,8 +249,56 @@ func buildOutput(rr rateLimitsResponse) (map[string]any, error) {
 	if snap.PlanType != nil {
 		out["planType"] = *snap.PlanType
 	}
+	if rc := buildResetCredits(rr.ResetCredits); rc != nil {
+		out["resetCredits"] = rc
+	}
 	if len(out) == 0 {
 		return nil, errors.New("empty codex rate limits")
 	}
 	return out, nil
+}
+
+// buildResetCredits projects the top-level reset-credit grants (초기화권) into the
+// output shape. Only grants that are still usable (status "available") are
+// listed, sorted soonest-expiry first. Returns nil when there is nothing usable
+// to show, so the key is omitted entirely (matching the other optional keys).
+func buildResetCredits(rc *resetCreditsSnapshot) map[string]any {
+	if rc == nil {
+		return nil
+	}
+	now := time.Now()
+	var items []map[string]any
+	for _, c := range rc.Credits {
+		if c.Status != "available" {
+			continue
+		}
+		item := map[string]any{"title": c.Title}
+		if c.ExpiresAt != nil {
+			at := time.Unix(*c.ExpiresAt, 0)
+			// Exact expiry instant, preserved alongside the relative string.
+			item["expiresAt"] = at
+			item["expiresIn"] = fmtDurMins(int(at.Sub(now).Minutes()))
+		}
+		items = append(items, item)
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		ti, iok := items[i]["expiresAt"].(time.Time)
+		tj, jok := items[j]["expiresAt"].(time.Time)
+		if iok && jok {
+			return ti.Before(tj)
+		}
+		// Grants with a known expiry sort ahead of those without.
+		return iok && !jok
+	})
+	// available counts exactly the usable grants we list, so the count can never
+	// contradict items (e.g. no "0 available" alongside a populated list). We do
+	// not trust the response's availableCount here: it is sourced independently
+	// of the per-grant status filter and could diverge.
+	return map[string]any{
+		"available": len(items),
+		"items":     items,
+	}
 }

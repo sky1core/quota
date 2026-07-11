@@ -39,6 +39,12 @@ const (
 // stay hidden.
 const claudeExtraSlots = 3
 
+// resetCreditSlots is the number of pre-allocated submenu rows under the Codex
+// "Reset credits" item, one per usable reset credit (초기화권). systray cannot add items
+// at runtime, so we allocate a fixed pool and hide the unused ones. The parent's
+// count reflects the true number even if it exceeds the visible detail rows.
+const resetCreditSlots = 8
+
 // Menu item keys are "<provider>_<suffix>" where provider is an account key
 // ("claude", "claude-2", …) or "codex". Account keys match ^claude-\d+$, so
 // they never contain "_"; the first "_" always separates provider from suffix.
@@ -159,6 +165,21 @@ type quotaData struct {
 	resetsAbs map[string]string // key -> "Jul 6 15:04" (absolute reset time, when known)
 	labels    map[string]string // dynamic slot key -> on-screen label, e.g. "claude_extra_1" -> "Fable"
 	errs      map[string]string // provider key (account key or "codex") -> error message
+	// Codex reset credits (초기화권). Display-only, codex-only, not part of the
+	// keyed bar-selection machinery. Usable grants, soonest-expiry first; empty
+	// means no usable credits (the Reset credits row is hidden). Stored unformatted so
+	// the row text can follow the "Reset as clock time" toggle like other rows.
+	codexResetRows []resetRow
+}
+
+// resetRow is one usable Codex reset credit for display. rel is the relative
+// "expires in" string (e.g. "1d 0h"); abs is the absolute expiry from
+// FormatResetAt (e.g. "Jul 12 10:42"), "" when the grant has no expiry epoch.
+// title is the grant title, shown only as a fallback when neither time is known.
+type resetRow struct {
+	rel   string
+	abs   string
+	title string
 }
 
 func newQuotaData() quotaData {
@@ -244,6 +265,9 @@ func fetchQuota(accounts []config.ResolvedAccount) quotaData {
 		} else {
 			extract(r.data, "fiveHour", "codex_5h")
 			extract(r.data, "day", "codex_day")
+			if rc, ok := r.data["resetCredits"].(map[string]any); ok {
+				d.codexResetRows = resetCreditRows(rc)
+			}
 		}
 	}
 
@@ -290,6 +314,53 @@ func rowTitle(label, value, reset string) string {
 		return fmt.Sprintf("%s %s (%s)", label, value, reset)
 	}
 	return fmt.Sprintf("%s %s", label, value)
+}
+
+// resetCreditRows extracts the usable Codex reset credits from the resetCredits
+// payload into unformatted display rows (soonest-expiry first, as codex emits
+// them). Formatting is deferred to resetRowTitles so the rows can follow the
+// "Reset as clock time" toggle. Returns nil when there is nothing usable.
+func resetCreditRows(rc map[string]any) []resetRow {
+	items, _ := rc["items"].([]map[string]any)
+	if len(items) == 0 {
+		return nil
+	}
+	rows := make([]resetRow, 0, len(items))
+	for _, it := range items {
+		var r resetRow
+		r.rel, _ = it["expiresIn"].(string)
+		if at, ok := it["expiresAt"].(time.Time); ok {
+			r.abs = render.FormatResetAt(at)
+		}
+		r.title, _ = it["title"].(string)
+		rows = append(rows, r)
+	}
+	return rows
+}
+
+// resetRowTitles renders the "Reset credits" parent title and per-credit submenu lines
+// for the current display mode. Each row's time follows the same relative↔clock
+// switch as every other row (via resetText); a credit with no known expiry falls
+// back to its title. The parent shows the usable count plus the soonest expiry.
+// Returns ("", nil) when there are no usable credits, so the row stays hidden.
+func resetRowTitles(rows []resetRow, showResetTime bool) (string, []string) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	parent := fmt.Sprintf("Reset credits: %d", len(rows))
+	if soonest := resetText(showResetTime, rows[0].rel, rows[0].abs); soonest != "" {
+		parent += "  (" + soonest + ")"
+	}
+	children := make([]string, len(rows))
+	for i, r := range rows {
+		s := resetText(showResetTime, r.rel, r.abs)
+		if s == "" {
+			// No expiry time known — fall back to the grant title.
+			s = r.title
+		}
+		children[i] = s
+	}
+	return parent, children
 }
 
 // resetText picks the reset string shown in a row. When the user enabled clock
@@ -604,6 +675,22 @@ func onReady() {
 	)
 	allKeys = append(allKeys, "codex_5h", "codex_day")
 
+	// Codex reset credits (초기화권): a parent row whose submenu lists each usable
+	// credit's expiry. Display-only — not a checkbox, never shown in the top bar.
+	// The parent opens the submenu; children are info rows. Both are left enabled
+	// (not disabled) so the text renders at full contrast instead of the greyed,
+	// hard-to-read disabled style; their clicks simply go unhandled (harmless —
+	// systray drops sends on an unread channel). Both start hidden until a
+	// refresh brings data.
+	miResets := systray.AddMenuItem("Reset credits: -", "")
+	miResets.Hide()
+	resetChildren := make([]*systray.MenuItem, resetCreditSlots)
+	for i := 0; i < resetCreditSlots; i++ {
+		ch := miResets.AddSubMenuItem("", "")
+		ch.Hide()
+		resetChildren[i] = ch
+	}
+
 	systray.AddSeparator()
 	miUpdated := systray.AddMenuItem("Not yet updated", "")
 	miUpdated.Disable()
@@ -659,6 +746,25 @@ func onReady() {
 			}
 			r := resetText(showResetTime, data.resets[mi.key], data.resetsAbs[mi.key])
 			mi.item.SetTitle(rowTitle(lbl, val, r))
+		}
+
+		// Codex reset-credit rows follow the same relative↔clock switch. Painted
+		// here (not in renderMenu) so the toggle repaints them too. Parent + all
+		// children hide when there are no usable credits.
+		parent, children := resetRowTitles(data.codexResetRows, showResetTime)
+		if parent == "" {
+			miResets.Hide()
+		} else {
+			miResets.SetTitle(parent)
+			miResets.Show()
+		}
+		for i, ch := range resetChildren {
+			if i < len(children) {
+				ch.SetTitle(children[i])
+				ch.Show()
+			} else {
+				ch.Hide()
+			}
 		}
 	}
 
@@ -800,6 +906,17 @@ func onReady() {
 				snapshotProvider(p + "_")
 			}
 		}
+		// Codex reset credits ride outside the keyed carry machinery. On codex
+		// success take the fresh value (even empty = credits all gone/expired);
+		// on codex failure keep whatever we last showed.
+		if _, codexFailed := data.errs["codex"]; codexFailed {
+			data.codexResetRows = lastOK.codexResetRows
+		} else {
+			if lastOK.values == nil {
+				lastOK = newQuotaData()
+			}
+			lastOK.codexResetRows = data.codexResetRows
+		}
 		mu.Unlock()
 
 		renderMenu(data)
@@ -828,6 +945,9 @@ func onReady() {
 		}
 		for k, v := range d.errs {
 			c.errs[k] = v
+		}
+		if d.codexResetRows != nil {
+			c.codexResetRows = append([]resetRow(nil), d.codexResetRows...)
 		}
 		return c
 	}

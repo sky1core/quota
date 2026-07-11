@@ -188,6 +188,143 @@ func TestBuildOutput_NilCreditsBalance(t *testing.T) {
 	}
 }
 
+func TestBuildResetCredits_Nil(t *testing.T) {
+	if got := buildResetCredits(nil); got != nil {
+		t.Errorf("nil snapshot should yield nil, got %v", got)
+	}
+}
+
+func TestBuildResetCredits_NoneAvailable(t *testing.T) {
+	exp := time.Now().Add(24 * time.Hour).Unix()
+	rc := &resetCreditsSnapshot{
+		AvailableCount: 0,
+		Credits: []resetCreditEntry{
+			{Title: "Full reset", Status: "used", ExpiresAt: &exp},
+			{Title: "Full reset", Status: "expired", ExpiresAt: &exp},
+		},
+	}
+	if got := buildResetCredits(rc); got != nil {
+		t.Errorf("no available grants should yield nil, got %v", got)
+	}
+}
+
+func TestBuildResetCredits_SortedByExpiry(t *testing.T) {
+	soon := time.Now().Add(24 * time.Hour).Unix()
+	later := time.Now().Add(72 * time.Hour).Unix()
+	rc := &resetCreditsSnapshot{
+		AvailableCount: 2,
+		Credits: []resetCreditEntry{
+			// Deliberately out of order: later grant listed first.
+			{Title: "Full reset (Weekly + 5 hr)", Status: "available", ExpiresAt: &later},
+			{Title: "Full reset (Weekly + 5 hr)", Status: "available", ExpiresAt: &soon},
+			// Filtered out — not usable.
+			{Title: "used one", Status: "used", ExpiresAt: &soon},
+		},
+	}
+	out := buildResetCredits(rc)
+	if out == nil {
+		t.Fatal("expected non-nil")
+	}
+	if out["available"] != 2 {
+		t.Errorf("available = %v, want 2", out["available"])
+	}
+	items, ok := out["items"].([]map[string]any)
+	if !ok {
+		t.Fatalf("items type = %T, want []map[string]any", out["items"])
+	}
+	if len(items) != 2 {
+		t.Fatalf("items len = %d, want 2 (used status filtered out)", len(items))
+	}
+	// Soonest expiry must come first.
+	at0 := items[0]["expiresAt"].(time.Time)
+	if at0.Unix() != soon {
+		t.Errorf("items[0] expiresAt = %d, want soonest %d", at0.Unix(), soon)
+	}
+	if _, ok := items[0]["expiresIn"].(string); !ok {
+		t.Error("expiresIn should be a string")
+	}
+	if items[0]["title"] != "Full reset (Weekly + 5 hr)" {
+		t.Errorf("title = %v", items[0]["title"])
+	}
+}
+
+func TestBuildResetCredits_CountIgnoresAvailableCount(t *testing.T) {
+	// availableCount from the response is deliberately inconsistent with the
+	// number of available-status grants. We must report len(items) (=1), never
+	// the divergent availableCount (0), so the count can't contradict the list.
+	exp := time.Now().Add(24 * time.Hour).Unix()
+	rc := &resetCreditsSnapshot{
+		AvailableCount: 0,
+		Credits: []resetCreditEntry{
+			{Title: "Full reset", Status: "available", ExpiresAt: &exp},
+		},
+	}
+	out := buildResetCredits(rc)
+	if out == nil {
+		t.Fatal("expected non-nil (one usable grant)")
+	}
+	if out["available"] != 1 {
+		t.Errorf("available = %v, want 1 (len items), not response availableCount 0", out["available"])
+	}
+	if items := out["items"].([]map[string]any); len(items) != 1 {
+		t.Errorf("items len = %d, want 1", len(items))
+	}
+}
+
+func TestBuildOutput_WithResetCredits(t *testing.T) {
+	exp := time.Now().Add(24 * time.Hour).Unix()
+	rr := rateLimitsResponse{
+		RateLimits: rateLimitSnapshot{
+			Primary: &rateLimitWindow{UsedPercent: 10},
+		},
+		ResetCredits: &resetCreditsSnapshot{
+			AvailableCount: 1,
+			Credits:        []resetCreditEntry{{Title: "Full reset", Status: "available", ExpiresAt: &exp}},
+		},
+	}
+	out, err := buildOutput(rr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	rc, ok := out["resetCredits"].(map[string]any)
+	if !ok {
+		t.Fatal("missing resetCredits")
+	}
+	if rc["available"] != 1 {
+		t.Errorf("available = %v, want 1", rc["available"])
+	}
+}
+
+func TestResetCreditsParsing(t *testing.T) {
+	raw := `{
+		"rateLimits": {"primary": {"usedPercent": 20}},
+		"rateLimitResetCredits": {
+			"availableCount": 2,
+			"credits": [
+				{"id": "x", "resetType": "codexRateLimits", "status": "available", "grantedAt": 1781228522, "expiresAt": 1783820522, "title": "Full reset (Weekly + 5 hr)"},
+				{"id": "y", "status": "available", "expiresAt": 1784334796, "title": "Full reset (Weekly + 5 hr)"}
+			]
+		}
+	}`
+	var rr rateLimitsResponse
+	if err := json.Unmarshal([]byte(raw), &rr); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if rr.ResetCredits == nil {
+		t.Fatal("ResetCredits should not be nil")
+	}
+	if rr.ResetCredits.AvailableCount != 2 {
+		t.Errorf("availableCount = %d, want 2", rr.ResetCredits.AvailableCount)
+	}
+	if len(rr.ResetCredits.Credits) != 2 {
+		t.Fatalf("credits len = %d, want 2", len(rr.ResetCredits.Credits))
+	}
+	c0 := rr.ResetCredits.Credits[0]
+	if c0.Status != "available" || c0.ExpiresAt == nil || *c0.ExpiresAt != 1783820522 {
+		t.Errorf("credit[0] parsed wrong: %+v", c0)
+	}
+}
+
 func TestRateLimitsResponseParsing(t *testing.T) {
 	raw := `{
 		"rateLimits": {

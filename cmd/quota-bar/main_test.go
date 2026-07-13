@@ -177,6 +177,154 @@ func TestResetRowTitles_ModeSwitch(t *testing.T) {
 	})
 }
 
+// TestApplyCodexWindows_Robust locks the core requirement: whatever window set
+// Codex sends — weekly-only now, 5h reappearing later, a brand-new daily tier —
+// each window lands in its slot with its OWN truthful label, and absent windows
+// leave their slot empty (renderRows then hides it). No code change is ever
+// needed for a new/returning window.
+func TestApplyCodexWindows_Robust(t *testing.T) {
+	win := func(mins, left int, label string) map[string]any {
+		return map[string]any{"windowMins": mins, "label": label, "left": left}
+	}
+
+	t.Run("weekly-only (current state): 5h slot empty", func(t *testing.T) {
+		d := newQuotaData()
+		d.applyCodexWindows("codex", map[string]any{"windows": []map[string]any{win(10080, 96, "7d")}})
+		if d.values["codex_weekly"] != "96%" || d.labels["codex_weekly"] != "7d" {
+			t.Errorf("weekly slot = %q/%q, want 96%%/7d", d.values["codex_weekly"], d.labels["codex_weekly"])
+		}
+		if _, ok := d.values["codex_5h"]; ok {
+			t.Error("5h slot must stay empty when Codex sends no 5h window")
+		}
+	})
+
+	t.Run("5h reappears alongside weekly: both slots, truthful labels", func(t *testing.T) {
+		d := newQuotaData()
+		d.applyCodexWindows("codex", map[string]any{"windows": []map[string]any{
+			win(300, 42, "5h"), win(10080, 53, "7d"),
+		}})
+		if d.values["codex_5h"] != "42%" || d.labels["codex_5h"] != "5h" {
+			t.Errorf("5h slot = %q/%q, want 42%%/5h", d.values["codex_5h"], d.labels["codex_5h"])
+		}
+		if d.values["codex_weekly"] != "53%" || d.labels["codex_weekly"] != "7d" {
+			t.Errorf("weekly slot = %q/%q, want 53%%/7d", d.values["codex_weekly"], d.labels["codex_weekly"])
+		}
+	})
+
+	t.Run("brand-new tier lands in its own slot with its own label", func(t *testing.T) {
+		d := newQuotaData()
+		// A daily (1440) window Codex never sent before.
+		d.applyCodexWindows("codex", map[string]any{"windows": []map[string]any{win(1440, 80, "1d")}})
+		if d.values["codex_daily"] != "80%" || d.labels["codex_daily"] != "1d" {
+			t.Errorf("daily slot = %q/%q, want 80%%/1d", d.values["codex_daily"], d.labels["codex_daily"])
+		}
+	})
+
+	t.Run("non-default account keeps its own slots", func(t *testing.T) {
+		d := newQuotaData()
+		d.applyCodexWindows("codex-2", map[string]any{"windows": []map[string]any{win(300, 10, "5h")}})
+		if d.values["codex-2_5h"] != "10%" || d.labels["codex-2_5h"] != "5h" {
+			t.Errorf("codex-2 5h slot = %q/%q", d.values["codex-2_5h"], d.labels["codex-2_5h"])
+		}
+		if _, ok := d.values["codex_5h"]; ok {
+			t.Error("codex-2 must not leak into the default codex slots")
+		}
+	})
+
+	t.Run("same-slot collision keeps the first window", func(t *testing.T) {
+		d := newQuotaData()
+		// Two sub-12h windows both route to the 5h slot; first wins.
+		d.applyCodexWindows("codex", map[string]any{"windows": []map[string]any{
+			win(300, 42, "5h"), win(600, 99, "10h"),
+		}})
+		if d.values["codex_5h"] != "42%" || d.labels["codex_5h"] != "5h" {
+			t.Errorf("collision: first window must win, got %q/%q", d.values["codex_5h"], d.labels["codex_5h"])
+		}
+	})
+
+	t.Run("no windows key is a no-op", func(t *testing.T) {
+		d := newQuotaData()
+		d.applyCodexWindows("codex", map[string]any{"planType": "pro"})
+		if len(d.values) != 0 {
+			t.Errorf("no windows → no values, got %v", d.values)
+		}
+	})
+}
+
+func TestCodexWindowBucket(t *testing.T) {
+	// The bucket is an invisible slot id (never a label); it only needs to route
+	// each duration to a stable, pre-allocated slot.
+	cases := map[int]string{
+		1: "5h", 300: "5h", 720: "5h",
+		721: "daily", 1440: "daily", 2880: "daily",
+		2881: "weekly", 10080: "weekly", 20160: "weekly",
+		20161: "monthly", 43200: "monthly",
+	}
+	for mins, want := range cases {
+		if got := codexWindowBucket(mins); got != want {
+			t.Errorf("codexWindowBucket(%d) = %q, want %q", mins, got, want)
+		}
+	}
+	// Every bucket must be one of the pre-allocated slot keys.
+	known := map[string]bool{}
+	for _, k := range codexWindowSlotKeys {
+		known[k] = true
+	}
+	for _, mins := range []int{1, 300, 1440, 10080, 43200, 999999} {
+		if !known[codexWindowBucket(mins)] {
+			t.Errorf("codexWindowBucket(%d) not in codexWindowSlotKeys", mins)
+		}
+	}
+}
+
+func TestIsCodexDayKey(t *testing.T) {
+	yes := []string{"codex_day", "codex-2_day", "codex-10_day"}
+	no := []string{"codex_5h", "codex_weekly", "claude_session", "codex-2_weekly", "claude_weekly_all", "someday"}
+	for _, k := range yes {
+		if !isCodexDayKey(k) {
+			t.Errorf("isCodexDayKey(%q) = false, want true", k)
+		}
+	}
+	for _, k := range no {
+		if isCodexDayKey(k) {
+			t.Errorf("isCodexDayKey(%q) = true, want false", k)
+		}
+	}
+}
+
+// TestMigrateSettings_CodexDayToWeekly pins the B-redesign migration: the old
+// Codex "day" slot (which held the weekly window) becomes the weekly bucket, for
+// the default and every extra account, while other selections are untouched.
+func TestMigrateSettings_CodexDayToWeekly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // migrateSettings persists; keep it off the real config
+
+	s := migrateSettings(settings{Selected: []string{"codex_day", "codex-2_day", "claude_session", "codex_5h"}})
+	want := map[string]bool{"codex_weekly": true, "codex-2_weekly": true, "claude_session": true, "codex_5h": true}
+	if len(s.Selected) != len(want) {
+		t.Fatalf("selected = %v, want keys %v", s.Selected, want)
+	}
+	for _, k := range s.Selected {
+		if !want[k] {
+			t.Errorf("unexpected key after migration: %q (selected=%v)", k, s.Selected)
+		}
+		if strings.HasSuffix(k, "_day") {
+			t.Errorf("legacy _day key survived: %q", k)
+		}
+	}
+
+	// Dedup: codex_day + codex_weekly both present collapse to a single codex_weekly.
+	s2 := migrateSettings(settings{Selected: []string{"codex_weekly", "codex_day"}})
+	count := 0
+	for _, k := range s2.Selected {
+		if k == "codex_weekly" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("codex_weekly should be deduped to 1, got %d (%v)", count, s2.Selected)
+	}
+}
+
 func TestSettings_RefreshIntervals(t *testing.T) {
 	// Absent (zero value) → built-in defaults, not an implicit fallback.
 	var d settings

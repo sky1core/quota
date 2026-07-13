@@ -161,16 +161,34 @@ func TestText_WithClaude(t *testing.T) {
 func TestText_WithCodex(t *testing.T) {
 	payload := map[string]any{
 		"codex": map[string]any{
-			"fiveHour": map[string]any{"left": 90, "resetsIn": "3h"},
-			"day":      map[string]any{"left": 70},
+			"windows": []map[string]any{
+				{"label": "5h", "left": 90, "resetsIn": "3h"},
+				{"label": "7d", "left": 70},
+			},
 		},
 	}
 	got := Text(payload)
 	if !strings.Contains(got, "5h") || !strings.Contains(got, "90%") {
 		t.Errorf("missing 5h data: %q", got)
 	}
-	if !strings.Contains(got, "Day") || !strings.Contains(got, "70%") {
-		t.Errorf("missing day data: %q", got)
+	if !strings.Contains(got, "7d") || !strings.Contains(got, "70%") {
+		t.Errorf("missing weekly data: %q", got)
+	}
+}
+
+// TestText_CodexUnknownWindowLabel: the windows list is self-describing — a
+// window kind render has never heard of still shows, under its own label.
+func TestText_CodexUnknownWindowLabel(t *testing.T) {
+	payload := map[string]any{
+		"codex": map[string]any{
+			"windows": []map[string]any{
+				{"label": "Fortnight", "left": 55, "resetsIn": "9d 1h"},
+			},
+		},
+	}
+	got := Text(payload)
+	if !strings.Contains(got, "Fortnight") || !strings.Contains(got, "55%") {
+		t.Errorf("unknown window kind must render via its own label: %q", got)
 	}
 }
 
@@ -178,7 +196,9 @@ func TestText_WithResetCredits(t *testing.T) {
 	at := time.Date(2026, 7, 12, 10, 42, 0, 0, time.Local)
 	payload := map[string]any{
 		"codex": map[string]any{
-			"fiveHour": map[string]any{"left": 90, "resetsIn": "3h"},
+			"windows": []map[string]any{
+				{"label": "5h", "left": 90, "resetsIn": "3h"},
+			},
 			"resetCredits": map[string]any{
 				"available": 4,
 				"items": []map[string]any{
@@ -203,7 +223,9 @@ func TestText_ResetCreditsAbsent(t *testing.T) {
 	// No resetCredits key → no Reset credits row.
 	payload := map[string]any{
 		"codex": map[string]any{
-			"fiveHour": map[string]any{"left": 90, "resetsIn": "3h"},
+			"windows": []map[string]any{
+				{"label": "5h", "left": 90, "resetsIn": "3h"},
+			},
 		},
 	}
 	got := Text(payload)
@@ -280,8 +302,10 @@ func TestText_FullPayload(t *testing.T) {
 			},
 		},
 		"codex": map[string]any{
-			"fiveHour": map[string]any{"left": 90, "resetsIn": "3h"},
-			"day":      map[string]any{"left": 70, "resetsIn": "5d"},
+			"windows": []map[string]any{
+				{"label": "5h", "left": 90, "resetsIn": "3h"},
+				{"label": "7d", "left": 70, "resetsIn": "5d"},
+			},
 		},
 	}
 	got := Text(payload)
@@ -291,6 +315,9 @@ func TestText_FullPayload(t *testing.T) {
 	}
 	if !strings.Contains(got, "Codex") {
 		t.Error("missing Codex")
+	}
+	if !strings.Contains(got, "Weekly") {
+		t.Error("missing codex Weekly row (duration-bucket label)")
 	}
 	// No "(no data)" when data is provided
 	if strings.Contains(got, "(no data)") {
@@ -342,10 +369,14 @@ func TestText_MultipleCodexAccounts(t *testing.T) {
 	at := time.Date(2026, 7, 12, 10, 42, 0, 0, time.Local)
 	payload := map[string]any{
 		"codex": map[string]any{
-			"fiveHour": map[string]any{"left": 90, "resetsIn": "3h"},
+			"windows": []map[string]any{
+				{"label": "5h", "left": 90, "resetsIn": "3h"},
+			},
 		},
 		"codex-2": map[string]any{
-			"fiveHour": map[string]any{"left": 40},
+			"windows": []map[string]any{
+				{"label": "5h", "left": 40},
+			},
 			"resetCredits": map[string]any{
 				"available": 1,
 				"items": []map[string]any{

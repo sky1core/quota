@@ -97,7 +97,7 @@ quota-bar
 ── Claude 2 ──
    Session / Weekly / …
 ── Codex ──
-   5h / Day
+   5h / 7d / …   (Codex가 현재 노출하는 rate-limit 창을 실제 기간 라벨로 표시)
 ```
 
 각 항목을 체크하면 상단 바에 남은 %가 표시된다.

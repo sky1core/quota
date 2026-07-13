@@ -87,13 +87,14 @@ func Text(payload map[string]any) string {
 	}
 
 	writeCodexBody := func(m map[string]any) {
-		codexItems := []struct{ key, label string }{
-			{"fiveHour", "5h"},
-			{"day", "Day"},
-		}
-		for _, ci := range codexItems {
-			if v, ok := m[ci.key].(map[string]any); ok {
-				writeEntry(ci.label, v)
+		// Codex windows are a self-describing list: each entry carries its own
+		// label, so rendering never needs a window-key vocabulary and survives
+		// Codex adding/removing/reshuffling windows.
+		if ws, ok := m["windows"].([]map[string]any); ok {
+			for _, w := range ws {
+				if lbl, ok := w["label"].(string); ok && lbl != "" {
+					writeEntry(lbl, w)
+				}
 			}
 		}
 		if rc, ok := m["resetCredits"].(map[string]any); ok {

@@ -46,7 +46,7 @@ Claude
 
 Codex
   5h         79%   (31m, at 23:38)
-  Day        63%   (5d 11h, at Mar 6 10:06)
+  7d         63%   (5d 11h, at Mar 6 10:06)
   Reset credits: 4   (expires Mar 2 10:42)
 
 Generated: 2026-02-28T23:06:50+09:00

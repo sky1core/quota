@@ -99,14 +99,16 @@ func TestWinToEntry_FullUsed(t *testing.T) {
 
 func TestBuildOutput_Basic(t *testing.T) {
 	future5h := time.Now().Add(3 * time.Hour).Unix()
-	futureDay := time.Now().Add(12 * time.Hour).Unix()
+	futureWk := time.Now().Add(120 * time.Hour).Unix()
+	w5h := 300
+	wWeekly := 10080
 	planType := "pro"
 	balance := "100"
 
 	rr := rateLimitsResponse{
 		RateLimits: rateLimitSnapshot{
-			Primary:   &rateLimitWindow{UsedPercent: 20, ResetsAt: &future5h},
-			Secondary: &rateLimitWindow{UsedPercent: 40, ResetsAt: &futureDay},
+			Primary:   &rateLimitWindow{UsedPercent: 20, WindowDurationMins: &w5h, ResetsAt: &future5h},
+			Secondary: &rateLimitWindow{UsedPercent: 40, WindowDurationMins: &wWeekly, ResetsAt: &futureWk},
 			Credits:   &creditsSnapshot{Balance: &balance, HasCredit: true},
 			PlanType:  &planType,
 		},
@@ -117,20 +119,27 @@ func TestBuildOutput_Basic(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	fiveHour, ok := out["fiveHour"].(map[string]any)
-	if !ok {
-		t.Fatal("missing fiveHour")
+	// The windows list is self-describing and labeled from the ACTUAL duration:
+	// primary(300min) → label "5h", secondary(10080min) → label "7d", ordered
+	// shortest-first regardless of response position.
+	ws := windowsOf(t, out)
+	if len(ws) != 2 {
+		t.Fatalf("windows len = %d, want 2", len(ws))
 	}
-	if fiveHour["left"] != 80 {
-		t.Errorf("fiveHour left = %v, want 80", fiveHour["left"])
+	if ws[0]["label"] != "5h" || ws[0]["left"] != 80 || ws[0]["windowMins"] != 300 {
+		t.Errorf("windows[0] = %v, want label 5h / left 80 / windowMins 300", ws[0])
 	}
-
-	day, ok := out["day"].(map[string]any)
-	if !ok {
-		t.Fatal("missing day")
+	if ws[1]["label"] != "7d" || ws[1]["left"] != 60 || ws[1]["windowMins"] != 10080 {
+		t.Errorf("windows[1] = %v, want label 7d / left 60 / windowMins 10080", ws[1])
 	}
-	if day["left"] != 60 {
-		t.Errorf("day left = %v, want 60", day["left"])
+	// No coarse bucket key leaks into the data, and no legacy top-level window keys.
+	if _, ok := ws[0]["key"]; ok {
+		t.Error("windows entries must not carry a coarse bucket key")
+	}
+	for _, legacy := range []string{"fiveHour", "day", "5h", "weekly"} {
+		if _, ok := out[legacy]; ok {
+			t.Errorf("legacy top-level key %q must not be emitted", legacy)
+		}
 	}
 
 	credits, ok := out["credits"].(map[string]any)
@@ -150,14 +159,14 @@ func TestBuildOutput_Basic(t *testing.T) {
 }
 
 func TestBuildOutput_PrefersLimitId(t *testing.T) {
+	w5h := 300
 	rr := rateLimitsResponse{
 		RateLimits: rateLimitSnapshot{
-			Primary: &rateLimitWindow{UsedPercent: 99},
+			Primary: &rateLimitWindow{UsedPercent: 99, WindowDurationMins: &w5h},
 		},
 		RateLimitsByLimitId: map[string]rateLimitSnapshot{
 			"codex": {
-				Primary:   &rateLimitWindow{UsedPercent: 15},
-				Secondary: &rateLimitWindow{UsedPercent: 35},
+				Primary: &rateLimitWindow{UsedPercent: 15, WindowDurationMins: &w5h},
 			},
 		},
 	}
@@ -167,10 +176,179 @@ func TestBuildOutput_PrefersLimitId(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	fiveHour := out["fiveHour"].(map[string]any)
-	if fiveHour["left"] != 85 {
-		t.Errorf("should use codex limit, got left=%v", fiveHour["left"])
+	ws := windowsOf(t, out)
+	if len(ws) != 1 || ws[0]["label"] != "5h" || ws[0]["left"] != 85 {
+		t.Errorf("should use codex limit, got windows=%v", ws)
 	}
+}
+
+// TestBuildOutput_WeeklyOnly pins the exact real-world case that motivated the
+// redesign: Codex sometimes sends only a weekly window, in primary. It must be
+// labeled from its actual duration ("7d") — never "5h" from its position — and
+// there must be exactly one entry.
+func TestBuildOutput_WeeklyOnly(t *testing.T) {
+	wWeekly := 10080
+	rr := rateLimitsResponse{
+		RateLimits: rateLimitSnapshot{
+			Primary: &rateLimitWindow{UsedPercent: 4, WindowDurationMins: &wWeekly},
+		},
+	}
+	out, err := buildOutput(rr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ws := windowsOf(t, out)
+	if len(ws) != 1 {
+		t.Fatalf("windows = %v, want exactly the weekly entry", ws)
+	}
+	if ws[0]["label"] != "7d" || ws[0]["windowMins"] != 10080 || ws[0]["left"] != 96 {
+		t.Errorf("windows[0] = %v, want label 7d / windowMins 10080 / left 96", ws[0])
+	}
+}
+
+// TestBuildOutput_SkipsWindowWithoutDuration: a window with no windowDurationMins
+// cannot be labeled truthfully and is omitted rather than mislabeled positionally.
+func TestBuildOutput_SkipsWindowWithoutDuration(t *testing.T) {
+	w5h := 300
+	rr := rateLimitsResponse{
+		RateLimits: rateLimitSnapshot{
+			Primary:   &rateLimitWindow{UsedPercent: 10, WindowDurationMins: &w5h},
+			Secondary: &rateLimitWindow{UsedPercent: 40}, // no duration → skipped
+		},
+	}
+	out, err := buildOutput(rr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ws := windowsOf(t, out)
+	if len(ws) != 1 || ws[0]["windowMins"] != 300 {
+		t.Errorf("only the labelable 300min window should be emitted, got %v", ws)
+	}
+}
+
+// TestBuildOutput_DurationOrder: windows are ordered by actual duration
+// (shortest first) even when the response carries them in reverse positions, so
+// the display order is stable across Codex reshuffles.
+func TestBuildOutput_DurationOrder(t *testing.T) {
+	w5h, wWeekly := 300, 10080
+	rr := rateLimitsResponse{
+		RateLimits: rateLimitSnapshot{
+			Primary:   &rateLimitWindow{UsedPercent: 4, WindowDurationMins: &wWeekly},
+			Secondary: &rateLimitWindow{UsedPercent: 20, WindowDurationMins: &w5h},
+		},
+	}
+	out, err := buildOutput(rr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ws := windowsOf(t, out)
+	if len(ws) != 2 || ws[0]["windowMins"] != 300 || ws[1]["windowMins"] != 10080 {
+		t.Errorf("windows order = %v, want [300 10080]", ws)
+	}
+}
+
+// TestBuildOutput_DuplicateDurationFirstWins pins the dedup rule: the same window
+// (identical windowDurationMins) must not appear twice; the first (primary) wins.
+// Two DIFFERENT durations are two different windows and are both kept (no coarse
+// bucketing collapses them).
+func TestBuildOutput_DuplicateDurationFirstWins(t *testing.T) {
+	w300a, w300b := 300, 300
+	rr := rateLimitsResponse{
+		RateLimits: rateLimitSnapshot{
+			Primary:   &rateLimitWindow{UsedPercent: 10, WindowDurationMins: &w300a},
+			Secondary: &rateLimitWindow{UsedPercent: 90, WindowDurationMins: &w300b},
+		},
+	}
+	out, err := buildOutput(rr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ws := windowsOf(t, out)
+	if len(ws) != 1 {
+		t.Fatalf("windows = %v, want 1 (same duration deduped)", ws)
+	}
+	if ws[0]["left"] != 90 {
+		t.Errorf("first (primary) window must win, got %v", ws[0])
+	}
+
+	// Two distinct short durations are distinct windows — both kept, labeled truthfully.
+	w240, w600 := 240, 600
+	rr2 := rateLimitsResponse{RateLimits: rateLimitSnapshot{
+		Primary:   &rateLimitWindow{UsedPercent: 0, WindowDurationMins: &w240},
+		Secondary: &rateLimitWindow{UsedPercent: 0, WindowDurationMins: &w600},
+	}}
+	out2, err := buildOutput(rr2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ws2 := windowsOf(t, out2)
+	if len(ws2) != 2 || ws2[0]["label"] != "4h" || ws2[1]["label"] != "10h" {
+		t.Errorf("distinct durations must both show with truthful labels, got %v", ws2)
+	}
+}
+
+// TestBuildOutput_NoWindows: when no window is classifiable the windows key is
+// omitted entirely (never an empty list), and the output is still valid if
+// other fields (credits/planType) are present.
+func TestBuildOutput_NoWindows(t *testing.T) {
+	planType := "pro"
+	rr := rateLimitsResponse{
+		RateLimits: rateLimitSnapshot{
+			Secondary: &rateLimitWindow{UsedPercent: 40}, // no duration → unclassifiable
+			PlanType:  &planType,
+		},
+	}
+	out, err := buildOutput(rr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := out["windows"]; ok {
+		t.Errorf("windows key must be omitted when empty, got %v", out["windows"])
+	}
+	if out["planType"] != "pro" {
+		t.Errorf("planType should survive without windows: %v", out["planType"])
+	}
+}
+
+// windowsOf extracts the windows list from a buildOutput result.
+func windowsOf(t *testing.T, out map[string]any) []map[string]any {
+	t.Helper()
+	ws, ok := out["windows"].([]map[string]any)
+	if !ok {
+		t.Fatalf("missing windows list, out keys = %v", keysOf(out))
+	}
+	return ws
+}
+
+// TestWindowLabel pins that the label is the ACTUAL duration, never a bucket:
+// a 600-minute window is "10h", not "5h". This is the whole point of the fix.
+func TestWindowLabel(t *testing.T) {
+	cases := map[int]string{
+		300:   "5h",     // 5 hours
+		240:   "4h",     // 4 hours — must NOT be "5h"
+		600:   "10h",    // 10 hours — must NOT be "5h"
+		60:    "1h",     // 1 hour
+		90:    "1h 30m", // mixed
+		45:    "45m",    // minutes only
+		1440:  "1d",     // 1 day
+		10080: "7d",     // 7 days (weekly)
+		43200: "30d",    // 30 days (monthly)
+		1500:  "1d 1h",  // day + hour
+		0:     "0m",     // degenerate
+	}
+	for mins, want := range cases {
+		if got := windowLabel(mins); got != want {
+			t.Errorf("windowLabel(%d) = %q, want %q", mins, got, want)
+		}
+	}
+}
+
+func keysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func TestBuildOutput_Empty(t *testing.T) {
@@ -182,9 +360,10 @@ func TestBuildOutput_Empty(t *testing.T) {
 }
 
 func TestBuildOutput_NilCreditsBalance(t *testing.T) {
+	w5h := 300
 	rr := rateLimitsResponse{
 		RateLimits: rateLimitSnapshot{
-			Primary: &rateLimitWindow{UsedPercent: 10},
+			Primary: &rateLimitWindow{UsedPercent: 10, WindowDurationMins: &w5h},
 			Credits: &creditsSnapshot{Balance: nil, HasCredit: false},
 		},
 	}
@@ -283,9 +462,10 @@ func TestBuildResetCredits_CountIgnoresAvailableCount(t *testing.T) {
 
 func TestBuildOutput_WithResetCredits(t *testing.T) {
 	exp := time.Now().Add(24 * time.Hour).Unix()
+	w5h := 300
 	rr := rateLimitsResponse{
 		RateLimits: rateLimitSnapshot{
-			Primary: &rateLimitWindow{UsedPercent: 10},
+			Primary: &rateLimitWindow{UsedPercent: 10, WindowDurationMins: &w5h},
 		},
 		ResetCredits: &resetCreditsSnapshot{
 			AvailableCount: 1,

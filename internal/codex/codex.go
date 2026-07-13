@@ -199,6 +199,32 @@ func GetQuotaForHome(timeout time.Duration, codexHome string) (map[string]any, e
 	return buildOutput(rr)
 }
 
+// windowLabel renders a rate-limit window's display label from its ACTUAL
+// duration (minutes) — never a coarse bucket. So a 300-minute window is "5h" and
+// a 600-minute window is "10h"; the label can never claim a duration the window
+// does not have. Zero components are dropped: 300→"5h", 10080→"7d", 1440→"1d",
+// 43200→"30d", 90→"1h 30m". This is the only truthful source for the label,
+// because the Codex response carries no per-window name — only windowDurationMins.
+func windowLabel(mins int) string {
+	if mins <= 0 {
+		return "0m"
+	}
+	d := mins / 1440
+	h := (mins % 1440) / 60
+	m := mins % 60
+	var parts []string
+	if d > 0 {
+		parts = append(parts, fmt.Sprintf("%dd", d))
+	}
+	if h > 0 {
+		parts = append(parts, fmt.Sprintf("%dh", h))
+	}
+	if m > 0 {
+		parts = append(parts, fmt.Sprintf("%dm", m))
+	}
+	return strings.Join(parts, " ")
+}
+
 func winToEntry(w *rateLimitWindow) map[string]any {
 	if w == nil {
 		return nil
@@ -252,11 +278,42 @@ func buildOutput(rr rateLimitsResponse) (map[string]any, error) {
 	}
 
 	out := map[string]any{}
-	if e := winToEntry(snap.Primary); e != nil {
-		out["fiveHour"] = e
+	// Codex places windows in primary/secondary positionally and changes which
+	// window sits in each slot (and which are present) over time — e.g. around a
+	// GPT model launch the 5h window can disappear and the weekly window can move
+	// into primary. So the contract is a SELF-DESCRIBING LIST: each entry carries
+	// its ACTUAL duration (windowMins) and a label derived truthfully from it, and
+	// entries are ordered shortest-window first. Consumers iterate and display the
+	// label as given; they never assume a position, a fixed window set, or a coarse
+	// bucket. A window with no windowDurationMins can't be labeled truthfully and
+	// is omitted (positional/bucketed labeling is the bug this shape removes).
+	var windows []map[string]any
+	seen := map[int]bool{}
+	for _, w := range []*rateLimitWindow{snap.Primary, snap.Secondary} {
+		if w == nil || w.WindowDurationMins == nil {
+			continue
+		}
+		e := winToEntry(w)
+		if e == nil {
+			continue
+		}
+		mins := *w.WindowDurationMins
+		// The same window (same duration) must not appear twice; keep the first.
+		if seen[mins] {
+			continue
+		}
+		seen[mins] = true
+		e["windowMins"] = mins
+		e["label"] = windowLabel(mins)
+		windows = append(windows, e)
 	}
-	if e := winToEntry(snap.Secondary); e != nil {
-		out["day"] = e
+	// Stable order by actual duration (shortest first), independent of response
+	// position.
+	sort.SliceStable(windows, func(i, j int) bool {
+		return windows[i]["windowMins"].(int) < windows[j]["windowMins"].(int)
+	})
+	if len(windows) > 0 {
+		out["windows"] = windows
 	}
 	if snap.Credits != nil {
 		bal := ""

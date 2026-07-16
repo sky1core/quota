@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -163,7 +164,7 @@ Resets Mar 6, 12pm (Asia/Seoul)
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, ok := result["session"].(map[string]any)
+	session, ok := windowByKey(result, "session")
 	if !ok {
 		t.Fatal("missing session")
 	}
@@ -201,7 +202,7 @@ Sonnet only          0% used
 	}
 
 	// session
-	session, ok := result["session"].(map[string]any)
+	session, ok := windowByKey(result, "session")
 	if !ok {
 		t.Fatal("missing session")
 	}
@@ -216,7 +217,7 @@ Sonnet only          0% used
 	}
 
 	// weeklyAll
-	weekly, ok := result["weeklyAll"].(map[string]any)
+	weekly, ok := windowByKey(result, "weekly_all")
 	if !ok {
 		t.Fatal("missing weeklyAll")
 	}
@@ -225,7 +226,7 @@ Sonnet only          0% used
 	}
 
 	// third row is a dynamic extra with its on-screen label
-	extras, ok := result["extras"].([]map[string]any)
+	extras, ok := extraWindows(result)
 	if !ok {
 		t.Fatal("missing extras")
 	}
@@ -248,7 +249,7 @@ func TestParseCaptured_WithANSI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	session, ok := result["session"].(map[string]any)
+	session, ok := windowByKey(result, "session")
 	if !ok {
 		t.Fatal("missing session after ANSI strip")
 	}
@@ -304,21 +305,21 @@ func TestParseCaptured_UsageCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	session, ok := result["session"].(map[string]any)
+	session, ok := windowByKey(result, "session")
 	if !ok {
 		t.Fatal("missing session")
 	}
 	if session["used"] != 11 || session["left"] != 89 {
 		t.Errorf("session: used=%v left=%v", session["used"], session["left"])
 	}
-	weekly, ok := result["weeklyAll"].(map[string]any)
+	weekly, ok := windowByKey(result, "weekly_all")
 	if !ok {
 		t.Fatal("missing weeklyAll")
 	}
 	if weekly["used"] != 83 {
 		t.Errorf("weeklyAll used=%v, want 83", weekly["used"])
 	}
-	extras, ok := result["extras"].([]map[string]any)
+	extras, ok := extraWindows(result)
 	if !ok {
 		t.Fatal("missing extras")
 	}
@@ -386,7 +387,7 @@ func TestParseCaptured_UsageFableCapture(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	session, ok := result["session"].(map[string]any)
+	session, ok := windowByKey(result, "session")
 	if !ok {
 		t.Fatal("missing session")
 	}
@@ -397,7 +398,7 @@ func TestParseCaptured_UsageFableCapture(t *testing.T) {
 		t.Errorf("session resetsIn should be relative, got %v", session["resetsIn"])
 	}
 
-	weekly, ok := result["weeklyAll"].(map[string]any)
+	weekly, ok := windowByKey(result, "weekly_all")
 	if !ok {
 		t.Fatal("missing weeklyAll")
 	}
@@ -405,7 +406,7 @@ func TestParseCaptured_UsageFableCapture(t *testing.T) {
 		t.Errorf("weeklyAll used=%v, want 1", weekly["used"])
 	}
 
-	extras, ok := result["extras"].([]map[string]any)
+	extras, ok := extraWindows(result)
 	if !ok {
 		t.Fatal("missing extras")
 	}
@@ -445,7 +446,7 @@ func TestParseCaptured_MultipleExtras(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	extras, ok := result["extras"].([]map[string]any)
+	extras, ok := extraWindows(result)
 	if !ok {
 		t.Fatal("missing extras")
 	}
@@ -464,20 +465,70 @@ func TestParseCaptured_MultipleExtras(t *testing.T) {
 	}
 }
 
-func TestExtraName(t *testing.T) {
+// windowByKey finds a window in the parsed self-describing list by its key.
+func windowByKey(result map[string]any, key string) (map[string]any, bool) {
+	ws, ok := result["windows"].([]map[string]any)
+	if !ok {
+		return nil, false
+	}
+	for _, w := range ws {
+		if w["key"] == key {
+			return w, true
+		}
+	}
+	return nil, false
+}
+
+// extraWindows returns the per-model rows (keys "extra_N") in order.
+func extraWindows(result map[string]any) ([]map[string]any, bool) {
+	ws, ok := result["windows"].([]map[string]any)
+	if !ok {
+		return nil, false
+	}
+	var out []map[string]any
+	for _, w := range ws {
+		if k, _ := w["key"].(string); strings.HasPrefix(k, "extra_") {
+			out = append(out, w)
+		}
+	}
+	return out, len(out) > 0
+}
+
+// TestWindowLabel pins that the label comes from Claude's own /usage text and is
+// never a hardcoded vocabulary: if Claude renames the period, the label follows.
+func TestWindowLabel(t *testing.T) {
 	tests := []struct {
 		in, want string
 	}{
+		{"Current session", "Session"},
+		{"Current week (all models)", "Week"},
 		{"Current week (Fable)", "Fable"},
 		{"Current week (Sonnet only)", "Sonnet only"},
-		// degenerate empty parens must not yield an empty label
-		{"Current week (   )", "Current week (   )"},
+		// Period rename must flow straight through — this is the whole point.
+		{"Current 5 days (all models)", "5 days"},
+		{"Current 5 days (Fable)", "Fable"},
+		{"Current month (all models)", "Month"},
+		// Degenerate/unknown text passes through rather than being renamed.
 		{"Some other row", "Some other row"},
+		{"", ""},
 	}
 	for _, tt := range tests {
-		got := extraName(tt.in)
-		if got != tt.want {
-			t.Errorf("extraName(%q) = %q, want %q", tt.in, got, tt.want)
+		if got := windowLabel(tt.in); got != tt.want {
+			t.Errorf("windowLabel(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestWindowKeys_Finite: the vocabulary consumers pre-allocate slots from.
+func TestWindowKeys_Finite(t *testing.T) {
+	want := []string{"session", "weekly_all", "extra_1", "extra_2", "extra_3"}
+	got := WindowKeys()
+	if len(got) != len(want) {
+		t.Fatalf("WindowKeys() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("WindowKeys() = %v, want %v", got, want)
 		}
 	}
 }
@@ -542,6 +593,41 @@ func TestAtoi(t *testing.T) {
 		got := atoi(tt.in)
 		if got != tt.want {
 			t.Errorf("atoi(%q) = %d, want %d", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestParseCaptured_ExtraRowsNotCapped is a REGRESSION GUARD: the parser reports
+// every per-model row Claude shows. quota-bar's finite menu is quota-bar's
+// problem — a slot limit must never delete a real row from the data (quota-cli).
+func TestParseCaptured_ExtraRowsNotCapped(t *testing.T) {
+	input := `
+Current session      10% used
+Current week (all models)   20% used
+Current week (Fable)   30% used
+Current week (Opus)    40% used
+Current week (Sonnet)  50% used
+Current week (Haiku)   60% used
+`
+	result, err := parseCaptured(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extras, ok := extraWindows(result)
+	if !ok {
+		t.Fatal("missing per-model rows")
+	}
+	// Four model rows — more than the consumer slot vocabulary (extraSlotVocab=3).
+	want := []string{"Fable", "Opus", "Sonnet", "Haiku"}
+	if len(extras) != len(want) {
+		t.Fatalf("parser must not cap model rows: got %d, want %d (%v)", len(extras), len(want), extras)
+	}
+	for i, lbl := range want {
+		if extras[i]["label"] != lbl {
+			t.Errorf("extras[%d] label = %v, want %q", i, extras[i]["label"], lbl)
+		}
+		if extras[i]["key"] != fmt.Sprintf("extra_%d", i+1) {
+			t.Errorf("extras[%d] key = %v, want extra_%d", i, extras[i]["key"], i+1)
 		}
 	}
 }

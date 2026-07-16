@@ -199,6 +199,29 @@ func GetQuotaForHome(timeout time.Duration, codexHome string) (map[string]any, e
 	return buildOutput(rr)
 }
 
+// WindowKeys returns every window key this provider can emit, in display order.
+// Consumers that must pre-allocate a slot per key (quota-bar; systray cannot add
+// rows at runtime) enumerate this. A key is a stable slot/selection identity —
+// a coarse duration bucket — and is NEVER shown; the row's text is the window's
+// own truthful label.
+func WindowKeys() []string { return []string{"5h", "daily", "weekly", "monthly"} }
+
+// windowKey maps a window's actual duration (minutes) to its stable slot key.
+// Ranges (not exact values) so a duration tweak still lands in a slot. The
+// returned string is always one of WindowKeys(). This never becomes a label.
+func windowKey(mins int) string {
+	switch {
+	case mins <= 12*60: // ≤12h: short rolling window (historically 5h)
+		return "5h"
+	case mins <= 2*1440: // ≤2d
+		return "daily"
+	case mins <= 14*1440: // ≤14d
+		return "weekly"
+	default: // >14d
+		return "monthly"
+	}
+}
+
 // windowLabel renders a rate-limit window's display label from its ACTUAL
 // duration (minutes) — never a coarse bucket. So a 300-minute window is "5h" and
 // a 600-minute window is "10h"; the label can never claim a duration the window
@@ -281,12 +304,12 @@ func buildOutput(rr rateLimitsResponse) (map[string]any, error) {
 	// Codex places windows in primary/secondary positionally and changes which
 	// window sits in each slot (and which are present) over time — e.g. around a
 	// GPT model launch the 5h window can disappear and the weekly window can move
-	// into primary. So the contract is a SELF-DESCRIBING LIST: each entry carries
-	// its ACTUAL duration (windowMins) and a label derived truthfully from it, and
-	// entries are ordered shortest-window first. Consumers iterate and display the
-	// label as given; they never assume a position, a fixed window set, or a coarse
-	// bucket. A window with no windowDurationMins can't be labeled truthfully and
-	// is omitted (positional/bucketed labeling is the bug this shape removes).
+	// into primary. So the contract is the shared SELF-DESCRIBING LIST: each entry
+	// carries its stable slot key, its ACTUAL duration (windowMins), and a label
+	// derived truthfully from that duration. Consumers iterate and display the
+	// label as given; they never assume a position or hold a label vocabulary. A
+	// window with no windowDurationMins can't be labeled truthfully and is omitted
+	// (positional/bucketed labeling is the bug this shape removes).
 	var windows []map[string]any
 	seen := map[int]bool{}
 	for _, w := range []*rateLimitWindow{snap.Primary, snap.Secondary} {
@@ -298,11 +321,15 @@ func buildOutput(rr rateLimitsResponse) (map[string]any, error) {
 			continue
 		}
 		mins := *w.WindowDurationMins
-		// The same window (same duration) must not appear twice; keep the first.
+		// Dedupe the SAME window (identical duration) only. Two different
+		// durations are two different windows and are both emitted, even if they
+		// share a slot key — the data must never lose a real window to a
+		// consumer's slot limit. Slot collisions are the consumer's to resolve.
 		if seen[mins] {
 			continue
 		}
 		seen[mins] = true
+		e["key"] = windowKey(mins)
 		e["windowMins"] = mins
 		e["label"] = windowLabel(mins)
 		windows = append(windows, e)

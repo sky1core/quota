@@ -132,10 +132,11 @@ func TestBuildOutput_Basic(t *testing.T) {
 	if ws[1]["label"] != "7d" || ws[1]["left"] != 60 || ws[1]["windowMins"] != 10080 {
 		t.Errorf("windows[1] = %v, want label 7d / left 60 / windowMins 10080", ws[1])
 	}
-	// No coarse bucket key leaks into the data, and no legacy top-level window keys.
-	if _, ok := ws[0]["key"]; ok {
-		t.Error("windows entries must not carry a coarse bucket key")
+	// Each entry carries its stable slot key (never shown; the label is the truth).
+	if ws[0]["key"] != "5h" || ws[1]["key"] != "weekly" {
+		t.Errorf("window keys = %v/%v, want 5h/weekly", ws[0]["key"], ws[1]["key"])
 	}
+	// No legacy top-level window keys.
 	for _, legacy := range []string{"fiveHour", "day", "5h", "weekly"} {
 		if _, ok := out[legacy]; ok {
 			t.Errorf("legacy top-level key %q must not be emitted", legacy)
@@ -247,11 +248,35 @@ func TestBuildOutput_DurationOrder(t *testing.T) {
 	}
 }
 
-// TestBuildOutput_DuplicateDurationFirstWins pins the dedup rule: the same window
-// (identical windowDurationMins) must not appear twice; the first (primary) wins.
-// Two DIFFERENT durations are two different windows and are both kept (no coarse
-// bucketing collapses them).
-func TestBuildOutput_DuplicateDurationFirstWins(t *testing.T) {
+// TestBuildOutput_DistinctDurationsBothKept is a REGRESSION GUARD: the data must
+// never lose a real window to a consumer's slot limit. Two different durations
+// are two different windows and are BOTH emitted with their own truthful labels,
+// even though they share a slot key — resolving that collision is the job of a
+// consumer that has finite slots (quota-bar), not of this producer.
+func TestBuildOutput_DistinctDurationsBothKept(t *testing.T) {
+	w240, w600 := 240, 600 // both ≤12h → same "5h" slot key, but different windows
+	rr := rateLimitsResponse{
+		RateLimits: rateLimitSnapshot{
+			Primary:   &rateLimitWindow{UsedPercent: 0, WindowDurationMins: &w240},
+			Secondary: &rateLimitWindow{UsedPercent: 0, WindowDurationMins: &w600},
+		},
+	}
+	out, err := buildOutput(rr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ws := windowsOf(t, out)
+	if len(ws) != 2 {
+		t.Fatalf("both distinct windows must be emitted, got %v", ws)
+	}
+	if ws[0]["label"] != "4h" || ws[1]["label"] != "10h" {
+		t.Errorf("each window keeps its own truthful label, got %v", ws)
+	}
+}
+
+// TestBuildOutput_SameDurationDeduped: only the SAME window (identical duration)
+// is deduped; the first (primary) wins.
+func TestBuildOutput_SameDurationDeduped(t *testing.T) {
 	w300a, w300b := 300, 300
 	rr := rateLimitsResponse{
 		RateLimits: rateLimitSnapshot{
@@ -270,20 +295,28 @@ func TestBuildOutput_DuplicateDurationFirstWins(t *testing.T) {
 	if ws[0]["left"] != 90 {
 		t.Errorf("first (primary) window must win, got %v", ws[0])
 	}
+}
 
-	// Two distinct short durations are distinct windows — both kept, labeled truthfully.
-	w240, w600 := 240, 600
-	rr2 := rateLimitsResponse{RateLimits: rateLimitSnapshot{
-		Primary:   &rateLimitWindow{UsedPercent: 0, WindowDurationMins: &w240},
-		Secondary: &rateLimitWindow{UsedPercent: 0, WindowDurationMins: &w600},
+// TestBuildOutput_KeysFromVocabulary: every key is a slot address drawn from
+// WindowKeys() (keys may repeat — see DistinctDurationsBothKept).
+func TestBuildOutput_KeysFromVocabulary(t *testing.T) {
+	w5h, wWeekly := 300, 10080
+	rr := rateLimitsResponse{RateLimits: rateLimitSnapshot{
+		Primary:   &rateLimitWindow{UsedPercent: 20, WindowDurationMins: &w5h},
+		Secondary: &rateLimitWindow{UsedPercent: 40, WindowDurationMins: &wWeekly},
 	}}
-	out2, err := buildOutput(rr2)
+	out, err := buildOutput(rr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	ws2 := windowsOf(t, out2)
-	if len(ws2) != 2 || ws2[0]["label"] != "4h" || ws2[1]["label"] != "10h" {
-		t.Errorf("distinct durations must both show with truthful labels, got %v", ws2)
+	known := map[string]bool{}
+	for _, k := range WindowKeys() {
+		known[k] = true
+	}
+	for _, w := range windowsOf(t, out) {
+		if k, _ := w["key"].(string); !known[k] {
+			t.Errorf("key %q not in WindowKeys()", k)
+		}
 	}
 }
 

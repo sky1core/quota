@@ -93,12 +93,15 @@ quota-bar
 
 ```
 ── Claude ──
-   Session / Weekly / …
+   Session / Week / …
 ── Claude 2 ──
-   Session / Weekly / …
+   Session / Week / …
 ── Codex ──
-   5h / 7d / …   (Codex가 현재 노출하는 rate-limit 창을 실제 기간 라벨로 표시)
+   5h / 7d / …
 ```
+
+각 provider가 **현재 노출하는 rate-limit 창만**, 그 provider가 준 라벨 그대로 표시된다
+(Claude는 `/usage` 화면 문구, Codex는 실제 창 기간). 창 구성이나 기간이 바뀌면 표시도 따라간다.
 
 각 항목을 체크하면 상단 바에 남은 %가 표시된다.
 

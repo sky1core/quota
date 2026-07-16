@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // /usage settle timing: minimum grace before the first re-capture, poll
@@ -226,20 +227,73 @@ var usedLineRe = regexp.MustCompile(`(\d+)%\s*used`)
 // resetsLineRe matches a reset line like "Resets Jul 6 at 11:59am (Asia/Seoul)".
 var resetsLineRe = regexp.MustCompile(`(?i)^Resets?\s+(.+)`)
 
-// weeklyLabelRe extracts the model name from a weekly row label,
-// e.g. "Current week (Fable)" → "Fable".
-var weeklyLabelRe = regexp.MustCompile(`^Current week \((.+)\)$`)
+// extraSlotVocab is how many per-model slots a slot-limited consumer should
+// pre-allocate. It does NOT cap the data: parseCaptured reports every row Claude
+// shows, and a consumer with a finite menu simply ignores keys it has no slot
+// for. Keeping this out of the parser is what stops quota-bar's systray limit
+// from silently deleting rows from quota-cli.
+const extraSlotVocab = 3
 
-// parseCaptured parses the /usage screen line by line. "Current session" and
-// "Current week (all models)" are structural fixed keys; any other usage row
-// (per-model weekly quotas whose names change across model generations) is
-// returned in the "extras" array with its on-screen label.
+// WindowKeys returns the window keys a slot-limited consumer should pre-allocate
+// (quota-bar; systray cannot add rows at runtime), in display order. It is a
+// CONSUMER HINT, not a bound on the data: the emitted windows list may contain
+// further keys (e.g. "extra_4"), which such a consumer ignores. A key is a
+// stable slot/selection identity — never a label.
+func WindowKeys() []string {
+	keys := []string{"session", "weekly_all"}
+	for i := 1; i <= extraSlotVocab; i++ {
+		keys = append(keys, fmt.Sprintf("extra_%d", i))
+	}
+	return keys
+}
+
+// qualifierRe splits a trailing "(...)" qualifier off a /usage row label:
+// "Current week (Fable)" → base "Current week", qualifier "Fable".
+var qualifierRe = regexp.MustCompile(`^(.*?)\s*\((.+)\)\s*$`)
+
+// windowLabel derives a row's display label from the /usage screen text — the
+// only truth Claude gives us, since Claude reports no window duration. It never
+// substitutes a hardcoded vocabulary, so if Claude changes the period the label
+// follows automatically:
+//
+//	"Current session"             → "Session"
+//	"Current week (all models)"   → "Week"
+//	"Current week (Fable)"        → "Fable"   (per-model row: the model names it)
+//	"Current 5 days (all models)" → "5 days"  (period change flows through)
+//
+// Unrecognized text passes through unchanged rather than being renamed.
+func windowLabel(screen string) string {
+	s := strings.TrimSpace(screen)
+	base := s
+	if m := qualifierRe.FindStringSubmatch(s); m != nil {
+		qual := strings.TrimSpace(m[2])
+		if qual != "" && !strings.EqualFold(qual, "all models") {
+			return qual
+		}
+		// Aggregate row: drop the "(all models)" qualifier, keep the period.
+		base = strings.TrimSpace(m[1])
+	}
+	base = strings.TrimSpace(strings.TrimPrefix(base, "Current "))
+	if base == "" {
+		return s
+	}
+	r := []rune(base)
+	return string(unicode.ToUpper(r[0])) + string(r[1:])
+}
+
+// parseCaptured parses the /usage screen line by line into the shared
+// self-describing window list: out["windows"] = [{key,label,used,left,…}], in
+// screen order. Each row carries its own label derived from the screen text
+// (windowLabel), so no consumer holds a label vocabulary. The key is the row's
+// structural identity — "session" and "weekly_all" for the two aggregate rows,
+// "extra_N" for per-model rows (whose names change across model generations).
 func parseCaptured(text string) (map[string]any, error) {
 	lines := strings.Split(text, "\n")
 
-	out := map[string]any{}
-	extras := []map[string]any{}
-	seen := map[string]bool{}
+	var windows []map[string]any
+	seenKey := map[string]bool{}
+	seenExtra := map[string]bool{}
+	extraIdx := 0
 
 	for i, line := range lines {
 		m := usedLineRe.FindStringSubmatchIndex(line)
@@ -248,12 +302,12 @@ func parseCaptured(text string) (map[string]any, error) {
 		}
 		pct := atoi(line[m[2]:m[3]])
 
-		// Label: same-line text before the bar, or the nearest line above.
-		label := stripBarChars(line[:m[0]])
-		if label == "" {
-			label = labelAbove(lines, i)
+		// Screen text: same-line text before the bar, or the nearest line above.
+		screen := stripBarChars(line[:m[0]])
+		if screen == "" {
+			screen = labelAbove(lines, i)
 		}
-		if label == "" {
+		if screen == "" {
 			continue
 		}
 
@@ -266,34 +320,38 @@ func parseCaptured(text string) (map[string]any, error) {
 			}
 		}
 
+		label := windowLabel(screen)
+		var key string
 		switch {
-		case strings.Contains(label, "Current session"):
-			if !seen["session"] {
-				seen["session"] = true
-				out["session"] = entry
-			}
-		case strings.Contains(label, "all models"):
-			if !seen["weeklyAll"] {
-				seen["weeklyAll"] = true
-				out["weeklyAll"] = entry
-			}
+		case strings.Contains(screen, "Current session"):
+			key = "session"
+		case strings.Contains(screen, "all models"):
+			key = "weekly_all"
 		default:
-			name := extraName(label)
-			if !seen["extra:"+name] {
-				seen["extra:"+name] = true
-				entry["label"] = name
-				extras = append(extras, entry)
+			// Per-model row. Dedupe by label so one model can't take two slots.
+			// NOT capped here: the parser reports every row Claude shows. Slot
+			// limits belong to consumers that have them (quota-bar), never to the
+			// data — quota-cli must not lose a real row to a menu constraint.
+			if seenExtra[label] {
+				continue
 			}
+			seenExtra[label] = true
+			extraIdx++
+			key = fmt.Sprintf("extra_%d", extraIdx)
 		}
+		if seenKey[key] {
+			continue
+		}
+		seenKey[key] = true
+		entry["key"] = key
+		entry["label"] = label
+		windows = append(windows, entry)
 	}
 
-	if len(extras) > 0 {
-		out["extras"] = extras
-	}
-	if len(out) == 0 {
+	if len(windows) == 0 {
 		return nil, errors.New("could not parse claude quota from captured output")
 	}
-	return out, nil
+	return map[string]any{"windows": windows}, nil
 }
 
 // stripBarChars removes progress-bar block characters (U+2580–U+259F) and
@@ -345,17 +403,6 @@ func resetsBelow(lines []string, i int) string {
 		return val
 	}
 	return ""
-}
-
-// extraName returns the display name for a dynamic quota row: the text inside
-// "Current week (...)" when present, otherwise the label as shown on screen.
-func extraName(label string) string {
-	if m := weeklyLabelRe.FindStringSubmatch(label); m != nil {
-		if name := strings.TrimSpace(m[1]); name != "" {
-			return name
-		}
-	}
-	return label
 }
 
 // parseReset normalizes a resets string into a relative "time left" string and,

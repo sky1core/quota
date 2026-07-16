@@ -177,19 +177,19 @@ func TestResetRowTitles_ModeSwitch(t *testing.T) {
 	})
 }
 
-// TestApplyCodexWindows_Robust locks the core requirement: whatever window set
-// Codex sends — weekly-only now, 5h reappearing later, a brand-new daily tier —
-// each window lands in its slot with its OWN truthful label, and absent windows
-// leave their slot empty (renderRows then hides it). No code change is ever
-// needed for a new/returning window.
-func TestApplyCodexWindows_Robust(t *testing.T) {
-	win := func(mins, left int, label string) map[string]any {
-		return map[string]any{"windowMins": mins, "label": label, "left": left}
+// TestApplyWindows_Robust locks the core requirement: whatever window set a
+// provider sends — weekly-only now, 5h reappearing later, a brand-new tier —
+// each window lands in its slot with its OWN label, and absent windows leave
+// their slot empty (renderRows then hides it). No code change is ever needed for
+// a new/returning window, and quota-bar never names a window itself.
+func TestApplyWindows_Robust(t *testing.T) {
+	win := func(key, label string, left int) map[string]any {
+		return map[string]any{"key": key, "label": label, "left": left}
 	}
 
 	t.Run("weekly-only (current state): 5h slot empty", func(t *testing.T) {
 		d := newQuotaData()
-		d.applyCodexWindows("codex", map[string]any{"windows": []map[string]any{win(10080, 96, "7d")}})
+		d.applyWindows("codex", map[string]any{"windows": []map[string]any{win("weekly", "7d", 96)}})
 		if d.values["codex_weekly"] != "96%" || d.labels["codex_weekly"] != "7d" {
 			t.Errorf("weekly slot = %q/%q, want 96%%/7d", d.values["codex_weekly"], d.labels["codex_weekly"])
 		}
@@ -200,8 +200,8 @@ func TestApplyCodexWindows_Robust(t *testing.T) {
 
 	t.Run("5h reappears alongside weekly: both slots, truthful labels", func(t *testing.T) {
 		d := newQuotaData()
-		d.applyCodexWindows("codex", map[string]any{"windows": []map[string]any{
-			win(300, 42, "5h"), win(10080, 53, "7d"),
+		d.applyWindows("codex", map[string]any{"windows": []map[string]any{
+			win("5h", "5h", 42), win("weekly", "7d", 53),
 		}})
 		if d.values["codex_5h"] != "42%" || d.labels["codex_5h"] != "5h" {
 			t.Errorf("5h slot = %q/%q, want 42%%/5h", d.values["codex_5h"], d.labels["codex_5h"])
@@ -214,7 +214,7 @@ func TestApplyCodexWindows_Robust(t *testing.T) {
 	t.Run("brand-new tier lands in its own slot with its own label", func(t *testing.T) {
 		d := newQuotaData()
 		// A daily (1440) window Codex never sent before.
-		d.applyCodexWindows("codex", map[string]any{"windows": []map[string]any{win(1440, 80, "1d")}})
+		d.applyWindows("codex", map[string]any{"windows": []map[string]any{win("daily", "1d", 80)}})
 		if d.values["codex_daily"] != "80%" || d.labels["codex_daily"] != "1d" {
 			t.Errorf("daily slot = %q/%q, want 80%%/1d", d.values["codex_daily"], d.labels["codex_daily"])
 		}
@@ -222,7 +222,7 @@ func TestApplyCodexWindows_Robust(t *testing.T) {
 
 	t.Run("non-default account keeps its own slots", func(t *testing.T) {
 		d := newQuotaData()
-		d.applyCodexWindows("codex-2", map[string]any{"windows": []map[string]any{win(300, 10, "5h")}})
+		d.applyWindows("codex-2", map[string]any{"windows": []map[string]any{win("5h", "5h", 10)}})
 		if d.values["codex-2_5h"] != "10%" || d.labels["codex-2_5h"] != "5h" {
 			t.Errorf("codex-2 5h slot = %q/%q", d.values["codex-2_5h"], d.labels["codex-2_5h"])
 		}
@@ -234,8 +234,8 @@ func TestApplyCodexWindows_Robust(t *testing.T) {
 	t.Run("same-slot collision keeps the first window", func(t *testing.T) {
 		d := newQuotaData()
 		// Two sub-12h windows both route to the 5h slot; first wins.
-		d.applyCodexWindows("codex", map[string]any{"windows": []map[string]any{
-			win(300, 42, "5h"), win(600, 99, "10h"),
+		d.applyWindows("codex", map[string]any{"windows": []map[string]any{
+			win("5h", "5h", 42), win("5h", "10h", 99),
 		}})
 		if d.values["codex_5h"] != "42%" || d.labels["codex_5h"] != "5h" {
 			t.Errorf("collision: first window must win, got %q/%q", d.values["codex_5h"], d.labels["codex_5h"])
@@ -244,37 +244,11 @@ func TestApplyCodexWindows_Robust(t *testing.T) {
 
 	t.Run("no windows key is a no-op", func(t *testing.T) {
 		d := newQuotaData()
-		d.applyCodexWindows("codex", map[string]any{"planType": "pro"})
+		d.applyWindows("codex", map[string]any{"planType": "pro"})
 		if len(d.values) != 0 {
 			t.Errorf("no windows → no values, got %v", d.values)
 		}
 	})
-}
-
-func TestCodexWindowBucket(t *testing.T) {
-	// The bucket is an invisible slot id (never a label); it only needs to route
-	// each duration to a stable, pre-allocated slot.
-	cases := map[int]string{
-		1: "5h", 300: "5h", 720: "5h",
-		721: "daily", 1440: "daily", 2880: "daily",
-		2881: "weekly", 10080: "weekly", 20160: "weekly",
-		20161: "monthly", 43200: "monthly",
-	}
-	for mins, want := range cases {
-		if got := codexWindowBucket(mins); got != want {
-			t.Errorf("codexWindowBucket(%d) = %q, want %q", mins, got, want)
-		}
-	}
-	// Every bucket must be one of the pre-allocated slot keys.
-	known := map[string]bool{}
-	for _, k := range codexWindowSlotKeys {
-		known[k] = true
-	}
-	for _, mins := range []int{1, 300, 1440, 10080, 43200, 999999} {
-		if !known[codexWindowBucket(mins)] {
-			t.Errorf("codexWindowBucket(%d) not in codexWindowSlotKeys", mins)
-		}
-	}
 }
 
 func TestIsCodexDayKey(t *testing.T) {
@@ -422,5 +396,37 @@ func TestSettings_ShowResetTimeRoundTrip(t *testing.T) {
 	}
 	if legacy.ShowResetTime {
 		t.Error("ShowResetTime should default to false when absent")
+	}
+}
+
+// TestApplyWindows_ProviderAgnostic pins the generalization: Claude goes through
+// the exact same path as Codex — quota-bar holds no per-provider window logic and
+// no label vocabulary, so a Claude period rename ("week" → "5 days") flows to the
+// menu with zero code change.
+func TestApplyWindows_ProviderAgnostic(t *testing.T) {
+	d := newQuotaData()
+	d.applyWindows("claude", map[string]any{"windows": []map[string]any{
+		{"key": "session", "label": "Session", "left": 92, "resetsIn": "4h"},
+		{"key": "weekly_all", "label": "Week", "left": 98},
+		{"key": "extra_1", "label": "Fable", "left": 97},
+	}})
+	for _, c := range []struct{ key, label, val string }{
+		{"claude_session", "Session", "92%"},
+		{"claude_weekly_all", "Week", "98%"},
+		{"claude_extra_1", "Fable", "97%"},
+	} {
+		if d.labels[c.key] != c.label || d.values[c.key] != c.val {
+			t.Errorf("%s = %q/%q, want %q/%q", c.key, d.labels[c.key], d.values[c.key], c.label, c.val)
+		}
+	}
+
+	// A Claude period rename arrives as a different label on the SAME slot key —
+	// the selection survives and the menu shows Claude's new wording verbatim.
+	d2 := newQuotaData()
+	d2.applyWindows("claude", map[string]any{"windows": []map[string]any{
+		{"key": "weekly_all", "label": "5 days", "left": 60},
+	}})
+	if d2.labels["claude_weekly_all"] != "5 days" {
+		t.Errorf("renamed period must flow through, got %q", d2.labels["claude_weekly_all"])
 	}
 }

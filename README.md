@@ -41,7 +41,7 @@ quota-cli --timeout 60
 ```
 Claude
   Session    98%   (4h 52m, at 03:59)
-  Weekly     79%   (5d 12h, at Mar 6 11:06)
+  Week       79%   (5d 12h, at Mar 6 11:06)
   Fable     100%
 
 Codex

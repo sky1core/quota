@@ -67,29 +67,11 @@ func Text(payload map[string]any) string {
 		b.WriteString(fmtLine(it))
 	}
 
-	writeClaudeBody := func(m map[string]any) {
-		fixed := []struct{ key, label string }{
-			{"session", "Session"},
-			{"weeklyAll", "Weekly"},
-		}
-		for _, f := range fixed {
-			if v, ok := m[f.key].(map[string]any); ok {
-				writeEntry(f.label, v)
-			}
-		}
-		if extras, ok := m["extras"].([]map[string]any); ok {
-			for _, e := range extras {
-				if lbl, ok := e["label"].(string); ok && lbl != "" {
-					writeEntry(lbl, e)
-				}
-			}
-		}
-	}
-
-	writeCodexBody := func(m map[string]any) {
-		// Codex windows are a self-describing list: each entry carries its own
-		// label, so rendering never needs a window-key vocabulary and survives
-		// Codex adding/removing/reshuffling windows.
+	// writeBody renders any provider's account body from the shared
+	// self-describing window list: every entry carries its own label, so this has
+	// no per-provider branch and no label vocabulary. A provider's extra sections
+	// (Codex reset credits) follow its windows.
+	writeBody := func(m map[string]any) {
 		if ws, ok := m["windows"].([]map[string]any); ok {
 			for _, w := range ws {
 				if lbl, ok := w["label"].(string); ok && lbl != "" {
@@ -114,7 +96,7 @@ func Text(payload map[string]any) string {
 			}
 			b.WriteString(claudeLabel(k) + "\n")
 			m, _ := payload[k].(map[string]any)
-			writeClaudeBody(m)
+			writeBody(m)
 		}
 	}
 
@@ -127,7 +109,7 @@ func Text(payload map[string]any) string {
 		for _, k := range codexKeys {
 			b.WriteString("\n" + codexLabel(k) + "\n")
 			m, _ := payload[k].(map[string]any)
-			writeCodexBody(m)
+			writeBody(m)
 		}
 	}
 

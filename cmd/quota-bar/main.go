@@ -74,73 +74,28 @@ const (
 	staleMargin = 5 * time.Minute
 )
 
-// claudeExtraSlots is the number of pre-allocated menu slots per Claude account
-// for dynamic usage rows (per-model weekly quotas whose labels change across
-// model generations). systray cannot remove items at runtime, so unused slots
-// stay hidden.
-const claudeExtraSlots = 3
-
 // resetCreditSlots is the number of pre-allocated submenu rows under the Codex
 // "Reset credits" item, one per usable reset credit (초기화권). systray cannot add items
 // at runtime, so we allocate a fixed pool and hide the unused ones. The parent's
 // count reflects the true number even if it exceeds the visible detail rows.
 const resetCreditSlots = 8
 
-// codexWindowSlotKeys are quota-bar's fixed Codex-window menu slots per account,
-// keyed by a coarse duration bucket. This bucketing is a display/slot concern
-// ONLY (systray can't add rows at runtime, and stable keys keep quota-bar.json
-// selections valid): the row's on-screen LABEL is the truthful windowLabel from
-// the data, never the bucket name. codexWindowBucket maps a window's actual
-// duration to one of these slots.
-var codexWindowSlotKeys = []string{"5h", "daily", "weekly", "monthly"}
+// Menu item keys are "<provider>_<window key>" where provider is an account key
+// ("claude", "claude-2", …, "codex", "codex-2", …) and the window key comes from
+// that provider's WindowKeys() vocabulary. Account keys match ^claude-\d+$ /
+// ^codex-\d+$ (or the bare defaults), so they never contain "_"; the first "_"
+// always separates provider from window key. The historical keys are preserved
+// ("claude_session", "claude_weekly_all", "claude_extra_N", "codex_5h",
+// "codex_weekly", …) so existing quota-bar.json selections stay valid; the
+// pre-bucket "codex_day" selection migrates to "codex_weekly".
+//
+// Every window row is dynamic: it is shown only when the refresh supplied that
+// window (and thus its label), because no provider guarantees a fixed window set.
 
-// codexWindowBucket maps a window's actual duration (minutes) to its quota-bar
-// slot key. Ranges (not exact values) so a duration tweak still lands in a slot.
-// The returned string is one of codexWindowSlotKeys. This never becomes a label.
-func codexWindowBucket(mins int) string {
-	switch {
-	case mins <= 12*60: // ≤12h: short rolling window (historically 5h)
-		return "5h"
-	case mins <= 2*1440: // ≤2d
-		return "daily"
-	case mins <= 14*1440: // ≤14d
-		return "weekly"
-	default: // >14d
-		return "monthly"
-	}
-}
-
-// Menu item keys are "<provider>_<suffix>" where provider is an account key
-// ("claude", "claude-2", …, "codex", "codex-2", …). Account keys match
-// ^claude-\d+$ / ^codex-\d+$ (or the bare defaults "claude"/"codex"), so they
-// never contain "_"; the first "_" always separates provider from suffix. Claude
-// keeps its historical fixed keys ("claude_session", "claude_weekly_all") plus
-// dynamic "claude_extra_N". Codex window slot keys are duration buckets
-// ("codex_5h"/"codex_daily"/"codex_weekly"/"codex_monthly") — a stable slot id,
-// not a label; the pre-bucket "codex_day" selection migrates to "codex_weekly".
-
-// itemKey builds a menu key for a provider and fixed suffix, e.g.
+// itemKey builds a menu key for a provider and window key, e.g.
 // itemKey("claude-2", "session") == "claude-2_session".
 func itemKey(provider, suffix string) string {
 	return provider + "_" + suffix
-}
-
-// extraItemKey builds the key for a Claude account's i-th (0-based) dynamic
-// extra slot, e.g. extraItemKey("claude", 0) == "claude_extra_1".
-func extraItemKey(provider string, i int) string {
-	return fmt.Sprintf("%s_extra_%d", provider, i+1)
-}
-
-// isDynamicSlotKey reports whether key is a dynamic, label-driven row: a Claude
-// extra, or any Codex window slot (Codex's only checkbox rows). Its on-screen row
-// exists only when the current refresh supplied a label for it (the window is
-// present). Fixed rows (Session/Weekly) are not dynamic.
-func isDynamicSlotKey(key string) bool {
-	if strings.Contains(key, "_extra_") {
-		return true
-	}
-	p := providerOf(key)
-	return p == "codex" || strings.HasPrefix(p, "codex-")
 }
 
 type settings struct {
@@ -347,51 +302,53 @@ func (d quotaData) storeEntry(e map[string]any, outKey string) {
 	}
 }
 
-// applyCodexWindows fills d with a Codex account's window rows from its
-// self-describing windows list. Each window is routed to its duration slot
-// (codexWindowBucket) and stored under the account's slot key with the window's
-// own truthful label. Windows absent this refresh leave their slot untouched, so
-// ANY window set renders with no code change — if the 5h window reappears later
-// it simply repopulates the "5h" slot with label "5h"; a new tier (daily,
-// monthly) lands in its own slot. Same-slot collisions keep the first window.
-func (d quotaData) applyCodexWindows(provider string, data map[string]any) {
+// applyWindows fills d with one account's window rows from its self-describing
+// windows list — identical for every provider. Each window carries its own slot
+// key and its own truthful label; this routes it to "<provider>_<key>" and
+// stores the label as-is (quota-bar holds no label vocabulary). Windows absent
+// this refresh leave their slot untouched, so ANY window set renders with no
+// code change: Codex's 5h window reappearing repopulates the "5h" slot, a new
+// tier lands in its own slot, and a Claude period rename flows straight through.
+func (d quotaData) applyWindows(provider string, data map[string]any) {
 	ws, ok := data["windows"].([]map[string]any)
 	if !ok {
 		return
 	}
 	for _, w := range ws {
-		mins, ok := w["windowMins"].(int)
-		if !ok {
+		k, ok := w["key"].(string)
+		if !ok || k == "" {
 			continue
 		}
-		key := itemKey(provider, codexWindowBucket(mins))
+		lbl, ok := w["label"].(string)
+		if !ok || lbl == "" {
+			// A row exists on screen only if it has a label. Skipping here keeps
+			// the invariant that no value exists without its label, so the menu
+			// (which keys existence off the label) and the top bar (which keys off
+			// the value) can never disagree about which rows exist.
+			continue
+		}
+		key := itemKey(provider, k)
+		// Slot collisions are resolved HERE, by the consumer that has the limit:
+		// the first window keeps the slot. The data itself keeps every window.
 		if _, taken := d.values[key]; taken {
 			continue
 		}
-		if lbl, ok := w["label"].(string); ok && lbl != "" {
-			d.labels[key] = lbl
-		}
+		d.labels[key] = lbl
 		d.storeEntry(w, key)
 	}
 }
 
 // fetchQuota queries every Claude account plus every Codex account in parallel
-// and stores the results under per-provider keys. Claude accounts write
-// "<key>_session", "<key>_weekly_all", and "<key>_extra_N" (+ label); Codex
-// accounts write one key per present window slot (see applyCodexWindows) and
-// their reset credits under d.codexResetRows[<key>]. A provider's failure is
-// recorded under d.errs[<provider key>]. Fetches run concurrently; results are
-// consumed serially from a buffered channel, so the store maps are only ever
-// touched by this goroutine.
+// and stores the results under per-provider keys. Every provider is handled
+// identically: its self-describing windows list is applied by applyWindows to
+// "<account>_<window key>" rows. Codex additionally stores its reset credits
+// under d.codexResetRows[<key>]. A provider's failure is recorded under
+// d.errs[<provider key>]. Fetches run concurrently; results are consumed
+// serially from a buffered channel, so the store maps are only ever touched by
+// this goroutine.
 func fetchQuota(accounts []config.ResolvedAccount, codexAccounts []config.ResolvedCodexAccount) quotaData {
 	timeout := 90 * time.Second
 	d := newQuotaData()
-
-	extract := func(data map[string]any, mapKey, outKey string) {
-		if e, ok := data[mapKey].(map[string]any); ok {
-			d.storeEntry(e, outKey)
-		}
-	}
 
 	type result struct {
 		provider string // account key ("claude", "claude-2", …, "codex", "codex-2", …)
@@ -422,25 +379,10 @@ func fetchQuota(accounts []config.ResolvedAccount, codexAccounts []config.Resolv
 			d.errs[r.provider] = r.err.Error()
 			continue
 		}
-		if r.claude {
-			extract(r.data, "session", itemKey(r.provider, "session"))
-			extract(r.data, "weeklyAll", itemKey(r.provider, "weekly_all"))
-			if extras, ok := r.data["extras"].([]map[string]any); ok {
-				for j, e := range extras {
-					if j >= claudeExtraSlots {
-						break
-					}
-					key := extraItemKey(r.provider, j)
-					if lbl, ok := e["label"].(string); ok && lbl != "" {
-						d.labels[key] = lbl
-					}
-					d.storeEntry(e, key)
-				}
-			}
-		} else {
-			// Codex windows: self-describing list routed to duration slots, shown
-			// under each window's own truthful label (see applyCodexWindows).
-			d.applyCodexWindows(r.provider, r.data)
+		// Same shape for every provider: apply its self-describing windows list.
+		d.applyWindows(r.provider, r.data)
+		// Codex-only extra surface.
+		if !r.claude {
 			if rc, ok := r.data["resetCredits"].(map[string]any); ok {
 				d.codexResetRows[r.provider] = resetCreditRows(rc)
 			}
@@ -803,11 +745,24 @@ func onReady() {
 	}
 
 	var (
-		allItems     []menuItem                       // every checkbox row, in display order
-		allKeys      []string                         // every menu key, in display order
-		errItems     = map[string]*systray.MenuItem{} // provider key -> hidden error row
-		staticLabels = map[string]string{}            // fixed-label keys -> on-screen label
+		allItems []menuItem                       // every checkbox row, in display order
+		allKeys  []string                         // every menu key, in display order
+		errItems = map[string]*systray.MenuItem{} // provider key -> hidden error row
 	)
+
+	// addWindowSlots pre-allocates one hidden checkbox per window key of a
+	// provider's vocabulary (systray cannot add rows at runtime). Every row is
+	// dynamic: renderRows shows it only when a refresh supplied that window, and
+	// its text is that window's own label — quota-bar never names a window.
+	addWindowSlots := func(account string, windowKeys []string) {
+		for _, wk := range windowKeys {
+			key := itemKey(account, wk)
+			mi := systray.AddMenuItemCheckbox("-", "", cfg.isSelected(key))
+			mi.Hide()
+			allItems = append(allItems, menuItem{key, mi})
+			allKeys = append(allKeys, key)
+		}
+	}
 
 	// -- Per-account Claude sections --
 	for _, a := range accounts {
@@ -819,34 +774,15 @@ func onReady() {
 		errItem.Disable()
 		errItems[a.Key] = errItem
 
-		sessionKey := itemKey(a.Key, "session")
-		weeklyKey := itemKey(a.Key, "weekly_all")
-		staticLabels[sessionKey] = "Session"
-		staticLabels[weeklyKey] = "Weekly"
-
-		allItems = append(allItems,
-			menuItem{sessionKey, systray.AddMenuItemCheckbox("Session  -", "", cfg.isSelected(sessionKey))},
-			menuItem{weeklyKey, systray.AddMenuItemCheckbox("Weekly  -", "", cfg.isSelected(weeklyKey))},
-		)
-		allKeys = append(allKeys, sessionKey, weeklyKey)
-
-		for i := 0; i < claudeExtraSlots; i++ {
-			key := extraItemKey(a.Key, i)
-			mi := systray.AddMenuItemCheckbox("-", "", cfg.isSelected(key))
-			mi.Hide()
-			allItems = append(allItems, menuItem{key, mi})
-			allKeys = append(allKeys, key)
-		}
+		addWindowSlots(a.Key, claude.WindowKeys())
 	}
 
 	// -- Per-account Codex sections --
 	// Each Codex account (default "codex" plus any "codex-N") gets its own header,
-	// error row, one checkbox per window slot (codexWindowSlotKeys), and a Reset
-	// credits parent+submenu. Window rows are keyed "<account>_<bucket>" (e.g.
-	// "codex_5h", "codex_weekly") as a stable slot id only; their on-screen label
-	// is dynamic (the truthful windowLabel from each refresh), so no static label
-	// is set. miResetsByKey/resetChildrenByKey let renderRows paint each account's
-	// reset credits independently.
+	// error row, its window slots (same mechanism as Claude), and a Reset credits
+	// parent+submenu — the only provider-specific surface here.
+	// miResetsByKey/resetChildrenByKey let renderRows paint each account's reset
+	// credits independently.
 	miResetsByKey := map[string]*systray.MenuItem{}
 	resetChildrenByKey := map[string][]*systray.MenuItem{}
 	for _, a := range codexAccounts {
@@ -858,16 +794,7 @@ func onReady() {
 		errItem.Disable()
 		errItems[a.Key] = errItem
 
-		// One dynamic checkbox per window slot. Codex changes which windows are
-		// present, so these rows are created hidden and shown by renderRows only
-		// when the refresh supplied that slot's window (and its label).
-		for _, slot := range codexWindowSlotKeys {
-			k := itemKey(a.Key, slot)
-			mi := systray.AddMenuItemCheckbox("-", "", cfg.isSelected(k))
-			mi.Hide()
-			allItems = append(allItems, menuItem{k, mi})
-			allKeys = append(allKeys, k)
-		}
+		addWindowSlots(a.Key, codex.WindowKeys())
 
 		// Codex reset credits (초기화권): a parent row whose submenu lists each usable
 		// credit's expiry. Display-only — not a checkbox, never shown in the top bar.
@@ -923,19 +850,15 @@ func onReady() {
 	// currently shown errors or faking a fresh update time.
 	renderRows := func(data quotaData, stale map[string]bool, showResetTime bool) {
 		for _, mi := range allItems {
-			lbl := staticLabels[mi.key]
+			// Every row is a window slot with a provider-supplied label. No label
+			// means that window is absent this refresh, so the row does not exist
+			// on screen. quota-bar never names a window itself.
+			lbl := data.labels[mi.key]
 			if lbl == "" {
-				lbl = data.labels[mi.key]
+				mi.item.Hide()
+				continue
 			}
-			if isDynamicSlotKey(mi.key) {
-				// Dynamic slot (Claude extra / Codex window): no label means the
-				// row (that extra model, or that window) is absent this refresh.
-				if lbl == "" {
-					mi.item.Hide()
-					continue
-				}
-				mi.item.Show()
-			}
+			mi.item.Show()
 			val := data.values[mi.key]
 			if val == "" {
 				val = "-"

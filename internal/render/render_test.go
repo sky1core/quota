@@ -69,7 +69,9 @@ func TestText_ResetsAtFormatted(t *testing.T) {
 	at := time.Date(2026, 7, 6, 15, 4, 0, 0, time.Local)
 	payload := map[string]any{
 		"claude": map[string]any{
-			"session": map[string]any{"left": 80, "resetsIn": "2h", "resetsAt": at},
+			"windows": []map[string]any{
+				{"key": "session", "label": "Session", "left": 80, "resetsIn": "2h", "resetsAt": at},
+			},
 		},
 	}
 	got := Text(payload)
@@ -149,7 +151,9 @@ func TestText_NoData(t *testing.T) {
 func TestText_WithClaude(t *testing.T) {
 	payload := map[string]any{
 		"claude": map[string]any{
-			"session": map[string]any{"left": 80, "resetsIn": "2h"},
+			"windows": []map[string]any{
+				{"key": "session", "label": "Session", "left": 80, "resetsIn": "2h"},
+			},
 		},
 	}
 	got := Text(payload)
@@ -295,10 +299,10 @@ func TestText_TimestampFormat(t *testing.T) {
 func TestText_FullPayload(t *testing.T) {
 	payload := map[string]any{
 		"claude": map[string]any{
-			"session":   map[string]any{"left": 80, "resetsIn": "2h"},
-			"weeklyAll": map[string]any{"left": 85, "resetsIn": "5d"},
-			"extras": []map[string]any{
-				{"label": "Fable", "left": 100},
+			"windows": []map[string]any{
+				{"key": "session", "label": "Session", "left": 80, "resetsIn": "2h"},
+				{"key": "weekly_all", "label": "Week", "left": 85, "resetsIn": "5d"},
+				{"key": "extra_1", "label": "Fable", "left": 100},
 			},
 		},
 		"codex": map[string]any{
@@ -316,15 +320,17 @@ func TestText_FullPayload(t *testing.T) {
 	if !strings.Contains(got, "Codex") {
 		t.Error("missing Codex")
 	}
-	if !strings.Contains(got, "Weekly") {
-		t.Error("missing codex Weekly row (duration-bucket label)")
+	if !strings.Contains(got, "7d") {
+		t.Error("missing codex weekly row (truthful duration label)")
 	}
 	// No "(no data)" when data is provided
 	if strings.Contains(got, "(no data)") {
 		t.Error("should not show (no data) when data exists")
 	}
 	// All three claude rows present; extras use their on-screen label
-	for _, lbl := range []string{"Session", "Weekly", "Fable"} {
+	// Labels come from the provider's data, not a render vocabulary: the claude
+	// weekly row is "Week" (derived from Claude's "Current week (all models)").
+	for _, lbl := range []string{"Session", "Week", "Fable"} {
 		if !strings.Contains(got, lbl) {
 			t.Errorf("missing claude row %q", lbl)
 		}
@@ -337,11 +343,15 @@ func TestText_FullPayload(t *testing.T) {
 func TestText_MultipleClaudeAccounts(t *testing.T) {
 	payload := map[string]any{
 		"claude": map[string]any{
-			"session": map[string]any{"left": 90, "resetsIn": "3h"},
+			"windows": []map[string]any{
+				{"key": "session", "label": "Session", "left": 90, "resetsIn": "3h"},
+			},
 		},
 		"claude-2": map[string]any{
-			"session": map[string]any{"left": 50},
-			"extras":  []map[string]any{{"label": "Fable", "left": 80}},
+			"windows": []map[string]any{
+				{"key": "session", "label": "Session", "left": 50},
+				{"key": "extra_1", "label": "Fable", "left": 80},
+			},
 		},
 	}
 	got := Text(payload)
@@ -476,9 +486,9 @@ func TestClaudeLabel(t *testing.T) {
 func TestText_ExtrasWithoutLabelSkipped(t *testing.T) {
 	payload := map[string]any{
 		"claude": map[string]any{
-			"session": map[string]any{"left": 80},
-			"extras": []map[string]any{
-				{"left": 55}, // no label → skipped
+			"windows": []map[string]any{
+				{"key": "session", "label": "Session", "left": 80},
+				{"key": "extra_1", "left": 55}, // no label → skipped
 			},
 		},
 	}

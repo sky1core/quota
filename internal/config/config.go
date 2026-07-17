@@ -113,8 +113,8 @@ func accountLabel(key string) string {
 //   - empty key or configDir;
 //   - key not matching ClaudeExtraKeyRe (e.g. "claude-<N>");
 //   - duplicate key (including a collision with the default "claude");
-//   - duplicate configDir after ExpandTilde (which would collide on the
-//     per-account tmux session name).
+//   - duplicate configDir after ExpandTilde (querying the same account twice
+//     is a config mistake, not a second account).
 //
 // The default account is always {Key:"claude", ConfigDir:"", Label:"Claude"}
 // and always leads the slice. Extra configDirs are tilde-expanded in the

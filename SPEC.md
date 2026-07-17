@@ -206,7 +206,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
   - `key` (string, 필수): 출력 top-level 키. **`codex-<정수>` 형식이어야 한다**(정규식 `^codex-\d+$`, 예: `codex-2`). 기본 계정 `codex` 및 다른 항목과 중복 불가.
   - `home` (string, 필수): 해당 계정의 `CODEX_HOME` 디렉터리. `~`는 홈으로 확장된다. 서로 다른 계정은 서로 다른 `home`을 가리켜야 한다. 각 home에는 **동일/다른 계정을 별도 로그인**해 두어야 한다(인증 파일 복사가 아니라 `CODEX_HOME=<home> codex login`).
 - 파일이 없거나 목록이 비면 각 기본 계정만 조회한다(기존 동작).
-- 다음 항목은 건너뛰고 `errors`에 기록한다: 빈 `key`/`dir`, 형식 위반, 중복 `key`, 중복 `dir`. (Claude 중복 `configDir`는 계정별 tmux 세션명이 충돌하므로, Codex 중복 `home`은 같은 계정 중복이므로 금지.)
+- 다음 항목은 건너뛰고 `errors`에 기록한다: 빈 `key`/`dir`, 형식 위반, 중복 `key`, 중복 `dir`. (중복 `configDir`/`home`은 같은 계정을 두 번 조회하는 설정 오류이므로 금지.)
 
 ### quota-bar
 
@@ -340,20 +340,22 @@ Quit
 - 내장 tmux 자동화로 Claude CLI에서 quota 조회. 두 함수는 동일한 조회 로직을 공유하며 config-dir 주입 여부만 다르다.
 
 **tmux 자동화 흐름** (내장):
-1. `tmux new-session -d -s <session> -x 120 -y 40 -c <safeDir> env -u CLAUDECODE -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL [CLAUDE_CONFIG_DIR=<configDir>] claude`
-   - `session` = `quota-{pid}` (config-dir 지정 시 계정별 고유 suffix를 붙여 동시 조회 세션 충돌 방지)
+1. `tmux new-session -d -P -F '#{session_id}' -s <session> -x 120 -y 40 -c <safeDir> env -u CLAUDECODE -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL [CLAUDE_CONFIG_DIR=<configDir>] claude`
+   - `session` = `quota-{pid}-{랜덤 nonce}` — fetch마다 유일한 이름. 이름은 정보용이고, 생성 시 `-P -F`로 받은 **세션 ID(`$n`)를 이후 모든 tmux 명령의 타겟으로 사용한다.** 이름 타겟은 정확히 일치하는 세션이 없으면 tmux가 prefix 매칭으로 다른 세션(예: 병렬 조회 중인 다른 계정 세션)에 조용히 붙이므로 금지.
    - `safeDir` = `~/.config/quota` (Claude CLI가 CWD를 readdir할 때 macOS TCC 보호 폴더 접근 방지)
    - `CLAUDECODE` 제거: 중첩 세션 감지 회피
    - `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` 제거: 사용자 로그인 계정 quota를 읽도록 강제 (커스텀 엔드포인트/대체 토큰이 quota를 가로채지 않게)
    - `CLAUDE_CONFIG_DIR=<configDir>`: config-dir 지정 시에만 추가. **`-u` 옵션들 뒤, command 앞**에 둔다 (macOS `env`는 옵션이 `NAME=VALUE` 할당보다 먼저 와야 하므로 순서 고정). 명령줄에 직접 주입해야 tmux 서버 환경 상속과 무관하게 전달된다.
 2. 스플래시(`Claude Code`) 등장까지 폴링 → Enter (초기 prompt 해제)
 3. `/usage` 입력 → Enter
-4. `% used` 와 `Esc to cancel` 이 모두 보일 때까지 폴링 (또는 `Error:` 검출 시 즉시 진행)
+4. `% used` 가 보일 때까지 폴링 (또는 `Error:` 검출 시 즉시 진행). 게이트는 데이터 자체이지 대화상자 장식 문구가 아니다 — footer 문구는 Claude 버전마다 바뀐다 (v2.1.212에서 "Esc to cancel" 삭제됨). 행 전부가 그려졌는지는 5단계 settle이 판정한다.
 5. settle 대기 — `/usage` 화면 행이 비동기로 그려지므로 최소 2초 대기 후 500ms 간격으로 재캡처하며,
-   연속 두 캡처가 동일해질 때까지 폴링한다 (최대 8초 상한, 애니메이션으로 인한 무한 대기 방지)
+   연속 두 캡처가 동일하고 **화면이 구조적으로 완결**(모든 사용률 바 아래에 Resets 줄 존재)일 때까지 폴링한다
+   (최대 8초 상한 — 상한 도달 시 마지막 캡처를 그대로 파싱하므로, Resets 줄 없는 미래 레이아웃도 데이터 손실 없이 처리).
+   settle 중 캡처가 실패했고 마지막 캡처가 미완결이면, 부분 데이터를 조용히 내보내는 대신 에러로 실패한다.
 6. 마지막 캡처 결과를 파싱에 사용
 7. ANSI 코드 제거 → `parseCaptured()` 로 파싱
-8. Escape → `/exit` → Enter → `tmux kill-session` 클린업
+8. Escape → `/exit` → Enter → 클린업 — 자기 **세션 ID**만 타겟으로 pane 프로세스 트리와 세션을 종료한다. 세션이 이미 없으면 아무것도 죽이지 않는다 (이름 타겟 클린업은 prefix 매칭으로 다른 계정 세션을 죽일 수 있으므로 금지).
 
 **파싱 로직** (`parseCaptured`) — 줄 단위 파싱, 공통 `windows` 목록(화면 순서)으로 반환:
 - `\d+% used` 를 포함한 줄을 모두 찾음 (진행 바 줄)

@@ -1,7 +1,10 @@
 package claude
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -575,6 +578,112 @@ func TestClaudeSessionArgs_NoConfigDir(t *testing.T) {
 	}
 	if args[len(args)-1] != "/bin/claude" {
 		t.Errorf("claude binary must be last, got %q", args[len(args)-1])
+	}
+}
+
+func TestClaudeSessionArgs_PrintsSessionID(t *testing.T) {
+	args := claudeSessionArgs("sess", "/safe", "", "/bin/claude")
+	joined := strings.Join(args, " ")
+	// Creation must print the session ID (-P -F '#{session_id}'): every later
+	// tmux command targets that ID, because name targets fall back to prefix
+	// matching and can silently resolve to a sibling account's session.
+	if !strings.Contains(joined, "-P -F #{session_id}") {
+		t.Errorf("new-session args must request the session id, got: %v", args)
+	}
+}
+
+// TestScreenComplete pins the settle gate: a frame whose usage bars are drawn
+// but whose Resets lines are still loading must not be treated as final —
+// parsing it is exactly how rows intermittently lost their reset times.
+func TestScreenComplete(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{
+			name: "every bar has its Resets line",
+			text: "Current session\n██ 8% used\nResets 5:50pm (Asia/Seoul)\n\n" +
+				"Current week (all models)\n█ 2% used\nResets Jul 20 at 12pm (Asia/Seoul)\n",
+			want: true,
+		},
+		{
+			name: "last bar still missing its Resets line",
+			text: "Current session\n██ 8% used\nResets 5:50pm (Asia/Seoul)\n\n" +
+				"Current week (all models)\n█ 2% used\n",
+			want: false,
+		},
+		{
+			name: "next block header rendered before this bar's Resets",
+			text: "Current session\n██ 8% used\nCurrent week (all models)\n█ 2% used\nResets Jul 20 at 12pm\n",
+			want: false,
+		},
+		{
+			name: "no bars at all is vacuously complete",
+			text: "Claude Code\nloading...\n",
+			want: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := screenComplete(c.text); got != c.want {
+				t.Errorf("screenComplete = %v, want %v\n%s", got, c.want, c.text)
+			}
+		})
+	}
+}
+
+// requireTmux creates a real tmux session running the production new-session
+// argument list (with a harmless idle command standing in for the claude
+// binary) and returns its session ID. Skips when tmux is unavailable.
+func requireTmux(t *testing.T, ctx context.Context, name string) string {
+	t.Helper()
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not available")
+	}
+	id, err := createClaudeSession(ctx, os.Environ(), name, t.TempDir(), "", "cat")
+	if err != nil {
+		t.Fatalf("createClaudeSession(%q): %v", name, err)
+	}
+	if !strings.HasPrefix(id, "$") {
+		t.Fatalf("session id must be ID-shaped ($n), got %q", id)
+	}
+	// Self-cleaning on every exit path, including t.Fatal before the test's own
+	// kills; killing an already-dead session is a no-op.
+	t.Cleanup(func() { killTmuxSession(id) })
+	return id
+}
+
+// TestKillTmuxSession_DoesNotKillSiblingSession is a REGRESSION GUARD for the
+// cross-account kill: the default account's session name used to be a strict
+// prefix of the other account's ("quota-1" vs "quota-1-<hash>"), and cleanup
+// targeted the NAME — so once the default session had already ended, tmux
+// prefix matching redirected its cleanup onto the sibling's live session and
+// killed the other account's fetch mid-capture (intermittent missing reset
+// times / vanished rows). Cleanup must be a no-op when its own session is
+// gone, whatever other sessions exist.
+func TestKillTmuxSession_DoesNotKillSiblingSession(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	base := fmt.Sprintf("quotatest-%d-%08x", os.Getpid(), time.Now().UnixNano()&0xffffffff)
+	idA := requireTmux(t, ctx, base)
+	idB := requireTmux(t, ctx, base+"-aaaaaaaa") // name extends A's name, like the old per-account naming
+
+	// Simulate the bug window: A's session has already ended when A's cleanup runs.
+	if err := exec.Command("tmux", "kill-session", "-t", idA).Run(); err != nil {
+		t.Fatalf("pre-kill of session A failed: %v", err)
+	}
+	killTmuxSession(idA)
+
+	if err := exec.Command("tmux", "has-session", "-t", idB).Run(); err != nil {
+		t.Fatalf("sibling session was killed: cleanup crossed session boundaries")
+	}
+
+	// Positive path: cleanup does kill its own live session.
+	killTmuxSession(idB)
+	if err := exec.Command("tmux", "has-session", "-t", idB).Run(); err == nil {
+		t.Fatalf("killTmuxSession left its own session running")
 	}
 }
 

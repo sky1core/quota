@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,28 +47,11 @@ func GetQuotaForConfigDir(timeout time.Duration, configDir string) (map[string]a
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// Unique session per account so parallel queries don't collide on the name.
-	session := fmt.Sprintf("quota-%d", os.Getpid())
-	if configDir != "" {
-		h := fnv.New32a()
-		_, _ = h.Write([]byte(configDir))
-		session = fmt.Sprintf("quota-%d-%08x", os.Getpid(), h.Sum32())
-	}
-
-	cleanup := func() {
-		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cleanCancel()
-		out, _ := exec.CommandContext(cleanCtx, "tmux", "list-panes", "-t", session, "-F", "#{pane_pid}").Output()
-		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			pid := strings.TrimSpace(line)
-			if pid != "" {
-				_ = exec.CommandContext(cleanCtx, "pkill", "-P", pid).Run()
-				_ = exec.CommandContext(cleanCtx, "kill", pid).Run()
-			}
-		}
-		_ = exec.CommandContext(cleanCtx, "tmux", "kill-session", "-t", session).Run()
-	}
-	defer cleanup()
+	// Unique session name per fetch (pid + random nonce): parallel account
+	// fetches in this process, other quota processes, and leftovers from a
+	// crashed run can never collide on the name. The name is informational —
+	// every tmux command below targets the session ID, never the name.
+	session := fmt.Sprintf("quota-%d-%08x", os.Getpid(), rand.Uint32())
 
 	// Build a clean environment for the spawned Claude CLI:
 	//   - CLAUDECODE: drop to avoid nested session detection.
@@ -89,26 +72,29 @@ func GetQuotaForConfigDir(timeout time.Duration, configDir string) (map[string]a
 		}
 	}
 
-	tmuxRun := func(args ...string) error {
-		cmd := exec.CommandContext(ctx, "tmux", args...)
-		cmd.Env = cleanEnv
-		cmd.Stderr = nil
-		return cmd.Run()
-	}
-
-	tmuxSend := func(keys ...string) {
-		args := append([]string{"send-keys", "-t", session}, keys...)
-		_ = tmuxRun(args...)
-	}
-
 	home, _ := os.UserHomeDir()
 	// Use ~/.config/quota/ as CWD instead of ~/ to prevent Claude CLI from
 	// scanning TCC-protected folders (Downloads, Photos, Music, Movies).
 	// Claude CLI treats CWD as a project root and runs readdir on it.
 	safeDir := filepath.Join(home, ".config", "quota")
 	_ = os.MkdirAll(safeDir, 0o755)
-	if err := tmuxRun(claudeSessionArgs(session, safeDir, configDir, claudeBin)...); err != nil {
-		return nil, fmt.Errorf("failed to create tmux session: %w", err)
+
+	target, err := createClaudeSession(ctx, cleanEnv, session, safeDir, configDir, claudeBin)
+	if err != nil {
+		return nil, err
+	}
+	// Deferred only once the session exists, and scoped to its ID: this can
+	// kill this fetch's session and nothing else. (It used to be deferred
+	// before creation and targeted by name, so a failed or already-ended fetch
+	// could tear down a sibling account's live session via prefix matching.)
+	defer killTmuxSession(target)
+
+	tmuxSend := func(keys ...string) {
+		args := append([]string{"send-keys", "-t", target}, keys...)
+		cmd := exec.CommandContext(ctx, "tmux", args...)
+		cmd.Env = cleanEnv
+		cmd.Stderr = nil
+		_ = cmd.Run()
 	}
 
 	// waitFor polls the tmux pane until the text matches the predicate.
@@ -117,11 +103,11 @@ func GetQuotaForConfigDir(timeout time.Duration, configDir string) (map[string]a
 			select {
 			case <-ctx.Done():
 				// Capture final state for diagnostics
-				out, _ := exec.Command("tmux", "capture-pane", "-t", session, "-p").Output()
+				out, _ := exec.Command("tmux", "capture-pane", "-t", target, "-p").Output()
 				return stripANSI(string(out)), errors.New("timeout")
 			default:
 			}
-			out, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", session, "-p").Output()
+			out, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", target, "-p").Output()
 			if err != nil {
 				return "", fmt.Errorf("failed to capture tmux pane: %w", err)
 			}
@@ -149,35 +135,53 @@ func GetQuotaForConfigDir(timeout time.Duration, configDir string) (map[string]a
 	time.Sleep(300 * time.Millisecond)
 	tmuxSend("Enter")
 
-	// Wait for usage data to fully load
+	// Wait for usage data to appear. The gate is the data itself ("% used"),
+	// never dialog chrome: /usage footer text changes across Claude versions
+	// (v2.1.212 dropped "Esc to cancel", which this gate used to require —
+	// every probe then timed out with the data fully on screen). Whether ALL
+	// rows have rendered is the settle loop's job below.
 	text, err := waitFor(func(t string) bool {
 		if strings.Contains(t, "Error:") {
 			return true
 		}
-		return strings.Contains(t, "% used") && strings.Contains(t, "Esc to cancel")
+		return strings.Contains(t, "% used")
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	// /usage rows render asynchronously; wait for the screen to settle
-	// (two consecutive captures identical) before parsing, so late rows
-	// (e.g. per-model weekly) are included. Bounded so an animated element
-	// cannot stall the fetch forever.
+	// /usage rows render asynchronously; wait for the screen to settle —
+	// two consecutive captures identical AND structurally complete (every
+	// usage bar has its Resets line) — before parsing, so late rows (e.g.
+	// per-model weekly) are included. Stability alone is not enough: the
+	// screen can pause mid-render with bars drawn but reset lines still
+	// loading, and parsing that frame silently emits rows with no reset time.
+	// Bounded so an animated element (or a future layout whose bars have no
+	// Resets lines at all) cannot stall the fetch forever: at the deadline the
+	// latest capture is parsed as-is.
 	settleDeadline := time.Now().Add(usageSettleMax)
 	time.Sleep(usageSettleMin)
+	captureDied := false
 	for {
-		out, capErr := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", session, "-p").Output()
+		out, capErr := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", target, "-p").Output()
 		if capErr != nil {
+			captureDied = true
 			break
 		}
 		cur := stripANSI(string(out))
-		settled := cur == text
+		settled := cur == text && screenComplete(cur)
 		text = cur
 		if settled || !time.Now().Before(settleDeadline) {
 			break
 		}
 		time.Sleep(usageSettlePoll)
+	}
+	// A capture failure mid-settle means our session died under us (claude
+	// exited, or the timeout hit). An incomplete leftover frame must fail
+	// loudly here — parsing it would report real rows missing their reset
+	// times, with nothing in the log.
+	if captureDied && !screenComplete(text) {
+		return nil, errors.New("usage capture interrupted before the screen finished rendering")
 	}
 
 	// Exit claude
@@ -206,13 +210,72 @@ func GetQuotaForConfigDir(timeout time.Duration, configDir string) (map[string]a
 //   - CLAUDE_CONFIG_DIR is passed on the command line rather than inherited,
 //     because an existing tmux server does not forward it to the new pane via
 //     update-environment; command-line injection is server-state-independent.
+//   - -P -F '#{session_id}' prints the new session's ID, which the caller must
+//     use as the target of every later tmux command (see createClaudeSession).
 func claudeSessionArgs(session, safeDir, configDir, claudeBin string) []string {
-	args := []string{"new-session", "-d", "-s", session, "-x", "120", "-y", "40", "-c", safeDir,
+	args := []string{"new-session", "-d", "-P", "-F", "#{session_id}",
+		"-s", session, "-x", "120", "-y", "40", "-c", safeDir,
 		"env", "-u", "CLAUDECODE", "-u", "ANTHROPIC_AUTH_TOKEN", "-u", "ANTHROPIC_BASE_URL"}
 	if configDir != "" {
 		args = append(args, "CLAUDE_CONFIG_DIR="+configDir)
 	}
 	return append(args, claudeBin)
+}
+
+// createClaudeSession launches the Claude CLI in a detached tmux session and
+// returns the session ID (e.g. "$12"). Every later tmux command MUST target
+// this ID, never the session name: tmux resolves a name target by prefix when
+// no exact match exists, so once a session named "quota-1" is gone, commands
+// aimed at it silently land on a session named "quota-1-<anything>" — another
+// account's live fetch. That redirection is how one account's cleanup could
+// kill the other account's probe mid-capture, and how one account could
+// capture (and report) the other account's usage screen. A session ID is never
+// reused, so a dead session is a hard error instead of someone else's data.
+func createClaudeSession(ctx context.Context, env []string, session, safeDir, configDir, claudeBin string) (string, error) {
+	// On failure the server may still have created the session (e.g. the
+	// timeout expired mid-call, killing only the client). Remove it by exact
+	// name — "=" disables prefix matching, and the name is unique to this
+	// fetch, so this can never hit another session.
+	killByExactName := func() {
+		kctx, kcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer kcancel()
+		_ = exec.CommandContext(kctx, "tmux", "kill-session", "-t", "="+session).Run()
+	}
+	cmd := exec.CommandContext(ctx, "tmux", claudeSessionArgs(session, safeDir, configDir, claudeBin)...)
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		killByExactName()
+		return "", fmt.Errorf("failed to create tmux session: %w", err)
+	}
+	id := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(id, "$") {
+		killByExactName()
+		return "", fmt.Errorf("tmux returned unexpected session id %q", id)
+	}
+	return id, nil
+}
+
+// killTmuxSession terminates one fetch's tmux session: the pane's process tree
+// first, then the session itself. target must be a session ID from
+// createClaudeSession; if that session is already gone, the pane lookup fails
+// and nothing is killed — an ID never resolves to another session, unlike a
+// name.
+func killTmuxSession(target string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-t", target, "-F", "#{pane_pid}").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		pid := strings.TrimSpace(line)
+		if pid != "" {
+			_ = exec.CommandContext(ctx, "pkill", "-P", pid).Run()
+			_ = exec.CommandContext(ctx, "kill", pid).Run()
+		}
+	}
+	_ = exec.CommandContext(ctx, "tmux", "kill-session", "-t", target).Run()
 }
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
@@ -352,6 +415,23 @@ func parseCaptured(text string) (map[string]any, error) {
 		return nil, errors.New("could not parse claude quota from captured output")
 	}
 	return map[string]any{"windows": windows}, nil
+}
+
+// screenComplete reports whether every usage bar on the captured /usage screen
+// has its Resets line rendered below it. The screen paints progressively (a
+// bar can appear a beat before its reset line), so a frame can be stable for a
+// settle poll yet still incomplete — parsing it silently emits rows with no
+// reset time. The settle loop uses this as a gate, not a requirement: at its
+// deadline an incomplete screen is still parsed, so a future layout whose bars
+// have no Resets lines degrades to a slower fetch, never to lost rows.
+func screenComplete(text string) bool {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if usedLineRe.MatchString(line) && resetsBelow(lines, i) == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // stripBarChars removes progress-bar block characters (U+2580–U+259F) and

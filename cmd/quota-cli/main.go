@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,9 +13,19 @@ import (
 	"github.com/sky1core/quota/internal/codex"
 	"github.com/sky1core/quota/internal/config"
 	"github.com/sky1core/quota/internal/render"
+	"github.com/sky1core/quota/internal/update"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "update" {
+		// No arguments: reject anything extra (including -h) instead of
+		// silently ignoring it and running a network check/install.
+		if len(os.Args) > 2 {
+			fmt.Fprintln(os.Stderr, "usage: quota-cli update   (인자 없음 — 최신 릴리스로 재설치)")
+			os.Exit(2)
+		}
+		os.Exit(runUpdate())
+	}
 	if len(os.Args) > 1 && os.Args[1] == "account" {
 		os.Exit(runAccount(os.Args[2:]))
 	}
@@ -322,5 +333,33 @@ func accountRemove(args []string) int {
 		return 1
 	}
 	fmt.Printf("제거됨: %s\n", key)
+	return 0
+}
+
+// --- update subcommand ----------------------------------------------------
+
+// runUpdate installs the latest release tag of quota-cli over this binary.
+// Manual only: quota-cli never updates itself as a side effect of anything
+// else, and it never touches quota-bar (and vice versa).
+func runUpdate() int {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cur := update.CurrentVersion()
+	latest, err := update.Latest(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "최신 버전 확인 실패: %v\n", err)
+		return 1
+	}
+	if cur == latest {
+		fmt.Printf("이미 최신 버전입니다 (%s)\n", cur)
+		return 0
+	}
+	fmt.Printf("업데이트: %s → %s\n", cur, latest)
+	path, err := update.Install(ctx, "quota-cli", latest)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "설치 실패: %v\n", err)
+		return 1
+	}
+	fmt.Printf("설치 완료: %s (%s)\n", path, latest)
 	return 0
 }

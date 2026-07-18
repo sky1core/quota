@@ -164,6 +164,11 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 | `quota-cli account add <key> <dir>` | 계정 추가. **`key` 접두사로 provider를 판별한다**: `claude-<N>`이면 Claude(`dir`=`CLAUDE_CONFIG_DIR`), `codex-<N>`이면 Codex(`dir`=`CODEX_HOME`). 그 외 key는 거부. `dir`는 `~` 확장 지원. 검증(형식·중복 key·중복 dir)을 통과해야 저장하며, `dir`가 없으면 경고만 하고 진행한다. `dir`는 유저가 쓴 그대로 저장한다. |
 | `quota-cli account rm <key>` | 계정 제거. `codex-<N>`이면 Codex 목록에서, 그 외는 Claude 목록에서 제거한다. |
 
+**서브커맨드 (`update`) — 수동 업데이트**: `quota-cli update`는 Go module proxy가 해석한 `@latest` 릴리스 태그(`internal/update.Latest`)를 현재 바이너리 버전과 비교해, 같으면 "이미 최신"을 출력하고, 다르면 `go install <module>/cmd/quota-cli@<latest>`로 설치한 뒤 설치 경로와 버전을 출력한다.
+- **수동 전용**: 어떤 조회 경로도 업데이트를 부수 효과로 일으키지 않는다. quota-cli는 quota-bar를 건드리지 않는다(역도 같다).
+- 로컬 빌드에서 실행하면 항상 최신 릴리스로 교체된다: 로컬 빌드의 버전은 릴리스 태그와 일치하지 않는 형태(`v0.9.0+dirty`, 커밋 해시, `dev` 등)라 비교가 불일치한다 — 의도된 동작이며, 최신 태그보다 앞선 dev 빌드라면 사실상 다운그레이드가 되지만 `업데이트: X → Y` 출력에 그대로 드러난다.
+- 요구사항: PATH에 `go` 필요. 제약: 방금 push한 태그는 proxy 캐시로 몇 분 늦게 보일 수 있다.
+
 - `account` 첫 인자가 아니면 조회 모드로 동작한다(기존 동작).
 - 검증 규칙은 조회 시 `config.json`을 읽는 규칙과 동일하다(같은 형식/중복 규칙). Claude는 `^claude-\d+$`, Codex는 `^codex-\d+$`.
 
@@ -224,6 +229,12 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 6. 결과를 메뉴 항목에 표시
 
 **계정 목록 확정 시점 (중요)**: systray는 런타임에 메뉴 항목을 추가·제거할 수 없다. 따라서 계정 수와 메뉴 레이아웃은 **onReady 시작 시점의 config로 고정**된다. `config.json`을 편집해 계정을 추가/제거하면 **quota-bar를 재시작**해야 반영된다.
+
+**수동 업데이트 메뉴 ("Check for Updates…")**: 클릭 시 quota-cli의 `update`와 같은 비교·설치 흐름(`internal/update`)을 수행하고, 설치 성공 시 **설치된 바이너리를 `syscall.Exec`으로 자기 자리에서 재실행**한다(PID 유지 — launchd 추적 유지, pid 락은 `FD_CLOEXEC`라 새 이미지가 재획득).
+- exec 전에 refresh 게이트를 획득한다(최대 3분 대기): 조회 중 exec하면 진행 중 tmux 프로브 세션이 claude 프로세스째 고아가 되기 때문. 성공 경로에서는 게이트를 반환하지 않는다(프로세스 이미지가 교체되므로).
+- 진행 상태·결과(최신임/실패)는 해당 메뉴 항목 제목으로 표시하고 몇 초 뒤 원래 제목으로 되돌린다. 실패는 로그에도 남긴다. 업데이트 흐름은 한 번에 하나만 실행된다(진행 중 재클릭 무시).
+- 수동 전용: 자동 체크·자동 설치는 없다.
+- 알려진 제약: go-install 경로가 아닌 바이너리(예: dev 체크아웃 빌드)를 Start at Login으로 등록한 경우, exec는 go-install 경로의 새 바이너리로 갈아타지만 launchd plist는 등록 시점의 옛 경로를 그대로 가리키므로 다음 launchd 재시작 때 옛 바이너리로 돌아갈 수 있다. `go install`로 설치한 표준 경로에서는 경로가 일치해 문제없다.
 
 **메뉴바 표시**:
 - 아이콘 하나 + 선택된 항목들의 남은 % 표시. 상단 바 공간을 최소화한다.
@@ -423,6 +434,7 @@ Quit
 - `tmux`: Claude quota 조회 시 필요 (Claude CLI 자동화)
 - `claude` CLI: Claude Code CLI (`~/.local/bin/claude` 또는 PATH)
 - `codex` CLI: Codex CLI (PATH에 있어야 함)
+- `go`: 수동 업데이트(`quota-cli update`, quota-bar 업데이트 메뉴)에만 필요
 
 ---
 

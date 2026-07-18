@@ -16,6 +16,11 @@ go install github.com/sky1core/quota/cmd/quota-cli@latest
 go install github.com/sky1core/quota/cmd/quota-bar@latest
 ```
 
+이후 업데이트는 각자 수동으로:
+
+- `quota-cli update` — 최신 릴리스로 quota-cli 재설치
+- quota-bar 메뉴의 **Check for Updates…** — 최신 릴리스 설치 후 자동 재시작
+
 ### 시스템 요구사항
 
 - `tmux` — Claude quota 조회에 필요 (`brew install tmux`)

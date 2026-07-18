@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"text/template"
 	"time"
@@ -22,6 +24,7 @@ import (
 	"github.com/sky1core/quota/internal/idle"
 	"github.com/sky1core/quota/internal/render"
 	"github.com/sky1core/quota/internal/ui"
+	"github.com/sky1core/quota/internal/update"
 )
 
 // version can be pinned at build time with -ldflags "-X main.version=vX.Y.Z".
@@ -29,35 +32,15 @@ import (
 // plain `go install <module>/cmd/quota-bar@vX.Y.Z` shows the tag with no ldflags.
 var version = ""
 
-// versionString resolves the version shown in the menu.
+// updateIdleTitle is the update menu item's resting label; the update flow
+// temporarily replaces it with progress/result text and then restores it.
+const updateIdleTitle = "Check for Updates…"
+
+// versionString resolves the version shown in the menu (see
+// update.ResolveVersion for the precedence).
 func versionString() string {
 	bi, ok := debug.ReadBuildInfo()
-	return resolveVersion(version, bi, ok)
-}
-
-// resolveVersion picks the version string from, in order: an explicit ldflags
-// override; the module version of a `@version` install; the VCS revision of a
-// local build; else "dev". Pure (takes build info as args) so it is testable.
-func resolveVersion(ldflag string, bi *debug.BuildInfo, ok bool) string {
-	if ldflag != "" {
-		return ldflag
-	}
-	if !ok || bi == nil {
-		return "dev"
-	}
-	if v := bi.Main.Version; v != "" && v != "(devel)" {
-		return v // installed via `go install …@vX.Y.Z`
-	}
-	for _, s := range bi.Settings {
-		if s.Key == "vcs.revision" && s.Value != "" {
-			rev := s.Value
-			if len(rev) > 7 {
-				rev = rev[:7]
-			}
-			return rev // local build: short commit hash
-		}
-	}
-	return "dev"
+	return update.ResolveVersion(version, bi, ok)
 }
 
 const (
@@ -824,6 +807,7 @@ func onReady() {
 	miAutoStart := systray.AddMenuItemCheckbox("Start at Login", "", isAutoStartEnabled())
 	miVersion := systray.AddMenuItem("quota-bar "+versionString(), "")
 	miVersion.Disable()
+	miUpdate := systray.AddMenuItem(updateIdleTitle, "최신 릴리스 확인 후 설치하고 재시작")
 	miQuit := systray.AddMenuItem("Quit", "Quit")
 
 	var (
@@ -1115,6 +1099,81 @@ func onReady() {
 		}
 	}
 
+	// menuUpdate installs the latest release and re-execs this process in
+	// place — same PID, so launchd keeps tracking it, and the pidfile lock is
+	// FD_CLOEXEC so the replacement image re-acquires it (post-exec systray
+	// re-init proven by live probe). It first takes the refresh gate so an
+	// in-flight probe isn't cut mid-capture (exec would orphan its tmux
+	// session with a live claude inside); on the success path the gate is
+	// never released because the process image is replaced.
+	var updateBusy atomic.Bool
+	menuUpdate := func() {
+		// One update flow at a time: a re-click while one is running (or while
+		// its result title is still showing) is ignored, so a second run can't
+		// overwrite the first one's progress title.
+		if !updateBusy.CompareAndSwap(false, true) {
+			return
+		}
+		defer updateBusy.Store(false)
+		done := func(title string) {
+			miUpdate.SetTitle(title)
+			time.Sleep(4 * time.Second)
+			miUpdate.SetTitle(updateIdleTitle)
+		}
+		fail := func(title string, err error) {
+			log.Printf("update: %v", err)
+			done(title)
+		}
+		miUpdate.SetTitle("Waiting for refresh…")
+		acquired := false
+		for i := 0; i < 360 && !acquired; i++ { // ≤3min: outlasts one 90s fetch round
+			mu.Lock()
+			if !running {
+				running = true
+				acquired = true
+			}
+			mu.Unlock()
+			if !acquired {
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
+		if !acquired {
+			fail("Update busy — try again", fmt.Errorf("refresh gate not released within 3m"))
+			return
+		}
+		release := func() {
+			mu.Lock()
+			running = false
+			mu.Unlock()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		miUpdate.SetTitle("Checking for updates…")
+		latest, err := update.Latest(ctx)
+		if err != nil {
+			release()
+			fail("Update check failed (see log)", err)
+			return
+		}
+		if cur := versionString(); cur == latest {
+			release()
+			done("Up to date (" + latest + ")")
+			return
+		}
+		miUpdate.SetTitle("Updating to " + latest + "…")
+		bin, err := update.Install(ctx, "quota-bar", latest)
+		if err != nil {
+			release()
+			fail("Update failed (see log)", err)
+			return
+		}
+		log.Printf("updated to %s at %s; restarting in place", latest, bin)
+		if err := syscall.Exec(bin, []string{bin}, os.Environ()); err != nil {
+			release()
+			fail("Restart failed (see log)", err)
+		}
+	}
+
 	go refresh()
 	go func() {
 		lastRefresh := time.Now()
@@ -1172,6 +1231,8 @@ func onReady() {
 				renderRows(data, stale, on)
 			case <-miRefresh.ClickedCh:
 				go refresh()
+			case <-miUpdate.ClickedCh:
+				go menuUpdate()
 			case <-miAutoStart.ClickedCh:
 				if isAutoStartEnabled() {
 					if err := disableAutoStart(); err != nil {

@@ -1101,36 +1101,87 @@ func onReady() {
 	// menuUpdate installs the latest release and re-execs this process in
 	// place — same PID, so launchd keeps tracking it, and the pidfile lock is
 	// FD_CLOEXEC so the replacement image re-acquires it (post-exec systray
-	// re-init proven by live probe). It first takes the refresh gate so an
-	// in-flight probe isn't cut mid-capture (exec would orphan its tmux
-	// session with a live claude inside); on the success path the gate is
-	// never released because the process image is replaced.
+	// re-init proven by live probe). Gate discipline lives in the rules block
+	// below: the refresh gate is taken only right before exec (a probe cut by
+	// exec would orphan its tmux session with a live claude inside), and on
+	// the success path it is never released because the image is replaced.
 	// The button and the status are separate surfaces: the button's title
 	// never changes (a click always means exactly "check now"), progress and
 	// results appear on the disabled status row below it, and the last result
 	// stays visible until the next check. While a flow runs the button is
 	// disabled, so a click is never silently ignored.
 	var updateBusy atomic.Bool
+	// Two hard-won rules shape this flow (a live wedge froze the whole bar):
+	//   1. Every systray mutation (SetTitle/Disable/…) is a SYNCHRONOUS
+	//      dispatch to the Cocoa main thread (waitUntilDone:YES inside the
+	//      systray library) and can block forever when it races the closing
+	//      menu's run-loop mode. So: log BEFORE every mutation (a wedge can
+	//      never be silent again), settle briefly after the click before the
+	//      first mutation, and keep a watchdog that reports a stuck flow.
+	//   2. The refresh gate is taken as LATE as possible — right before exec,
+	//      which is the only step that needs it — and NO systray call happens
+	//      while holding it. A wedged mutation then costs this one flow, never
+	//      the refresh loop.
 	menuUpdate := func() {
 		// Belt-and-suspenders against double dispatch; the disabled button
 		// already prevents user-visible re-clicks.
 		if !updateBusy.CompareAndSwap(false, true) {
 			return
 		}
+		log.Printf("update: flow started (current %s)", versionString())
+		flowDone := make(chan struct{})
+		defer close(flowDone) // not reached on successful exec; the image is gone anyway
+		go func() {
+			select {
+			case <-flowDone:
+			case <-time.After(10 * time.Minute):
+				log.Printf("update: flow still unfinished after 10m — likely wedged in a systray main-thread dispatch; restart quota-bar to recover")
+			}
+		}()
+		// Let the menu finish closing before touching systray (rule 1).
+		time.Sleep(500 * time.Millisecond)
+		// status logs the transition, then paints it. The log line comes first
+		// so the on-disk trail is complete even if the paint call wedges.
+		status := func(s string) {
+			log.Printf("update: %s", s)
+			miUpdateStatus.SetTitle(s)
+		}
 		miUpdate.Disable()
 		miUpdateStatus.Show()
 		// finish paints the final status and re-arms the button — every exit
 		// path except the successful exec (which replaces the process image).
-		finish := func(status string) {
-			miUpdateStatus.SetTitle(status)
+		finish := func(s string) {
+			status(s)
 			miUpdate.Enable()
 			updateBusy.Store(false)
 		}
-		fail := func(status string, err error) {
+		fail := func(s string, err error) {
 			log.Printf("update: %v", err)
-			finish(status)
+			finish(s)
 		}
-		miUpdateStatus.SetTitle("Waiting for refresh to finish…")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		status("Checking for updates…")
+		latest, err := update.Latest(ctx)
+		if err != nil {
+			fail("Update check failed — see log", err)
+			return
+		}
+		if cur := versionString(); cur == latest {
+			finish("Up to date (" + latest + ")")
+			return
+		}
+		status("Installing " + latest + "…")
+		bin, err := update.Install(ctx, "quota-bar", latest)
+		if err != nil {
+			fail("Update failed — see log", err)
+			return
+		}
+		log.Printf("update: installed %s at %s", latest, bin)
+		// Take the refresh gate only now (rule 2): install is just a file
+		// write, only the exec below must not cut a probe mid-capture.
+		status("Restarting…")
+		log.Printf("update: waiting for refresh gate")
 		acquired := false
 		for i := 0; i < 360 && !acquired; i++ { // ≤3min: outlasts one 90s fetch round
 			mu.Lock()
@@ -1152,28 +1203,7 @@ func onReady() {
 			running = false
 			mu.Unlock()
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		miUpdateStatus.SetTitle("Checking for updates…")
-		latest, err := update.Latest(ctx)
-		if err != nil {
-			release()
-			fail("Update check failed — see log", err)
-			return
-		}
-		if cur := versionString(); cur == latest {
-			release()
-			finish("Up to date (" + latest + ")")
-			return
-		}
-		miUpdateStatus.SetTitle("Installing " + latest + "…")
-		bin, err := update.Install(ctx, "quota-bar", latest)
-		if err != nil {
-			release()
-			fail("Update failed — see log", err)
-			return
-		}
-		log.Printf("updated to %s at %s; restarting in place", latest, bin)
+		log.Printf("update: restarting in place (%s)", bin)
 		if err := syscall.Exec(bin, []string{bin}, os.Environ()); err != nil {
 			release()
 			fail("Restart failed — see log", err)

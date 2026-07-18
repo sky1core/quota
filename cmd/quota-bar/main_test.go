@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -399,5 +401,44 @@ func TestApplyWindows_ProviderAgnostic(t *testing.T) {
 	}})
 	if d2.labels["claude_weekly_all"] != "5 days" {
 		t.Errorf("renamed period must flow through, got %q", d2.labels["claude_weekly_all"])
+	}
+}
+
+// TestSameExecutable pins the path comparison the update restart uses to
+// decide between launchd respawn and spawn handover: symlink/normalization
+// differences between the plist program (symlink-resolved) and the install
+// path (raw GOBIN join) must not disqualify a healthy setup, and a missing
+// or different file must never be judged equal.
+func TestSameExecutable(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	bin := writeFile("bin", "x")
+	other := writeFile("other", "y")
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(bin, link); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"identical strings", bin, bin, true},
+		{"symlink resolves to same file", link, bin, true},
+		{"different files", other, bin, false},
+		{"missing path", filepath.Join(dir, "gone"), bin, false},
+		{"empty program", "", bin, false},
+	}
+	for _, c := range cases {
+		if got := sameExecutable(c.a, c.b); got != c.want {
+			t.Errorf("%s: sameExecutable(%q, %q) = %v, want %v", c.name, c.a, c.b, got, c.want)
+		}
 	}
 }

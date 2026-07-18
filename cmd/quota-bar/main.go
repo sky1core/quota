@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -523,29 +524,37 @@ func pidLockPath() string {
 	return filepath.Join(home, ".config", "quota", "quota-bar.pid")
 }
 
-// acquireLock tries to acquire an exclusive flock on the PID file.
-// Returns the file descriptor on success, or -1 if another instance is running.
-func acquireLock() int {
+// lockFD is the held pidfile lock fd; the update restart closes it right
+// before handing over to a freshly spawned process.
+var lockFD = -1
+
+// acquireLock tries to acquire an exclusive flock on the PID file. It
+// returns the held fd, or fd<0 with contended=true when another live
+// instance holds the lock (a normal condition) and contended=false on
+// environment errors (mkdir/open failed) — the caller's exit code must keep
+// the two apart so launchd retries transient errors but never spins against
+// a legitimate holder.
+func acquireLock() (fd int, contended bool) {
 	p := pidLockPath()
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		log.Printf("acquireLock: mkdir: %v", err)
-		return -1
+		return -1, false
 	}
 	fd, err := syscall.Open(p, syscall.O_CREAT|syscall.O_RDWR, 0o644)
 	if err != nil {
 		log.Printf("acquireLock: open: %v", err)
-		return -1
+		return -1, false
 	}
 	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		syscall.Close(fd)
-		return -1
+		return -1, err == syscall.EWOULDBLOCK
 	}
 	syscall.CloseOnExec(fd)
 	// Write PID
 	_ = syscall.Ftruncate(fd, 0)
 	pid := fmt.Sprintf("%d\n", os.Getpid())
 	_, _ = syscall.Write(fd, []byte(pid))
-	return fd
+	return fd, false
 }
 
 const launchLabel = "com.sky1core.quota-bar"
@@ -639,6 +648,51 @@ func disableAutoStart() error {
 	return os.Remove(p)
 }
 
+// launchdJob asks launchd whether this process is the running process of the
+// quota-bar LaunchAgent job. It returns the job's program path (what a
+// KeepAlive respawn would launch — launchctl prints it even for
+// ProgramArguments-only plists) and whether the job's pid is this process.
+// Any failure (job not loaded, launchctl missing, format drift) reports
+// false, which the update restart degrades to the spawn handover — safe in
+// both directions, unlike a wrong "we are the job" answer.
+func launchdJob() (program string, isJob bool) {
+	out, err := exec.Command("launchctl", "print",
+		fmt.Sprintf("gui/%d/%s", os.Getuid(), launchLabel)).Output()
+	if err != nil {
+		return "", false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if v, ok := strings.CutPrefix(line, "pid = "); ok && !isJob {
+			pid, perr := strconv.Atoi(strings.TrimSpace(v))
+			isJob = perr == nil && pid == os.Getpid()
+		} else if v, ok := strings.CutPrefix(line, "program = "); ok && program == "" {
+			program = strings.TrimSpace(v)
+		}
+	}
+	return program, isJob
+}
+
+// sameExecutable reports whether two paths name the same file, tolerating
+// symlink/normalization differences: the plist program is symlink-resolved
+// at enableAutoStart time while the install path is a raw GOBIN join, so an
+// exact string compare would misjudge a healthy setup whenever either path
+// crosses a symlink.
+func sameExecutable(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(ai, bi)
+}
+
 func main() {
 	if os.Getenv("QUOTA_BAR_DAEMON") != "1" {
 		exe, err := os.Executable()
@@ -661,8 +715,20 @@ func main() {
 		_ = os.Chdir(home)
 	}
 	setupLog()
-	if fd := acquireLock(); fd < 0 {
-		log.Printf("another instance is already running, exiting")
+	var contended bool
+	if lockFD, contended = acquireLock(); lockFD < 0 {
+		if contended {
+			// Exit 0: with KeepAlive SuccessfulExit=false, a non-zero exit
+			// here would make launchd retry (and lose) the lock every
+			// ThrottleInterval forever whenever another instance
+			// legitimately holds it — e.g. the handover child left running
+			// after a manual-mode update restart.
+			log.Printf("another instance is already running, exiting")
+			os.Exit(0)
+		}
+		// Environment error (not a live holder): exit 1 so launchd retries —
+		// a transient hiccup at login must not leave the bar dead all session.
+		log.Printf("could not acquire pid lock, exiting")
 		os.Exit(1)
 	}
 	log.Printf("quota-bar started (pid=%d)", os.Getpid())
@@ -1098,13 +1164,17 @@ func onReady() {
 		}
 	}
 
-	// menuUpdate installs the latest release and re-execs this process in
-	// place — same PID, so launchd keeps tracking it, and the pidfile lock is
-	// FD_CLOEXEC so the replacement image re-acquires it (post-exec systray
-	// re-init proven by live probe). Gate discipline lives in the rules block
-	// below: the refresh gate is taken only right before exec (a probe cut by
-	// exec would orphan its tmux session with a live claude inside), and on
-	// the success path it is never released because the image is replaced.
+	// menuUpdate installs the latest release and restarts by handing over to
+	// a FRESH process: launchd respawn when we are the job, spawn+exit(0)
+	// otherwise. It used to re-exec in place (same PID, launchd kept
+	// tracking), but a re-exec'd image re-registers its NSStatusItem under a
+	// PID the WindowServer already knew, and on some macOS builds the icon
+	// silently never reappears — seen live: healthy process, restart log
+	// complete, no icon. Only a fresh process is reliable, so in-place exec
+	// is banned here. Gate discipline is unchanged: the refresh gate is taken
+	// only right before the handover (a probe cut by the dying process would
+	// orphan its tmux session with a live claude inside), and on the success
+	// path it is never released because the process exits.
 	// The button and the status are separate surfaces: the button's title
 	// never changes (a click always means exactly "check now"), progress and
 	// results appear on the disabled status row below it, and the last result
@@ -1118,10 +1188,10 @@ func onReady() {
 	//      menu's run-loop mode. So: log BEFORE every mutation (a wedge can
 	//      never be silent again), settle briefly after the click before the
 	//      first mutation, and keep a watchdog that reports a stuck flow.
-	//   2. The refresh gate is taken as LATE as possible — right before exec,
-	//      which is the only step that needs it — and NO systray call happens
-	//      while holding it. A wedged mutation then costs this one flow, never
-	//      the refresh loop.
+	//   2. The refresh gate is taken as LATE as possible — right before the
+	//      restart handover, which is the only step that needs it — and NO
+	//      systray call happens while holding it. A wedged mutation then
+	//      costs this one flow, never the refresh loop.
 	menuUpdate := func() {
 		// Belt-and-suspenders against double dispatch; the disabled button
 		// already prevents user-visible re-clicks.
@@ -1130,7 +1200,7 @@ func onReady() {
 		}
 		log.Printf("update: flow started (current %s)", versionString())
 		flowDone := make(chan struct{})
-		defer close(flowDone) // not reached on successful exec; the image is gone anyway
+		defer close(flowDone) // not reached on a successful restart; the process exits
 		go func() {
 			select {
 			case <-flowDone:
@@ -1149,7 +1219,7 @@ func onReady() {
 		miUpdate.Disable()
 		miUpdateStatus.Show()
 		// finish paints the final status and re-arms the button — every exit
-		// path except the successful exec (which replaces the process image).
+		// path except a successful restart handover (the process exits).
 		finish := func(s string) {
 			status(s)
 			miUpdate.Enable()
@@ -1179,7 +1249,8 @@ func onReady() {
 		}
 		log.Printf("update: installed %s at %s", latest, bin)
 		// Take the refresh gate only now (rule 2): install is just a file
-		// write, only the exec below must not cut a probe mid-capture.
+		// write, only the process handover below must not cut a probe
+		// mid-capture.
 		status("Restarting…")
 		log.Printf("update: waiting for refresh gate")
 		acquired := false
@@ -1203,11 +1274,58 @@ func onReady() {
 			running = false
 			mu.Unlock()
 		}
-		log.Printf("update: restarting in place (%s)", bin)
-		if err := syscall.Exec(bin, []string{bin}, os.Environ()); err != nil {
+		// os.Exit (not systray.Quit) on both handover paths: Quit is itself a
+		// Cocoa main-thread dispatch (rule 1), and the restart must not
+		// depend on the wedge-prone run loop to complete — a wedged Quit
+		// would leave old and new processes running side by side. There is
+		// nothing to tear down gracefully: the gate is held, so no probe is
+		// mid-capture, and the kernel drops the flock when the process dies.
+		if program, isJob := launchdJob(); isJob {
+			if sameExecutable(program, bin) {
+				// We are the LaunchAgent's process and its program is the
+				// binary we just installed: exit unsuccessfully so KeepAlive
+				// (SuccessfulExit=false) respawns the updated binary as a
+				// first-class launchd job.
+				log.Printf("update: exiting for launchd respawn of %s", bin)
+				os.Exit(1)
+			}
+			// The loaded job points at some other path, so a respawn would
+			// relaunch the OLD binary there. Fall through to the spawn
+			// handover — the update still lands, the new process just runs
+			// outside the launchd job until the next login.
+			log.Printf("update: launchd job program %q != installed %q — spawning outside the job (re-enable Start at Login to fix the path)", program, bin)
+		}
+		// Manual handover: release the pidfile lock BEFORE the spawn so the
+		// child can't lose the flock race against a parent that is about to
+		// exit anyway, then start the new binary (env already carries
+		// QUOTA_BAR_DAEMON=1, so it skips the daemonize wrapper) and exit 0.
+		log.Printf("update: spawning %s and exiting", bin)
+		syscall.Close(lockFD)
+		lockFD = -1
+		cmd := exec.Command(bin)
+		// Detach the child into its own process group: when a launchd job
+		// dies, launchd kills any remaining processes in the job's process
+		// group (launchd.plist(5), AbandonProcessGroup defaults to false).
+		// Without this, a handover child spawned from a launchd-managed
+		// process would be SIGKILLed the instant we exit.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := cmd.Start(); err != nil {
+			var contended bool
+			if lockFD, contended = acquireLock(); lockFD < 0 {
+				if contended {
+					// A third instance grabbed the lock in the close→spawn
+					// window; it owns the singleton now — leave the bar to it
+					// rather than run two icons side by side.
+					log.Printf("update: lost pid lock to another instance after failed spawn, exiting")
+					os.Exit(0)
+				}
+				log.Printf("update: could not re-acquire pid lock after failed spawn")
+			}
 			release()
 			fail("Restart failed — see log", err)
+			return
 		}
+		os.Exit(0)
 	}
 
 	go refresh()

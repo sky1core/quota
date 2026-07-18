@@ -32,10 +32,6 @@ import (
 // plain `go install <module>/cmd/quota-bar@vX.Y.Z` shows the tag with no ldflags.
 var version = ""
 
-// updateIdleTitle is the update menu item's resting label; the update flow
-// temporarily replaces it with progress/result text and then restores it.
-const updateIdleTitle = "Check for Updates…"
-
 // versionString resolves the version shown in the menu (see
 // update.ResolveVersion for the precedence).
 func versionString() string {
@@ -807,7 +803,10 @@ func onReady() {
 	miAutoStart := systray.AddMenuItemCheckbox("Start at Login", "", isAutoStartEnabled())
 	miVersion := systray.AddMenuItem("quota-bar "+versionString(), "")
 	miVersion.Disable()
-	miUpdate := systray.AddMenuItem(updateIdleTitle, "최신 릴리스 확인 후 설치하고 재시작")
+	miUpdate := systray.AddMenuItem("Check for Updates…", "최신 릴리스 확인 후 설치하고 재시작")
+	miUpdateStatus := systray.AddMenuItem("", "")
+	miUpdateStatus.Disable()
+	miUpdateStatus.Hide()
 	miQuit := systray.AddMenuItem("Quit", "Quit")
 
 	var (
@@ -1106,25 +1105,32 @@ func onReady() {
 	// in-flight probe isn't cut mid-capture (exec would orphan its tmux
 	// session with a live claude inside); on the success path the gate is
 	// never released because the process image is replaced.
+	// The button and the status are separate surfaces: the button's title
+	// never changes (a click always means exactly "check now"), progress and
+	// results appear on the disabled status row below it, and the last result
+	// stays visible until the next check. While a flow runs the button is
+	// disabled, so a click is never silently ignored.
 	var updateBusy atomic.Bool
 	menuUpdate := func() {
-		// One update flow at a time: a re-click while one is running (or while
-		// its result title is still showing) is ignored, so a second run can't
-		// overwrite the first one's progress title.
+		// Belt-and-suspenders against double dispatch; the disabled button
+		// already prevents user-visible re-clicks.
 		if !updateBusy.CompareAndSwap(false, true) {
 			return
 		}
-		defer updateBusy.Store(false)
-		done := func(title string) {
-			miUpdate.SetTitle(title)
-			time.Sleep(4 * time.Second)
-			miUpdate.SetTitle(updateIdleTitle)
+		miUpdate.Disable()
+		miUpdateStatus.Show()
+		// finish paints the final status and re-arms the button — every exit
+		// path except the successful exec (which replaces the process image).
+		finish := func(status string) {
+			miUpdateStatus.SetTitle(status)
+			miUpdate.Enable()
+			updateBusy.Store(false)
 		}
-		fail := func(title string, err error) {
+		fail := func(status string, err error) {
 			log.Printf("update: %v", err)
-			done(title)
+			finish(status)
 		}
-		miUpdate.SetTitle("Waiting for refresh…")
+		miUpdateStatus.SetTitle("Waiting for refresh to finish…")
 		acquired := false
 		for i := 0; i < 360 && !acquired; i++ { // ≤3min: outlasts one 90s fetch round
 			mu.Lock()
@@ -1138,7 +1144,7 @@ func onReady() {
 			}
 		}
 		if !acquired {
-			fail("Update busy — try again", fmt.Errorf("refresh gate not released within 3m"))
+			fail("Busy — try again later", fmt.Errorf("refresh gate not released within 3m"))
 			return
 		}
 		release := func() {
@@ -1148,29 +1154,29 @@ func onReady() {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		miUpdate.SetTitle("Checking for updates…")
+		miUpdateStatus.SetTitle("Checking for updates…")
 		latest, err := update.Latest(ctx)
 		if err != nil {
 			release()
-			fail("Update check failed (see log)", err)
+			fail("Update check failed — see log", err)
 			return
 		}
 		if cur := versionString(); cur == latest {
 			release()
-			done("Up to date (" + latest + ")")
+			finish("Up to date (" + latest + ")")
 			return
 		}
-		miUpdate.SetTitle("Updating to " + latest + "…")
+		miUpdateStatus.SetTitle("Installing " + latest + "…")
 		bin, err := update.Install(ctx, "quota-bar", latest)
 		if err != nil {
 			release()
-			fail("Update failed (see log)", err)
+			fail("Update failed — see log", err)
 			return
 		}
 		log.Printf("updated to %s at %s; restarting in place", latest, bin)
 		if err := syscall.Exec(bin, []string{bin}, os.Environ()); err != nil {
 			release()
-			fail("Restart failed (see log)", err)
+			fail("Restart failed — see log", err)
 		}
 	}
 

@@ -45,8 +45,8 @@ func TestFormatResetAt(t *testing.T) {
 	// Built in Local so FormatReset's .Local() is a no-op and the date/time
 	// are stable regardless of the test machine's timezone.
 	tm := time.Date(2026, 7, 6, 15, 4, 0, 0, time.Local)
-	if got := FormatResetAt(tm); got != "Jul 6 15:04" {
-		t.Errorf("FormatResetAt = %q, want %q", got, "Jul 6 15:04")
+	if got := FormatResetAt(tm); got != "Mon Jul 6 15:04" {
+		t.Errorf("FormatResetAt = %q, want %q", got, "Mon Jul 6 15:04")
 	}
 }
 
@@ -57,8 +57,8 @@ func TestFmtLine_ResetsAtIsExact(t *testing.T) {
 	at := time.Date(2026, 7, 6, 15, 4, 0, 0, time.Local)
 	it := item{label: "Weekly", left: "83%", resets: "5d 15h", resetAt: at, hasAt: true}
 	got := fmtLine(it)
-	if !strings.Contains(got, "at Jul 6 15:04") {
-		t.Errorf("fmtLine should use resetsAt exactly (at Jul 6 15:04): %q", got)
+	if !strings.Contains(got, "at Mon Jul 6 15:04") {
+		t.Errorf("fmtLine should use resetsAt exactly (at Mon Jul 6 15:04): %q", got)
 	}
 	if !strings.Contains(got, "5d 15h") {
 		t.Errorf("fmtLine should keep the relative string too: %q", got)
@@ -75,48 +75,55 @@ func TestText_ResetsAtFormatted(t *testing.T) {
 		},
 	}
 	got := Text(payload)
-	if !strings.Contains(got, "at Jul 6 15:04") {
+	if !strings.Contains(got, "at Mon Jul 6 15:04") {
 		t.Errorf("Text should render resetsAt: %q", got)
 	}
 }
 
-func TestEndTime_Hours(t *testing.T) {
-	end, ok := endTime("2h 30m")
-	if !ok {
-		t.Fatal("expected ok")
+// TestEndTime_ShapeIsUniform pins the consistency requirement: a reset time
+// reconstructed from a relative string renders in the one display format no
+// matter how far out it is. Rows an hour away and rows days away appear in the
+// same output, and they used to differ in shape ("15:04" vs "Jul 6 15:04"),
+// which left the reader guessing why.
+func TestEndTime_ShapeIsUniform(t *testing.T) {
+	cases := []struct {
+		name, in string
+		d        time.Duration
+	}{
+		{"minutes", "45m", 45 * time.Minute},
+		{"hours", "2h 30m", 2*time.Hour + 30*time.Minute},
+		{"days", "5d 3h", 5*24*time.Hour + 3*time.Hour},
 	}
-	// Should be today's time in HH:MM format (no date)
-	if !strings.Contains(end, ":") {
-		t.Errorf("unexpected format: %q", end)
-	}
-	// Should not contain month name
-	for _, m := range []string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"} {
-		if strings.Contains(end, m) {
-			t.Errorf("hours-only should not have date: %q", end)
-			break
-		}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// Bracket the call: endTime is now-relative, so the minute can
+			// roll over mid-test. Either bound is a correct rendering.
+			before := time.Now()
+			got, ok := endTime(c.in)
+			after := time.Now()
+			if !ok {
+				t.Fatalf("endTime(%q) not ok", c.in)
+			}
+			w1, w2 := FormatResetAt(before.Add(c.d)), FormatResetAt(after.Add(c.d))
+			if got != w1 && got != w2 {
+				t.Errorf("endTime(%q) = %q, want %q or %q", c.in, got, w1, w2)
+			}
+		})
 	}
 }
 
-func TestEndTime_Days(t *testing.T) {
-	end, ok := endTime("5d 3h")
+// TestEndTime_LeadsWithWeekday guards the reason the format exists: weekly
+// quotas are the ones users plan around, so a reconstructed reset must name
+// its weekday instead of making the reader derive it from a date.
+func TestEndTime_LeadsWithWeekday(t *testing.T) {
+	got, ok := endTime("5d 3h")
 	if !ok {
 		t.Fatal("expected ok")
 	}
-	// Should include month/day since > 24h
-	expected := time.Now().Add(5*24*time.Hour + 3*time.Hour)
-	if !strings.Contains(end, expected.Format("Jan")) {
-		t.Errorf("expected month name in %q", end)
-	}
-}
-
-func TestEndTime_MinutesOnly(t *testing.T) {
-	end, ok := endTime("45m")
-	if !ok {
-		t.Fatal("expected ok")
-	}
-	if !strings.Contains(end, ":") {
-		t.Errorf("expected HH:MM format: %q", end)
+	if day, _, found := strings.Cut(got, " "); !found || len(day) != 3 {
+		t.Fatalf("endTime(%q) = %q, want a leading weekday", "5d 3h", got)
+	} else if _, err := time.Parse("Mon", day); err != nil {
+		t.Errorf("endTime = %q: %q is not a weekday", got, day)
 	}
 }
 
@@ -215,7 +222,7 @@ func TestText_WithResetCredits(t *testing.T) {
 	if !strings.Contains(got, "Reset credits: 4") {
 		t.Errorf("missing Reset credits row with count: %q", got)
 	}
-	if !strings.Contains(got, "(expires Jul 12 10:42)") {
+	if !strings.Contains(got, "(expires Sun Jul 12 10:42)") {
 		t.Errorf("missing soonest expiry (without \"next\"): %q", got)
 	}
 	if strings.Contains(got, "next") {

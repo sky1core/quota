@@ -18,10 +18,18 @@ type item struct {
 }
 
 // FormatResetAt renders an absolute reset instant for display: local timezone,
-// 24-hour clock, always with the date, year omitted, e.g. "Jul 6 15:04".
-// Shared by the CLI (render) and quota-bar so the format stays identical.
+// 24-hour clock, weekday first, then the date, year omitted — e.g.
+// "Mon Jul 6 15:04". Shared by the CLI (render) and quota-bar so the format
+// stays identical.
+//
+// The weekday leads because the quotas that matter reset weekly: "which day do
+// I get it back" is the question a bare date makes the reader compute. The
+// date stays alongside it so a reset more than a week out is unambiguous, and
+// the shape never varies with how far away the instant is — one format for
+// every row, so nothing shifts as time passes. The year is omitted because the
+// longest-lived thing shown here is a 30-day reset credit.
 func FormatResetAt(t time.Time) string {
-	return t.Local().Format("Jan 2 15:04")
+	return t.Local().Format("Mon Jan 2 15:04")
 }
 
 // formatError renders one entry from the payload's "errors" list for humans.
@@ -257,8 +265,16 @@ func fmtLine(it item) string {
 
 var reUnit = regexp.MustCompile(`(\d+)\s*(d|h|m)`)
 
-// endTime parses a remaining-time string like "5d 18h", "1h 4m", "5m"
-// and returns the absolute end time formatted as "15:04" or "Jan 2 15:04".
+// endTime parses a remaining-time string like "5d 18h", "1h 4m", "5m" and
+// returns the absolute end time in the one display format (FormatResetAt), so
+// a row reconstructed here has the same shape as one built on a provider's own
+// resetsAt — both appear in the same output and used to differ.
+//
+// It runs only for rows that reach display without a resetsAt — Claude
+// printing "Resets in 4h 30m", or a Codex window whose reset instant has
+// already passed — so it never second-guesses a known resetsAt. Its precision
+// is the source string's: a coarse "5d 18h" pins the start of the hour-wide
+// range it names, not the exact instant.
 func endTime(remaining string) (string, bool) {
 	matches := reUnit.FindAllStringSubmatch(remaining, -1)
 	if len(matches) == 0 {
@@ -276,9 +292,5 @@ func endTime(remaining string) (string, bool) {
 			d += time.Duration(n) * time.Minute
 		}
 	}
-	t := time.Now().Add(d)
-	if d >= 24*time.Hour {
-		return t.Format("Jan 2 15:04"), true
-	}
-	return t.Format("15:04"), true
+	return FormatResetAt(time.Now().Add(d)), true
 }

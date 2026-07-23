@@ -15,10 +15,10 @@ func TestResetText(t *testing.T) {
 		showResetTime  bool
 		rel, abs, want string
 	}{
-		{"relative mode uses rel", false, "5d 15h", "Jul 6 15:04", "5d 15h"},
-		{"clock mode uses abs", true, "5d 15h", "Jul 6 15:04", "Jul 6 15:04"},
+		{"relative mode uses rel", false, "5d 15h", "Mon Jul 6 15:04", "5d 15h"},
+		{"clock mode uses abs", true, "5d 15h", "Mon Jul 6 15:04", "Mon Jul 6 15:04"},
 		{"clock mode falls back to rel when abs unknown", true, "5d 15h", "", "5d 15h"},
-		{"relative mode ignores abs", false, "2h", "Jul 6 15:04", "2h"},
+		{"relative mode ignores abs", false, "2h", "Mon Jul 6 15:04", "2h"},
 		{"both empty stays empty", true, "", "", ""},
 	}
 	for _, c := range cases {
@@ -31,7 +31,7 @@ func TestResetText(t *testing.T) {
 // TestRowTitle_ModeSwitch verifies the exact menu string a row shows in each
 // mode — the visible behavior of the "Reset as clock time" toggle (req #2).
 func TestRowTitle_ModeSwitch(t *testing.T) {
-	const rel, abs = "2d 16h", "Jul 13 12:00"
+	const rel, abs = "2d 16h", "Mon Jul 13 12:00"
 	cases := []struct {
 		name          string
 		label, value  string
@@ -40,10 +40,10 @@ func TestRowTitle_ModeSwitch(t *testing.T) {
 		want          string
 	}{
 		{"relative mode", "Weekly", "90%", false, rel, abs, "Weekly 90% (2d 16h)"},
-		{"clock mode", "Weekly", "90%", true, rel, abs, "Weekly 90% (Jul 13 12:00)"},
+		{"clock mode", "Weekly", "90%", true, rel, abs, "Weekly 90% (Mon Jul 13 12:00)"},
 		{"clock mode falls back when abs unknown", "5h", "85%", true, "2h 30m", "", "5h 85% (2h 30m)"},
 		{"no reset omits parens", "Fable", "100%", false, "", "", "Fable 100%"},
-		{"stale marker preserved in value", "Session", "99%?", true, rel, abs, "Session 99%? (Jul 13 12:00)"},
+		{"stale marker preserved in value", "Session", "99%?", true, rel, abs, "Session 99%? (Mon Jul 13 12:00)"},
 	}
 	for _, c := range cases {
 		got := rowTitle(c.label, c.value, resetText(c.showResetTime, c.rel, c.abs))
@@ -67,7 +67,7 @@ func TestResetCreditRows(t *testing.T) {
 		if len(rows) != 1 {
 			t.Fatalf("rows = %v, want 1", rows)
 		}
-		if rows[0].rel != "1d 0h" || rows[0].abs != "Jul 12 10:42" || rows[0].title != "Full reset (Weekly + 5 hr)" {
+		if rows[0].rel != "1d 0h" || rows[0].abs != "Sun Jul 12 10:42" || rows[0].title != "Full reset (Weekly + 5 hr)" {
 			t.Errorf("row = %+v", rows[0])
 		}
 	})
@@ -94,8 +94,8 @@ func TestResetCreditRows(t *testing.T) {
 // every other row — relative time left when off, absolute clock when on.
 func TestResetRowTitles_ModeSwitch(t *testing.T) {
 	rows := []resetRow{
-		{rel: "1d 0h", abs: "Jul 12 10:42", title: "Full reset (Weekly + 5 hr)"},
-		{rel: "6d 23h", abs: "Jul 18 09:33", title: "Full reset (Weekly + 5 hr)"},
+		{rel: "1d 0h", abs: "Sun Jul 12 10:42", title: "Full reset (Weekly + 5 hr)"},
+		{rel: "6d 23h", abs: "Sat Jul 18 09:33", title: "Full reset (Weekly + 5 hr)"},
 	}
 
 	t.Run("relative mode (toggle off)", func(t *testing.T) {
@@ -111,10 +111,10 @@ func TestResetRowTitles_ModeSwitch(t *testing.T) {
 
 	t.Run("clock mode (toggle on)", func(t *testing.T) {
 		parent, children := resetRowTitles(rows, true)
-		if parent != "Reset credits: 2  (Jul 12 10:42)" {
+		if parent != "Reset credits: 2  (Sun Jul 12 10:42)" {
 			t.Errorf("parent = %q", parent)
 		}
-		want := []string{"Jul 12 10:42", "Jul 18 09:33"}
+		want := []string{"Sun Jul 12 10:42", "Sat Jul 18 09:33"}
 		if len(children) != 2 || children[0] != want[0] || children[1] != want[1] {
 			t.Errorf("children = %v, want %v", children, want)
 		}

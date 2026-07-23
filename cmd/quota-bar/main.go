@@ -81,7 +81,7 @@ func itemKey(provider, suffix string) string {
 type settings struct {
 	Selected []string `json:"selected"`
 	// ShowResetTime displays each row's reset as an absolute clock time
-	// (e.g. "Jul 6 15:04") instead of the relative time left. Toggled from the
+	// (e.g. "Mon Jul 6 15:04") instead of the relative time left. Toggled from the
 	// menu; default false keeps the historical relative display.
 	ShowResetTime bool `json:"showResetTime"`
 	// RefreshActiveMinutes / RefreshIdleMinutes override the built-in refresh
@@ -234,7 +234,7 @@ func saveSettings(s settings) {
 type quotaData struct {
 	values    map[string]string // key -> "95%"
 	resets    map[string]string // key -> "4h 30m" (relative time left)
-	resetsAbs map[string]string // key -> "Jul 6 15:04" (absolute reset time, when known)
+	resetsAbs map[string]string // key -> "Mon Jul 6 15:04" (absolute reset time, when known)
 	labels    map[string]string // dynamic slot key -> on-screen label, e.g. "claude_extra_1" -> "Fable"
 	errs      map[string]string // provider key (Claude/Codex account key) -> error message
 	// Codex reset credits (초기화권), keyed by Codex account key ("codex",
@@ -248,7 +248,7 @@ type quotaData struct {
 
 // resetRow is one usable Codex reset credit for display. rel is the relative
 // "expires in" string (e.g. "1d 0h"); abs is the absolute expiry from
-// FormatResetAt (e.g. "Jul 12 10:42"), "" when the grant has no expiry epoch.
+// FormatResetAt (e.g. "Sun Jul 12 10:42"), "" when the grant has no expiry epoch.
 // title is the grant title, shown only as a fallback when neither time is known.
 type resetRow struct {
 	rel   string

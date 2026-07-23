@@ -273,13 +273,13 @@ Quit
 ```
 
 - 각 항목: `라벨 XX% (남은시간)` 형식. 남은시간 없으면 괄호 생략.
-- `Reset as clock time` 체크 시 각 항목의 괄호를 남은시간 대신 절대 시각으로 표시한다: `Weekly 90% (Jul 6 15:04)`. 절대 시각을 모르는 항목(`resetsAt` 없음)은 남은시간으로 유지한다.
+- `Reset as clock time` 체크 시 각 항목의 괄호를 남은시간 대신 절대 시각으로 표시한다: `Weekly 90% (Mon Jul 6 15:04)`. 절대 시각을 모르는 항목(`resetsAt` 없음)은 남은시간으로 유지한다.
 
 **Codex 초기화권 (Reset credits 행)**:
 - 라벨은 `Reset credits`다 — Codex 공식 표현(응답 필드 `rateLimitResetCredits`)을 따르며 "초기화권"(초기화=reset, 권=credit) 의미를 담는다.
 - Codex `resetCredits`(초기화권)가 있으면 **해당 Codex 계정 섹션마다** `Reset credits: N` 부모 행을 두고, 각 초기화권 만료를 **서브메뉴**로 나열한다(만료 임박순). `N`은 사용 가능 수(`= 나열한 자식 수`), 부모의 괄호는 가장 임박한 만료다(수식어 없이 시각만). 계정별로 부모·슬롯을 각각 미리 만든다.
 - **표시 전용**이다: 체크박스 아님, 상단 % 바에 넣지 않는다. 부모·자식 모두 enable 상태로 두어(가독성 위해 — disable 회색 텍스트를 피한다) 클릭은 아무 동작 없이 무시된다(정보 행). 부모 행에는 툴팁을 달지 않는다(뷰를 가림).
-- 부모/자식 시각도 **`Reset as clock time` 토글을 그대로 따른다** — off면 남은시간(`1d 0h`), on이면 절대 시각(`Jul 12 10:42`). 절대 시각을 모르면 남은시간으로 유지하고, 남은시간·절대 시각 모두 없으면 grant 제목으로 대체한다.
+- 부모/자식 시각도 **`Reset as clock time` 토글을 그대로 따른다** — off면 남은시간(`1d 0h`), on이면 절대 시각(`Sun Jul 12 10:42`). 절대 시각을 모르면 남은시간으로 유지하고, 남은시간·절대 시각 모두 없으면 grant 제목으로 대체한다.
 - 자식 슬롯은 고정 개수(`resetCreditSlots`)를 미리 만들어 두고 데이터 수만큼 show/hide 한다(systray 런타임 항목 추가 불가). 사용 가능 초기화권이 슬롯 수를 초과하면 부모 카운트는 실제 수를 표시하고 서브메뉴는 임박한 슬롯 수만 보여준다. 사용 가능 초기화권이 없으면 부모·자식 모두 숨긴다.
 - 에러 발생 시 해당 계정/영역에 에러 메시지 표시 (계정별·Codex별 에러 행을 각각 둔다).
 - 마지막 갱신 시간은 하단에 표시
@@ -315,7 +315,7 @@ Quit
 ```
 
 - `selected` (string 배열): 상단 바에 표시할 체크된 항목 키.
-- `showResetTime` (bool, optional, 기본 false): true면 각 항목의 리셋을 남은시간 대신 절대 시각(`FormatResetAt`, 예: `Jul 6 15:04`)으로 표시. Codex 초기화권(Reset credits 부모·서브메뉴)의 만료 시각도 동일하게 따른다. 메뉴의 `Reset as clock time` 체크로 토글하며, 즉시 저장 후 재조회 없이 메뉴만 다시 그린다(초기화권 행 포함). 상단 바(퍼센트 전용)에는 영향 없다.
+- `showResetTime` (bool, optional, 기본 false): true면 각 항목의 리셋을 남은시간 대신 절대 시각(`FormatResetAt`, 예: `Mon Jul 6 15:04`)으로 표시. Codex 초기화권(Reset credits 부모·서브메뉴)의 만료 시각도 동일하게 따른다. 메뉴의 `Reset as clock time` 체크로 토글하며, 즉시 저장 후 재조회 없이 메뉴만 다시 그린다(초기화권 행 포함). 상단 바(퍼센트 전용)에는 영향 없다.
 - `refreshActiveMinutes` (int, optional): 활성 상태 refresh 주기(분). **없거나 0 이하면 앱 기본값 3분**을 쓴다(명시 기본값 — 암시 fallback 아님). 값이 있으면 그 값을 적용한다.
 - `refreshIdleMinutes` (int, optional): idle 상태 refresh 주기(분). **없거나 0 이하면 앱 기본값 30분**. stale 경고 임계는 두 주기(active/idle) 중 **큰 값 + 5분**으로 계산해, 어느 주기를 늘려도(활성 주기를 idle보다 크게 잡아도) 정상 갱신을 stale로 오판하지 않는다.
   - 두 주기는 **메뉴에 토글이 없다**. 파일로만 지정하며, 변경은 계정 목록과 마찬가지로 **quota-bar 재시작 후 반영**된다(시작 시 고정).
@@ -404,15 +404,15 @@ Quit
 
 **함수**:
 - `Text(payload map[string]any) string`
-- `FormatResetAt(t time.Time) string` — 절대 리셋 시각을 `Jan 2 15:04`(로컬 tz, 24시간제, **날짜 항상 포함**, 연도 생략)로 포맷. quota-bar와 공유하는 단일 포맷 소스.
+- `FormatResetAt(t time.Time) string` — 절대 리셋 시각을 `Mon Jan 2 15:04`(로컬 tz, 24시간제, **요일 선두**, **날짜 항상 포함**, 연도 생략)로 포맷. quota-bar와 공유하는 단일 포맷 소스. 쿼터는 주 단위로 리셋되므로 사용자가 실제로 알아야 하는 값은 요일이다 — 날짜만 주고 요일을 역산하게 만들지 않는다. 날짜를 함께 두어 일주일 이상 뒤도 구분되게 하고, 표시 대상 중 가장 긴 것이 30일대 초기화권이라 `요일+월+일`이면 연도 없이도 모호하지 않다.
 
 - Claude, Codex 데이터를 사람이 읽을 수 있는 텍스트로 변환
 - 계정별 섹션: Claude는 `claude`+`claude-N`, Codex는 `codex`+`codex-N`을 각각 기본 먼저·숫자 오름차순으로 헤더(`Claude`/`Claude 2`, `Codex`/`Codex 2`)와 함께 렌더한다. Claude 그룹들 뒤에 Codex 그룹들이 온다.
 - **provider 분기 없음**: 각 그룹은 자기 `windows` 목록을 순회해 각 항목을 **그 항목의 `label`로** 렌더한다(목록이 이미 정식 순서). render는 어떤 창 이름도 갖지 않으므로, 새 창 종류·기간 변경·새 provider도 그대로 표시된다.
-- 리셋 시간이 있으면 `(남은시간, at 절대시각)` 형식으로 표시 (예: `(2d 5h, at Jul 6 15:04)`)
+- 리셋 시간이 있으면 `(남은시간, at 절대시각)` 형식으로 표시 (예: `(2d 5h, at Mon Jul 6 15:04)`)
 - Codex `resetCredits`(초기화권)가 있으면 Codex 섹션에 `Reset credits: N  (expires 절대시각)` 요약 줄을 추가한다. `N`은 사용 가능 수, 절대시각은 가장 임박한 만료(`items[0]`). 전체 목록은 `--json`으로 확인한다.
 - 절대시각은 항목에 `resetsAt`가 있으면 그 값을 `FormatResetAt`로 포맷한다(역산 없이 정확).
-- `resetsAt`가 없으면 `resetsIn`을 현재시각 기준으로 역산한다(`endTime`, 하위호환 fallback — 24시간 미만은 `15:04`, 이상은 `Jan 2 15:04`).
+- `resetsAt`가 없으면 `resetsIn`을 현재시각 기준으로 역산한다(`endTime`, 하위호환 fallback). 역산 결과도 `FormatResetAt`로 포맷한다 — 남은 시간이 얼마든 한 가지 모양만 나오므로, 같은 출력 안에서 행마다 형태가 달라지지 않는다.
 - 에러 있으면 Errors 섹션 추가
 - 마지막에 `Generated: {RFC3339}` 타임스탬프
 

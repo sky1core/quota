@@ -206,9 +206,10 @@ func TestResolveAccounts_DuplicateKey(t *testing.T) {
 func TestResolveAccounts_DuplicateConfigDir(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
-	// Same expanded configDir under two keys would collide on the tmux session
-	// name; the second must be skipped. Uses tilde vs absolute forms that expand
-	// to the same path to exercise post-ExpandTilde comparison.
+	// Same expanded configDir under two keys is the same account queried twice:
+	// it would report identical numbers under two names, so the second must be
+	// skipped. Uses tilde vs absolute forms that expand to the same path to
+	// exercise post-ExpandTilde comparison.
 	accts, skipped := Config{ClaudeAccounts: []ClaudeAccount{
 		{Key: "claude-2", ConfigDir: "~/.same"},
 		{Key: "claude-3", ConfigDir: filepath.Join(dir, ".same")},

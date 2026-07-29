@@ -1,10 +1,11 @@
 package claude
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,15 +15,7 @@ import (
 	"unicode"
 )
 
-// /usage settle timing: minimum grace before the first re-capture, poll
-// interval between captures, and the hard cap on total settle wait.
-const (
-	usageSettleMin  = 2 * time.Second
-	usageSettlePoll = 500 * time.Millisecond
-	usageSettleMax  = 8 * time.Second
-)
-
-// GetQuota fetches Claude Code quota for the default account via tmux automation.
+// GetQuota fetches Claude Code quota for the default account.
 func GetQuota(timeout time.Duration) (map[string]any, error) {
 	return GetQuotaForConfigDir(timeout, "")
 }
@@ -31,267 +24,139 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 // configDir (its CLAUDE_CONFIG_DIR). An empty configDir queries the default
 // account, identical to GetQuota.
 func GetQuotaForConfigDir(timeout time.Duration, configDir string) (map[string]any, error) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		return nil, errors.New("tmux not found in PATH")
-	}
-
-	claudeBin := "claude"
-	if _, err := exec.LookPath(claudeBin); err != nil {
-		home, _ := os.UserHomeDir()
-		claudeBin = filepath.Join(home, ".local", "bin", "claude")
-		if _, err := os.Stat(claudeBin); err != nil {
-			return nil, errors.New("claude CLI not found")
-		}
+	claudeBin, err := findClaudeBin()
+	if err != nil {
+		return nil, err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// Unique session name per fetch (pid + random nonce): parallel account
-	// fetches in this process, other quota processes, and leftovers from a
-	// crashed run can never collide on the name. The name is informational —
-	// every tmux command below targets the session ID, never the name.
-	session := fmt.Sprintf("quota-%d-%08x", os.Getpid(), rand.Uint32())
-
-	// Build a clean environment for the spawned Claude CLI:
-	//   - CLAUDECODE: drop to avoid nested session detection.
-	//   - ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL: drop so quota is read from
-	//     the user's logged-in Claude account rather than a custom endpoint.
-	scrubKeys := map[string]bool{
-		"CLAUDECODE":           true,
-		"ANTHROPIC_AUTH_TOKEN": true,
-		"ANTHROPIC_BASE_URL":   true,
-	}
-	cleanEnv := os.Environ()
-	for i := 0; i < len(cleanEnv); {
-		eq := strings.IndexByte(cleanEnv[i], '=')
-		if eq > 0 && scrubKeys[cleanEnv[i][:eq]] {
-			cleanEnv = append(cleanEnv[:i], cleanEnv[i+1:]...)
-		} else {
-			i++
-		}
-	}
-
 	home, _ := os.UserHomeDir()
-	// Use ~/.config/quota/ as CWD instead of ~/ to prevent Claude CLI from
-	// scanning TCC-protected folders (Downloads, Photos, Music, Movies).
-	// Claude CLI treats CWD as a project root and runs readdir on it.
+	// Run in ~/.config/quota rather than ~/: the Claude CLI treats its CWD as a
+	// project root and runs readdir on it, which from ~ would touch
+	// TCC-protected folders (Downloads, Photos, Music, Movies).
 	safeDir := filepath.Join(home, ".config", "quota")
 	_ = os.MkdirAll(safeDir, 0o755)
 
-	target, err := createClaudeSession(ctx, cleanEnv, session, safeDir, configDir, claudeBin)
+	// /usage is a local slash command: it reports the logged-in account's limits
+	// without spending a turn (num_turns 0, total_cost_usd 0), so this probe can
+	// run on a refresh timer without consuming quota to measure quota.
+	cmd := exec.CommandContext(ctx, claudeBin, "-p", "/usage", "--output-format", "json")
+	cmd.Dir = safeDir
+	cmd.Env = fetchEnv(configDir)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if runErr := cmd.Run(); runErr != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("claude /usage timed out after %s", timeout)
+		}
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = strings.TrimSpace(stdout.String())
+		}
+		if len(msg) > 500 {
+			msg = msg[:500]
+		}
+		if msg != "" {
+			return nil, fmt.Errorf("claude /usage failed: %w: %s", runErr, msg)
+		}
+		return nil, fmt.Errorf("claude /usage failed: %w", runErr)
+	}
+
+	text, err := usageText(stdout.Bytes())
 	if err != nil {
 		return nil, err
 	}
-	// Deferred only once the session exists, and scoped to its ID: this can
-	// kill this fetch's session and nothing else. (It used to be deferred
-	// before creation and targeted by name, so a failed or already-ended fetch
-	// could tear down a sibling account's live session via prefix matching.)
-	defer killTmuxSession(target)
-
-	tmuxSend := func(keys ...string) {
-		args := append([]string{"send-keys", "-t", target}, keys...)
-		cmd := exec.CommandContext(ctx, "tmux", args...)
-		cmd.Env = cleanEnv
-		cmd.Stderr = nil
-		_ = cmd.Run()
-	}
-
-	// waitFor polls the tmux pane until the text matches the predicate.
-	waitFor := func(check func(string) bool) (string, error) {
-		for {
-			select {
-			case <-ctx.Done():
-				// Capture final state for diagnostics
-				out, _ := exec.Command("tmux", "capture-pane", "-t", target, "-p").Output()
-				return stripANSI(string(out)), errors.New("timeout")
-			default:
-			}
-			out, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", target, "-p").Output()
-			if err != nil {
-				return "", fmt.Errorf("failed to capture tmux pane: %w", err)
-			}
-			text := stripANSI(string(out))
-			if check(text) {
-				return text, nil
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-	}
-
-	// Wait for Claude CLI to be ready (prompt appears)
-	if _, err := waitFor(func(t string) bool {
-		return strings.Contains(t, "Claude Code")
-	}); err != nil {
-		return nil, fmt.Errorf("waiting for claude to start: %w", err)
-	}
-
-	// Dismiss any initial prompt
-	tmuxSend("Enter")
-	time.Sleep(500 * time.Millisecond)
-
-	// Send /usage command
-	tmuxSend("/usage")
-	time.Sleep(300 * time.Millisecond)
-	tmuxSend("Enter")
-
-	// Wait for usage data to appear. The gate is the data itself ("% used"),
-	// never dialog chrome: /usage footer text changes across Claude versions
-	// (v2.1.212 dropped "Esc to cancel", which this gate used to require —
-	// every probe then timed out with the data fully on screen). Whether ALL
-	// rows have rendered is the settle loop's job below.
-	text, err := waitFor(func(t string) bool {
-		if strings.Contains(t, "Error:") {
-			return true
-		}
-		return strings.Contains(t, "% used")
-	})
+	result, err := parseUsage(text)
 	if err != nil {
-		return nil, err
-	}
-
-	// /usage rows render asynchronously; wait for the screen to settle —
-	// two consecutive captures identical AND structurally complete (every
-	// usage bar has its Resets line) — before parsing, so late rows (e.g.
-	// per-model weekly) are included. Stability alone is not enough: the
-	// screen can pause mid-render with bars drawn but reset lines still
-	// loading, and parsing that frame silently emits rows with no reset time.
-	// Bounded so an animated element (or a future layout whose bars have no
-	// Resets lines at all) cannot stall the fetch forever: at the deadline the
-	// latest capture is parsed as-is.
-	settleDeadline := time.Now().Add(usageSettleMax)
-	time.Sleep(usageSettleMin)
-	captureDied := false
-	for {
-		out, capErr := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", target, "-p").Output()
-		if capErr != nil {
-			captureDied = true
-			break
-		}
-		cur := stripANSI(string(out))
-		settled := cur == text && screenComplete(cur)
-		text = cur
-		if settled || !time.Now().Before(settleDeadline) {
-			break
-		}
-		time.Sleep(usageSettlePoll)
-	}
-	// A capture failure mid-settle means our session died under us (claude
-	// exited, or the timeout hit). An incomplete leftover frame must fail
-	// loudly here — parsing it would report real rows missing their reset
-	// times, with nothing in the log.
-	if captureDied && !screenComplete(text) {
-		return nil, errors.New("usage capture interrupted before the screen finished rendering")
-	}
-
-	// Exit claude
-	tmuxSend("Escape")
-	time.Sleep(300 * time.Millisecond)
-	tmuxSend("/exit", "Enter")
-	time.Sleep(300 * time.Millisecond)
-
-	result, err := parseCaptured(text)
-	if err != nil {
-		// Truncate for logging; keep first 500 chars of captured text.
 		preview := text
 		if len(preview) > 500 {
 			preview = preview[:500]
 		}
-		return nil, fmt.Errorf("%w\n--- captured ---\n%s", err, preview)
+		return nil, fmt.Errorf("%w\n--- output ---\n%s", err, preview)
 	}
 	return result, nil
 }
 
-// claudeSessionArgs builds the `tmux new-session` argument list that launches
-// the Claude CLI. When configDir is non-empty it injects CLAUDE_CONFIG_DIR to
-// select a specific account. Ordering is load-bearing:
-//   - env's -u options must precede any NAME=VALUE assignment (macOS/BSD env
-//     stops option parsing at the first non-option argument).
-//   - CLAUDE_CONFIG_DIR is passed on the command line rather than inherited,
-//     because an existing tmux server does not forward it to the new pane via
-//     update-environment; command-line injection is server-state-independent.
-//   - -P -F '#{session_id}' prints the new session's ID, which the caller must
-//     use as the target of every later tmux command (see createClaudeSession).
-func claudeSessionArgs(session, safeDir, configDir, claudeBin string) []string {
-	args := []string{"new-session", "-d", "-P", "-F", "#{session_id}",
-		"-s", session, "-x", "120", "-y", "40", "-c", safeDir,
-		"env", "-u", "CLAUDECODE", "-u", "ANTHROPIC_AUTH_TOKEN", "-u", "ANTHROPIC_BASE_URL"}
+// findClaudeBin locates the Claude CLI, preferring PATH and falling back to the
+// native installer's fixed location.
+func findClaudeBin() (string, error) {
+	if p, err := exec.LookPath("claude"); err == nil {
+		return p, nil
+	}
+	home, _ := os.UserHomeDir()
+	p := filepath.Join(home, ".local", "bin", "claude")
+	if _, err := os.Stat(p); err != nil {
+		return "", errors.New("claude CLI not found")
+	}
+	return p, nil
+}
+
+// fetchEnv builds the environment for the probe:
+//   - CLAUDECODE is dropped so a quota process started from inside Claude Code
+//     does not trip nested-session detection.
+//   - ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL are dropped so quota is read
+//     from the user's logged-in account rather than a custom endpoint.
+//   - CLAUDE_CONFIG_DIR is replaced (not appended) when configDir is set, so an
+//     inherited value can never decide which account gets measured. When
+//     configDir is empty the inherited value stands, which is what selects the
+//     caller's default account.
+func fetchEnv(configDir string) []string {
+	drop := map[string]bool{
+		"CLAUDECODE":           true,
+		"ANTHROPIC_AUTH_TOKEN": true,
+		"ANTHROPIC_BASE_URL":   true,
+	}
 	if configDir != "" {
-		args = append(args, "CLAUDE_CONFIG_DIR="+configDir)
+		drop["CLAUDE_CONFIG_DIR"] = true
 	}
-	return append(args, claudeBin)
-}
-
-// createClaudeSession launches the Claude CLI in a detached tmux session and
-// returns the session ID (e.g. "$12"). Every later tmux command MUST target
-// this ID, never the session name: tmux resolves a name target by prefix when
-// no exact match exists, so once a session named "quota-1" is gone, commands
-// aimed at it silently land on a session named "quota-1-<anything>" — another
-// account's live fetch. That redirection is how one account's cleanup could
-// kill the other account's probe mid-capture, and how one account could
-// capture (and report) the other account's usage screen. A session ID is never
-// reused, so a dead session is a hard error instead of someone else's data.
-func createClaudeSession(ctx context.Context, env []string, session, safeDir, configDir, claudeBin string) (string, error) {
-	// On failure the server may still have created the session (e.g. the
-	// timeout expired mid-call, killing only the client). Remove it by exact
-	// name — "=" disables prefix matching, and the name is unique to this
-	// fetch, so this can never hit another session.
-	killByExactName := func() {
-		kctx, kcancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer kcancel()
-		_ = exec.CommandContext(kctx, "tmux", "kill-session", "-t", "="+session).Run()
-	}
-	cmd := exec.CommandContext(ctx, "tmux", claudeSessionArgs(session, safeDir, configDir, claudeBin)...)
-	cmd.Env = env
-	out, err := cmd.Output()
-	if err != nil {
-		killByExactName()
-		return "", fmt.Errorf("failed to create tmux session: %w", err)
-	}
-	id := strings.TrimSpace(string(out))
-	if !strings.HasPrefix(id, "$") {
-		killByExactName()
-		return "", fmt.Errorf("tmux returned unexpected session id %q", id)
-	}
-	return id, nil
-}
-
-// killTmuxSession terminates one fetch's tmux session: the pane's process tree
-// first, then the session itself. target must be a session ID from
-// createClaudeSession; if that session is already gone, the pane lookup fails
-// and nothing is killed — an ID never resolves to another session, unlike a
-// name.
-func killTmuxSession(target string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", "list-panes", "-t", target, "-F", "#{pane_pid}").Output()
-	if err != nil {
-		return
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		pid := strings.TrimSpace(line)
-		if pid != "" {
-			_ = exec.CommandContext(ctx, "pkill", "-P", pid).Run()
-			_ = exec.CommandContext(ctx, "kill", pid).Run()
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		if eq := strings.IndexByte(kv, '='); eq > 0 && drop[kv[:eq]] {
+			continue
 		}
+		env = append(env, kv)
 	}
-	_ = exec.CommandContext(ctx, "tmux", "kill-session", "-t", target).Run()
+	if configDir != "" {
+		env = append(env, "CLAUDE_CONFIG_DIR="+configDir)
+	}
+	return env
 }
 
-var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
-
-func stripANSI(s string) string {
-	return ansiRe.ReplaceAllString(s, "")
+// usageResponse is the subset of `claude -p --output-format json` this package
+// consumes. The human-readable /usage screen arrives in Result; is_error is the
+// CLI's own verdict on the run and is trusted over guessing from the text.
+type usageResponse struct {
+	IsError bool   `json:"is_error"`
+	Result  string `json:"result"`
+	Subtype string `json:"subtype"`
 }
 
-// usedLineRe matches a usage bar line like "██  4% used".
-var usedLineRe = regexp.MustCompile(`(\d+)%\s*used`)
-
-// resetsLineRe matches a reset line like "Resets Jul 6 at 11:59am (Asia/Seoul)".
-var resetsLineRe = regexp.MustCompile(`(?i)^Resets?\s+(.+)`)
+// usageText extracts the /usage report from the CLI's JSON envelope.
+func usageText(out []byte) (string, error) {
+	var resp usageResponse
+	if err := json.Unmarshal(bytes.TrimSpace(out), &resp); err != nil {
+		preview := strings.TrimSpace(string(out))
+		if len(preview) > 300 {
+			preview = preview[:300]
+		}
+		return "", fmt.Errorf("claude /usage returned unreadable output: %w: %s", err, preview)
+	}
+	if resp.IsError {
+		msg := strings.TrimSpace(resp.Result)
+		if len(msg) > 300 {
+			msg = msg[:300]
+		}
+		return "", fmt.Errorf("claude /usage reported an error: %s", msg)
+	}
+	return resp.Result, nil
+}
 
 // extraSlotVocab is how many per-model slots a slot-limited consumer should
-// pre-allocate. It does NOT cap the data: parseCaptured reports every row Claude
+// pre-allocate. It does NOT cap the data: parseUsage reports every row Claude
 // shows, and a consumer with a finite menu simply ignores keys it has no slot
 // for. Keeping this out of the parser is what stops quota-bar's systray limit
 // from silently deleting rows from quota-cli.
@@ -314,7 +179,7 @@ func WindowKeys() []string {
 // "Current week (Fable)" → base "Current week", qualifier "Fable".
 var qualifierRe = regexp.MustCompile(`^(.*?)\s*\((.+)\)\s*$`)
 
-// windowLabel derives a row's display label from the /usage screen text — the
+// windowLabel derives a row's display label from the /usage report text — the
 // only truth Claude gives us, since Claude reports no window duration. It never
 // substitutes a hardcoded vocabulary, so if Claude changes the period the label
 // follows automatically:
@@ -344,39 +209,69 @@ func windowLabel(screen string) string {
 	return string(unicode.ToUpper(r[0])) + string(r[1:])
 }
 
-// parseCaptured parses the /usage screen line by line into the shared
-// self-describing window list: out["windows"] = [{key,label,used,left,…}], in
-// screen order. Each row carries its own label derived from the screen text
+// usageRowRe matches one row of the /usage report, which states a window's
+// label, its percentage, and (once the window has started) its reset time on a
+// single line:
+//
+//	"Current week (all models): 35% used · resets Aug 3 at 12pm (Asia/Seoul)"
+//	"Current session: 0% used"                       (window not started yet)
+//
+// Group 3 is everything after "N% used" and is handed to resetsClauseRe rather
+// than being pinned here, so the row still parses if Claude restyles the
+// separator between the percentage and the reset clause.
+//
+// The "Current " prefix is required because it is what separates quota rows
+// from the rest of the report. Every quota row names a window that is running
+// now; the "What's contributing" section below them is full of percentages and
+// is one wording change away from colliding with a looser pattern (a line like
+// "Last 24h: 73% used by subagent-heavy sessions" would otherwise land in the
+// output as a model row).
+//
+// The trade-off is deliberate, and it is not symmetric. A false match reports a
+// number that is not a quota, with nothing to mark it as wrong. A dropped prefix
+// costs rows instead: if every row loses it the fetch fails outright, and if
+// only some do the rest still come back — this parser allows partial results by
+// contract, so those rows go quiet rather than loud. Losing rows that way is
+// still the better failure, because the numbers that do arrive are real.
+//
+// Anchoring on the prefix rather than on the section header also keeps this
+// independent of the report's decorative text, which changes between versions.
+var usageRowRe = regexp.MustCompile(`^(Current\s+.*?):\s*(\d+)%\s+used\b(.*)$`)
+
+// resetsClauseRe pulls the reset time out of the tail of a usage row. Case
+// insensitive because this text is prose, not a field name.
+var resetsClauseRe = regexp.MustCompile(`(?i)\bresets?\s+(.+?)\s*$`)
+
+// parseUsage parses the /usage report line by line into the shared
+// self-describing window list: out["windows"] = [{key,label,used,…}], in report
+// order. Each row carries its own label derived from the report text
 // (windowLabel), so no consumer holds a label vocabulary. The key is the row's
 // structural identity — "session" and "weekly_all" for the two aggregate rows,
 // "extra_N" for per-model rows (whose names change across model generations).
-func parseCaptured(text string) (map[string]any, error) {
-	lines := strings.Split(text, "\n")
-
+func parseUsage(text string) (map[string]any, error) {
 	var windows []map[string]any
 	seenKey := map[string]bool{}
 	seenExtra := map[string]bool{}
 	extraIdx := 0
 
-	for i, line := range lines {
-		m := usedLineRe.FindStringSubmatchIndex(line)
+	for _, raw := range strings.Split(stripANSI(text), "\n") {
+		m := usageRowRe.FindStringSubmatch(strings.TrimSpace(raw))
 		if m == nil {
 			continue
 		}
-		pct := atoi(line[m[2]:m[3]])
-
-		// Screen text: same-line text before the bar, or the nearest line above.
-		screen := stripBarChars(line[:m[0]])
-		if screen == "" {
-			screen = labelAbove(lines, i)
-		}
+		screen := strings.TrimSpace(m[1])
 		if screen == "" {
 			continue
 		}
+		pct := atoi(m[2])
 
 		entry := map[string]any{"used": pct, "left": 100 - pct}
-		if r := resetsBelow(lines, i); r != "" {
-			rel, at, hasAt := parseReset(r)
+		if rm := resetsClauseRe.FindStringSubmatch(m[3]); rm != nil {
+			val := strings.TrimSpace(rm[1])
+			if len(val) > 50 {
+				val = val[:50]
+			}
+			rel, at, hasAt := parseReset(val)
 			entry["resetsIn"] = rel
 			if hasAt {
 				entry["resetsAt"] = at
@@ -412,77 +307,18 @@ func parseCaptured(text string) (map[string]any, error) {
 	}
 
 	if len(windows) == 0 {
-		return nil, errors.New("could not parse claude quota from captured output")
+		return nil, errors.New("could not parse claude quota from /usage output")
 	}
 	return map[string]any{"windows": windows}, nil
 }
 
-// screenComplete reports whether every usage bar on the captured /usage screen
-// has its Resets line rendered below it. The screen paints progressively (a
-// bar can appear a beat before its reset line), so a frame can be stable for a
-// settle poll yet still incomplete — parsing it silently emits rows with no
-// reset time. The settle loop uses this as a gate, not a requirement: at its
-// deadline an incomplete screen is still parsed, so a future layout whose bars
-// have no Resets lines degrades to a slower fetch, never to lost rows.
-func screenComplete(text string) bool {
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		if usedLineRe.MatchString(line) && resetsBelow(lines, i) == "" {
-			return false
-		}
-	}
-	return true
-}
+var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 
-// stripBarChars removes progress-bar block characters (U+2580–U+259F) and
-// whitespace, leaving any same-line label text.
-func stripBarChars(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		if r >= 0x2580 && r <= 0x259F {
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return strings.TrimSpace(b.String())
-}
-
-// labelAbove returns the nearest non-blank line above lines[i], which in the
-// /usage layout is the row label. Looks at most 3 lines up; a bar or Resets
-// line there means the block is malformed, so no label.
-func labelAbove(lines []string, i int) string {
-	for j := i - 1; j >= 0 && j >= i-3; j-- {
-		t := strings.TrimSpace(lines[j])
-		if t == "" {
-			continue
-		}
-		if usedLineRe.MatchString(t) || resetsLineRe.MatchString(t) {
-			return ""
-		}
-		return t
-	}
-	return ""
-}
-
-// resetsBelow returns the reset text from the nearest non-blank line below
-// lines[i], or "" if that line is not a Resets row.
-func resetsBelow(lines []string, i int) string {
-	for j := i + 1; j < len(lines) && j <= i+3; j++ {
-		t := strings.TrimSpace(lines[j])
-		if t == "" {
-			continue
-		}
-		rm := resetsLineRe.FindStringSubmatch(t)
-		if rm == nil {
-			return ""
-		}
-		val := strings.TrimSpace(rm[1])
-		if len(val) > 50 {
-			val = val[:50]
-		}
-		return val
-	}
-	return ""
+// stripANSI removes terminal escape sequences. The JSON envelope has carried
+// clean text so far; this keeps a future styled report from failing every row
+// match at once, which would take quota down rather than degrade it.
+func stripANSI(s string) string {
+	return ansiRe.ReplaceAllString(s, "")
 }
 
 // parseReset normalizes a resets string into a relative "time left" string and,

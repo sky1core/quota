@@ -91,8 +91,8 @@ type ResolvedAccount struct {
 }
 
 // ClaudeExtraKeyRe constrains additional (non-default) Claude account keys to
-// "claude-<N>". This makes the output key recognizable to consumers (sky-ai
-// reads ^claude-?\d+$) and yields a deterministic display label. Shared by
+// "claude-<N>". This makes the output key recognizable to consumers (which
+// match ^claude-?\d+$) and yields a deterministic display label. Shared by
 // quota-cli's `account add` validation and by ResolveAccounts so the query-time
 // and add-time rules can never drift apart.
 var ClaudeExtraKeyRe = regexp.MustCompile(`^claude-\d+$`)

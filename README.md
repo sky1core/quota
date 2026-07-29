@@ -23,8 +23,10 @@ go install github.com/sky1core/quota/cmd/quota-bar@latest
 
 ### 시스템 요구사항
 
-- `tmux` — Claude quota 조회에 필요 (`brew install tmux`)
-- `claude` CLI — Claude Code CLI (`~/.local/bin/claude` 또는 PATH)
+- `claude` CLI — Claude Code CLI (PATH 또는 `~/.local/bin/claude`).
+  `claude -p "/usage"`로 사용량을 조회하므로 그 명령을 지원하는 버전이어야 한다 —
+  **2.1.214 이상에서 확인**했다. 더 낮은 버전에서 동작하는지는 확인하지 않았다.
+  구버전이면 Claude quota 조회만 실패하고 Codex 쪽은 영향받지 않는다.
 - `codex` CLI — Codex CLI (PATH)
 
 ## 사용법

@@ -205,7 +205,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 }
 ```
 - `claudeAccounts` (optional): 기본 계정 외에 추가로 조회할 Claude 계정 목록.
-  - `key` (string, 필수): 출력 top-level 키. **`claude-<정수>` 형식이어야 한다**(정규식 `^claude-\d+$`, 예: `claude-2`, `claude-3`). 기본 계정 `claude` 및 다른 항목과 중복 불가. (sky-ai 등 소비자는 `^claude-?\d+$`로 추가 provider를 인식한다.)
+  - `key` (string, 필수): 출력 top-level 키. **`claude-<정수>` 형식이어야 한다**(정규식 `^claude-\d+$`, 예: `claude-2`, `claude-3`). 기본 계정 `claude` 및 다른 항목과 중복 불가. (소비자는 `^claude-?\d+$`로 추가 provider를 인식한다.)
   - `configDir` (string, 필수): 해당 계정의 Claude config 디렉터리. `~`는 홈으로 확장된다. 유저가 직접 지정하며, 외부 도구의 설정을 참조하지 않는다. 서로 다른 계정은 서로 다른 `configDir`를 가리켜야 한다.
 - `codexAccounts` (optional): 기본 계정 외에 추가로 조회할 Codex 계정 목록. `claudeAccounts`와 **대칭 구조**다.
   - `key` (string, 필수): 출력 top-level 키. **`codex-<정수>` 형식이어야 한다**(정규식 `^codex-\d+$`, 예: `codex-2`). 기본 계정 `codex` 및 다른 항목과 중복 불가.
@@ -231,7 +231,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 **계정 목록 확정 시점 (중요)**: systray는 런타임에 메뉴 항목을 추가·제거할 수 없다. 따라서 계정 수와 메뉴 레이아웃은 **onReady 시작 시점의 config로 고정**된다. `config.json`을 편집해 계정을 추가/제거하면 **quota-bar를 재시작**해야 반영된다.
 
 **수동 업데이트 메뉴 ("Check for Updates…")**: 클릭 시 quota-cli의 `update`와 같은 비교·설치 흐름(`internal/update`)을 수행하고, 설치 성공 시 **설치된 바이너리를 `syscall.Exec`으로 자기 자리에서 재실행**한다(PID 유지 — launchd 추적 유지, pid 락은 `FD_CLOEXEC`라 새 이미지가 재획득).
-- **refresh 게이트는 exec 직전에만 획득한다**(최대 3분 대기) — 조회 중 exec하면 진행 중 tmux 프로브 세션이 claude 프로세스째 고아가 되기 때문이고, 확인·설치는 게이트가 필요 없다(설치는 파일 쓰기일 뿐). 성공 경로에서는 게이트를 반환하지 않는다(프로세스 이미지가 교체되므로).
+- **refresh 게이트는 exec 직전에만 획득한다**(최대 3분 대기) — 조회 중 exec하면 진행 중인 `claude`/`codex` 프로브 프로세스가 고아가 되기 때문이고, 확인·설치는 게이트가 필요 없다(설치는 파일 쓰기일 뿐). 성공 경로에서는 게이트를 반환하지 않는다(프로세스 이미지가 교체되므로).
 - **게이트를 쥔 동안 systray 호출을 하지 않는다.** systray의 모든 메뉴 조작은 Cocoa 메인 스레드 동기 디스패치(`waitUntilDone:YES`)라서 메뉴 닫힘과 경합하면 영구 블로킹될 수 있다(실사고 발생). 그래서 (1) 클릭 직후 첫 조작 전에 짧게 대기하고, (2) 모든 상태 전이는 **로그를 먼저 남긴 뒤** 화면에 그리며(wedge가 나도 침묵 불가), (3) 워치독이 10분 내 미완료 흐름을 로그로 알린다. 조작이 wedge되어도 게이트가 없으므로 refresh 루프는 계속 돈다.
 - **버튼과 상태는 분리된 표면이다**: 버튼 제목은 항상 "Check for Updates…"로 불변이며 클릭의 의미는 언제나 "지금 확인" 하나다. 진행 상태와 결과(최신임/실패)는 버튼 아래 별도 비활성 상태 행에 표시하고, 마지막 결과는 다음 확인 때까지 유지된다(첫 사용 전에는 상태 행 숨김). 흐름이 도는 동안 버튼은 비활성화된다 — 클릭이 조용히 무시되는 상태를 만들지 않는다. 실패는 로그에도 남긴다.
 - 수동 전용: 자동 체크·자동 설치는 없다.
@@ -347,41 +347,37 @@ Quit
 **함수**:
 - `GetQuota(timeout time.Duration) (map[string]any, error)` — 기본 계정 조회 (config-dir 미지정)
 - `GetQuotaForConfigDir(timeout time.Duration, configDir string) (map[string]any, error)` — 지정한 `CLAUDE_CONFIG_DIR` 계정 조회. `configDir`가 빈 문자열이면 `GetQuota`와 동일.
-- `WindowKeys() []string` — 이 provider가 낼 수 있는 창 key 전부(표시 순서). 슬롯을 미리 만들어야 하는 소비자(quota-bar)가 열거한다.
+- `WindowKeys() []string` — 슬롯을 미리 만들어야 하는 소비자(quota-bar)가 열거하는 **소비자 힌트**(표시 순서). 데이터의 상한이 아니다 — 모델별 행이 더 많으면 `parseUsage`는 `extra_4` 이상도 반환하고, 슬롯이 없는 소비자만 그것을 무시한다.
 
-- 내장 tmux 자동화로 Claude CLI에서 quota 조회. 두 함수는 동일한 조회 로직을 공유하며 config-dir 주입 여부만 다르다.
+- Claude CLI를 **headless(`-p`)로 1회 실행**해 quota 조회. 두 함수는 동일한 조회 로직을 공유하며 config-dir 주입 여부만 다르다.
 
-**tmux 자동화 흐름** (내장):
-1. `tmux new-session -d -P -F '#{session_id}' -s <session> -x 120 -y 40 -c <safeDir> env -u CLAUDECODE -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL [CLAUDE_CONFIG_DIR=<configDir>] claude`
-   - `session` = `quota-{pid}-{랜덤 nonce}` — fetch마다 유일한 이름. 이름은 정보용이고, 생성 시 `-P -F`로 받은 **세션 ID(`$n`)를 이후 모든 tmux 명령의 타겟으로 사용한다.** 이름 타겟은 정확히 일치하는 세션이 없으면 tmux가 prefix 매칭으로 다른 세션(예: 병렬 조회 중인 다른 계정 세션)에 조용히 붙이므로 금지.
-   - `safeDir` = `~/.config/quota` (Claude CLI가 CWD를 readdir할 때 macOS TCC 보호 폴더 접근 방지)
+**조회 흐름**:
+1. `claude -p "/usage" --output-format json` 을 실행한다 (PATH의 `claude`, 없으면 `~/.local/bin/claude`).
+   - `/usage`는 **로컬 슬래시 커맨드**라 턴을 소비하지 않는다(`num_turns` 0, `total_cost_usd` 0). quota를 재려고 quota를 쓰지 않으므로 refresh 주기로 반복 호출해도 된다.
+   - 작업 디렉터리 = `~/.config/quota`. Claude CLI는 CWD를 프로젝트 루트로 보고 readdir하므로, 홈에서 실행하면 macOS TCC 보호 폴더(Downloads, Photos, Music, Movies)를 건드린다.
+2. 프로세스 환경 (`fetchEnv`):
    - `CLAUDECODE` 제거: 중첩 세션 감지 회피
    - `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` 제거: 사용자 로그인 계정 quota를 읽도록 강제 (커스텀 엔드포인트/대체 토큰이 quota를 가로채지 않게)
-   - `CLAUDE_CONFIG_DIR=<configDir>`: config-dir 지정 시에만 추가. **`-u` 옵션들 뒤, command 앞**에 둔다 (macOS `env`는 옵션이 `NAME=VALUE` 할당보다 먼저 와야 하므로 순서 고정). 명령줄에 직접 주입해야 tmux 서버 환경 상속과 무관하게 전달된다.
-2. 스플래시(`Claude Code`) 등장까지 폴링 → Enter (초기 prompt 해제)
-3. `/usage` 입력 → Enter
-4. `% used` 가 보일 때까지 폴링 (또는 `Error:` 검출 시 즉시 진행). 게이트는 데이터 자체이지 대화상자 장식 문구가 아니다 — footer 문구는 Claude 버전마다 바뀐다 (v2.1.212에서 "Esc to cancel" 삭제됨). 행 전부가 그려졌는지는 5단계 settle이 판정한다.
-5. settle 대기 — `/usage` 화면 행이 비동기로 그려지므로 최소 2초 대기 후 500ms 간격으로 재캡처하며,
-   연속 두 캡처가 동일하고 **화면이 구조적으로 완결**(모든 사용률 바 아래에 Resets 줄 존재)일 때까지 폴링한다
-   (최대 8초 상한 — 상한 도달 시 마지막 캡처를 그대로 파싱하므로, Resets 줄 없는 미래 레이아웃도 데이터 손실 없이 처리).
-   settle 중 캡처가 실패했고 마지막 캡처가 미완결이면, 부분 데이터를 조용히 내보내는 대신 에러로 실패한다.
-6. 마지막 캡처 결과를 파싱에 사용
-7. ANSI 코드 제거 → `parseCaptured()` 로 파싱
-8. Escape → `/exit` → Enter → 클린업 — 자기 **세션 ID**만 타겟으로 pane 프로세스 트리와 세션을 종료한다. 세션이 이미 없으면 아무것도 죽이지 않는다 (이름 타겟 클린업은 prefix 매칭으로 다른 계정 세션을 죽일 수 있으므로 금지).
+   - `CLAUDE_CONFIG_DIR`: config-dir 지정 시 **상속값을 제거하고 지정값을 넣는다**(같은 이름의 할당을 두 번 두지 않는다 — 어느 쪽이 이길지는 OS가 정하므로, 지면 다른 계정 키 아래에 자기 계정 값이 실린다). config-dir 미지정 시에는 상속값을 그대로 둔다 — 그것이 호출자의 기본 계정을 고르는 방식이다.
+3. timeout 초과 시 context로 프로세스를 종료하고 timeout 에러를 반환한다. 실행 실패는 stderr(없으면 stdout) 앞부분을 붙여 에러로 반환한다.
+4. stdout의 JSON 엔벨로프를 파싱(`usageText`)해 `result`(사람이 읽는 /usage 리포트)를 꺼낸다. `is_error: true`면 CLI가 준 메시지를 담아 에러로 실패한다 — 에러 엔벨로프에는 사용량 행이 없으므로 그대로 파싱하면 원인 대신 파싱 실패로 보인다.
+5. `parseUsage()` 로 파싱.
 
-**파싱 로직** (`parseCaptured`) — 줄 단위 파싱, 공통 `windows` 목록(화면 순서)으로 반환:
-- `\d+% used` 를 포함한 줄을 모두 찾음 (진행 바 줄)
-- 화면 텍스트 결정 (순서대로):
-  1. 같은 줄에서 매치 앞부분의 바 문자(U+2580–U+259F)와 공백을 제거한 나머지 텍스트
-  2. 없으면 위쪽으로 가장 가까운 비어있지 않은 줄 (최대 3줄, 바/Resets 줄이면 무효)
+**파싱 로직** (`parseUsage`) — 줄 단위 파싱, 공통 `windows` 목록(리포트 순서)으로 반환:
+- 리포트의 각 사용량 행은 **한 줄**에 라벨·퍼센트·리셋 시각을 담는다:
+  `Current week (all models): 35% used · resets Aug 3 at 12pm (Asia/Seoul)`
+  창이 아직 시작되지 않았으면 리셋 절이 없다: `Current session: 0% used`
+- 행 매칭(`usageRowRe`) = `^(Current\s+.*?):\s*(\d+)%\s+used\b(.*)$` — 라벨은 `Current `로 시작해 첫 콜론까지다. `Current ` 접두를 요구하는 이유는 그것이 quota 행과 나머지 리포트를 가르는 경계이기 때문이다 — 하단 섹션은 퍼센트투성이라 느슨한 패턴이면 `Last 24h: 73% used by …` 같은 한 줄이 모델별 행으로 섞여 들어간다. 트레이드오프는 의도적이다: 접두가 사라지면 행을 잃고 조회가 시끄럽게 실패하지만(복구 가능), false match는 quota가 아닌 숫자를 조용히 보고한다. 섹션 헤더 문구 대신 접두에 앵커하므로 버전마다 바뀌는 장식 문구와 무관하다.
+- 리셋 절은 행 꼬리에서 별도로 뽑는다(`resetsClauseRe`). 퍼센트와 리셋 절 사이 구분자는 고정하지 않는다 — Claude 버전마다 장식 문구·글리프가 바뀌므로, 구분자가 바뀌었다고 리셋 시각을 잃으면 안 된다.
 - **key(구조적 슬롯 식별자) 분류**:
   - `Current session` 포함 → `session`
   - `all models` 포함 → `weekly_all`
-  - 그 외(모델별 행) → `extra_N` (화면 순서, 라벨 중복 제거, `extraSlots`까지)
-- **label**: 위 화면 텍스트에서 `windowLabel`로 도출한다(하드코딩 어휘 없음 — 데이터 모델의 Claude 절 참조)
-- resets: 진행 바 줄 아래쪽으로 가장 가까운 비어있지 않은 줄이 `Resets ...` 형식이면 추출. 상대시간(`resetsIn`)으로 정규화하고, 절대표기를 파싱할 수 있으면 절대 리셋 시각(`resetsAt`, `time.Time`)도 함께 채운다 (`parseReset`)
-- 일부 행이 화면에 없거나 매칭이 일부만 되어도 매치된 항목만 반환 (부분 결과 허용)
-- 하단 "What's contributing" 섹션의 `NN% of ...` 텍스트는 `% used` 패턴이 아니므로 매치되지 않는다
+  - 그 외(모델별 행) → `extra_N` (리포트 순서, 라벨 중복 제거, 개수 제한 없음)
+- **label**: 콜론 앞 텍스트에서 `windowLabel`로 도출한다(하드코딩 어휘 없음 — 데이터 모델의 Claude 절 참조)
+- resets: 상대시간(`resetsIn`)으로 정규화하고, 절대표기를 파싱할 수 있으면 절대 리셋 시각(`resetsAt`, `time.Time`)도 함께 채운다 (`parseReset`). 리셋 절이 없는 행은 두 키 모두 생략한다.
+- 일부 행이 리포트에 없거나 매칭이 일부만 되어도 매치된 항목만 반환 (부분 결과 허용)
+- 하단 "What's contributing" 섹션은 퍼센트투성이지만 매치되지 않는다: 그 줄들은 콜론이 없거나(`73% of your usage came from …`) 콜론 뒤가 `N% used`가 아니다(`Top skills: /skill-one 1%`).
+- ANSI 이스케이프는 파싱 전에 제거한다. JSON 엔벨로프는 지금까지 깨끗한 텍스트만 실어왔지만, 리포트에 장식이 붙는 날 전 행이 한꺼번에 매치 실패하는 것을 막는다.
 
 ### internal/codex
 
@@ -432,8 +428,7 @@ Quit
 | `github.com/getlantern/systray` | macOS systray (quota-bar 전용) |
 
 시스템 의존성:
-- `tmux`: Claude quota 조회 시 필요 (Claude CLI 자동화)
-- `claude` CLI: Claude Code CLI (`~/.local/bin/claude` 또는 PATH)
+- `claude` CLI: Claude Code CLI (PATH 또는 `~/.local/bin/claude`). `-p`로 `/usage`를 실행할 수 있어야 한다 — 2.1.214~2.1.220에서 확인.
 - `codex` CLI: Codex CLI (PATH에 있어야 함)
 - `go`: 수동 업데이트(`quota-cli update`, quota-bar 업데이트 메뉴)에만 필요
 

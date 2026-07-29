@@ -2,6 +2,15 @@
 /quota-bar
 .tmp/
 
-# Local agent context files
-/AGENTS.md
-/CLAUDE.md
+# 마크다운은 기본 차단이고, 공개할 문서만 아래에서 개별 허용한다.
+# 로컬 노트가 새 .md로 조용히 딸려 들어가는 것을 막는 것이 목적이므로,
+# 공개 문서를 추가할 때만 허용 줄을 늘린다.
+*.md
+!README.md
+!SPEC.md
+!docs/multi-account.md
+
+# 로컬 전용 노트는 위 허용 줄보다 뒤에서 다시 차단한다.
+# gitignore는 마지막에 매칭된 규칙이 이기므로, 이 줄이 허용 줄 아래에 있어야
+# 앞으로 추가될 `!docs/*.md` 같은 넓은 허용이 `*.local.md`를 되살리지 못한다.
+*.local.md

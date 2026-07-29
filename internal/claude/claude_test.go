@@ -1,10 +1,7 @@
 package claude
 
 import (
-	"context"
 	"fmt"
-	"os"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -158,12 +155,9 @@ func TestParseReset_UnparseableNoAt(t *testing.T) {
 	}
 }
 
-func TestParseCaptured_ResetsAt(t *testing.T) {
-	input := `
-Current session      40% used
-Resets Mar 6, 12pm (Asia/Seoul)
-`
-	result, err := parseCaptured(input)
+func TestParseUsage_ResetsAt(t *testing.T) {
+	input := "Current session: 40% used · resets Mar 6 at 12pm (Asia/Seoul)\n"
+	result, err := parseUsage(input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,30 +170,28 @@ Resets Mar 6, 12pm (Asia/Seoul)
 	}
 }
 
-func TestParseCaptured_Empty(t *testing.T) {
-	_, err := parseCaptured("")
+func TestParseUsage_Empty(t *testing.T) {
+	_, err := parseUsage("")
 	if err == nil {
 		t.Error("expected error for empty input")
 	}
 }
 
-func TestParseCaptured_NoPercentUsed(t *testing.T) {
-	_, err := parseCaptured("no quota data here at all")
+func TestParseUsage_NoPercentUsed(t *testing.T) {
+	_, err := parseUsage("no quota data here at all")
 	if err == nil {
 		t.Error("expected error for input without quota data")
 	}
 }
 
-func TestParseCaptured_ValidInput(t *testing.T) {
+func TestParseUsage_ValidInput(t *testing.T) {
 	input := `
 Some header text
-Current session      40% used
-Resets 5:59pm (Asia/Seoul)
-all models           20% used
-Resets Mar 6, 12pm (Asia/Seoul)
-Sonnet only          0% used
+Current session: 40% used · resets 5:59pm (Asia/Seoul)
+Current week (all models): 20% used · resets Mar 6 at 12pm (Asia/Seoul)
+Current week (Sonnet only): 0% used
 `
-	result, err := parseCaptured(input)
+	result, err := parseUsage(input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -244,11 +236,12 @@ Sonnet only          0% used
 	}
 }
 
-func TestParseCaptured_WithANSI(t *testing.T) {
-	// parseCaptured doesn't strip ANSI itself, but stripANSI + parseCaptured should work
-	raw := "\x1b[32mCurrent session      50% used\x1b[0m"
-	cleaned := stripANSI(raw)
-	result, err := parseCaptured(cleaned)
+// TestParseUsage_WithANSI pins that escape sequences do not take the fetch down:
+// parseUsage strips them itself, so a styled report degrades to nothing worse
+// than plain text rather than failing every row match at once.
+func TestParseUsage_WithANSI(t *testing.T) {
+	raw := "\x1b[32mCurrent session: 50% used · resets 5:59pm (Asia/Seoul)\x1b[0m"
+	result, err := parseUsage(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -258,6 +251,9 @@ func TestParseCaptured_WithANSI(t *testing.T) {
 	}
 	if session["used"] != 50 {
 		t.Errorf("session used = %v, want 50", session["used"])
+	}
+	if _, ok := session["resetsIn"].(string); !ok {
+		t.Error("session should have resetsIn after ANSI strip")
 	}
 }
 
@@ -286,25 +282,13 @@ func TestOperatorPrecedenceFix(t *testing.T) {
 	}
 }
 
-func TestParseCaptured_UsageCommand(t *testing.T) {
-	// Actual output from `/usage` command (captured 2026-03-05)
-	input := `  Settings:  Status   Config   Usage  (←/→ or tab to cycle)
+func TestParseUsage_UsageCommand(t *testing.T) {
+	input := `You are currently using your subscription to power your Claude Code usage
 
-
-  Current session
-  █████▌                                             11% used
-  Resets 11pm (Asia/Seoul)
-
-  Current week (all models)
-  █████████████████████████████████████████▌         83% used
-  Resets 12pm (Asia/Seoul)
-
-  Current week (Sonnet only)
-  ▌                                                  1% used
-  Resets Mar 11, 7pm (Asia/Seoul)
-
-  Esc to cancel`
-	result, err := parseCaptured(input)
+Current session: 11% used · resets 11pm (Asia/Seoul)
+Current week (all models): 83% used · resets 12pm (Asia/Seoul)
+Current week (Sonnet only): 1% used · resets Mar 11 at 7pm (Asia/Seoul)`
+	result, err := parseUsage(input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -340,52 +324,40 @@ func TestParseCaptured_UsageCommand(t *testing.T) {
 	}
 }
 
-func TestParseCaptured_UsageFableCapture(t *testing.T) {
-	// Actual output from `/usage` (captured 2026-07-02): third row label
-	// changed from "Current week (Sonnet only)" to "Current week (Fable)".
-	// Includes the full screen to prove the bottom "% of usage" section
-	// does not produce false matches.
-	input := `
- ▐▛███▜▌   Claude Code v2.1.198
-▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
-   Settings  Status   Config   Usage   Stats
+// TestParseUsage_FullReport runs the parser over a full `claude -p "/usage"`
+// report (structure as of CLI 2.1.220), including the whole "What's
+// contributing" section. That section is the parser's main false-match hazard —
+// it is full of percentages, in every shape the report uses — so keeping it here
+// is what proves the row pattern separates quota rows from the rest.
+//
+// The section's line SHAPES are what matter and are reproduced faithfully: a
+// bare "NN% of …" line, a "label: /name NN%" line, and a "label · N x · N y"
+// header. The names and counts are placeholders — this is a public repository,
+// and a real report names the machine's own skills and subagents.
+func TestParseUsage_FullReport(t *testing.T) {
+	input := `You are currently using your subscription to power your Claude Code usage
 
-   Session
+Current session: 4% used · resets Jul 30 at 12:09pm (Asia/Seoul)
+Current week (all models): 1% used · resets Aug 6 at 11:59am (Asia/Seoul)
+Current week (Fable): 2% used · resets Aug 6 at 11:59am (Asia/Seoul)
 
-   Total cost:            $0.0000
-   Total duration (API):  0s
-   Total duration (wall): 1s
-   Total code changes:    0 lines added, 0 lines removed
-   Usage:                 0 input, 0 output, 0 cache read, 0 cache write
+What's contributing to your limits usage?
+Approximate, based on local sessions on this machine — does not include other devices or claude.ai. Behaviors are independent characteristics, not a breakdown.
 
-   Current session
-   ██                                                 4% used
-   Resets 12:09pm (Asia/Seoul)
+Last 24h · 100 requests · 10 sessions
+  73% of your usage came from subagent-heavy sessions
+  57% of your usage was at >150k context
+  17% of your usage came from sessions active for 8+ hours
+  16% of your usage was while 4+ sessions ran in parallel
+  Top skills: /skill-one 2%, /skill-two 1%
+  Top subagents: agent-one 11%, agent-two 4%
 
-   Current week (all models)
-   ▌                                                  1% used
-   Resets Jul 6 at 11:59am (Asia/Seoul)
-
-   Current week (Fable)
-   █                                                  2% used
-   Resets Jul 6 at 11:59am (Asia/Seoul)
-
-   What's contributing to your limits usage?
-   Approximate, based on local sessions on this machine — does not include other devices or claude.ai
-
-   Last 24h · these are independent characteristics of your usage, not a breakdown
-
-   20% of your usage came from /donas
-    Heavy skills can be scoped down or run with a cheaper model via skill
-    frontmatter.
-
-   Skills                  % of usage
-   /donas                         20%
-
-   d to day · w to week
-
-   Esc to cancel`
-	result, err := parseCaptured(input)
+Last 7d · 500 requests · 50 sessions
+  78% of your usage came from subagent-heavy sessions
+  68% of your usage was at >150k context
+  Top skills: /skill-one 1%, /skill-two 1%
+  Top subagents: agent-one 12%, agent-two 7%`
+	result, err := parseUsage(input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -427,25 +399,42 @@ func TestParseCaptured_UsageFableCapture(t *testing.T) {
 	}
 }
 
-func TestParseCaptured_MultipleExtras(t *testing.T) {
+// TestParseUsage_NonQuotaRowsRejected is a REGRESSION GUARD against the quiet
+// failure: a line from the "What's contributing" section that happens to read
+// "<something>: N% used …" must not become a window. Those numbers are shares of
+// usage, not quota — surfacing one as a model row would put a wrong percentage
+// in front of the user with nothing to signal it. Only rows naming a current
+// window ("Current …") are quota.
+func TestParseUsage_NonQuotaRowsRejected(t *testing.T) {
+	input := `Current session: 4% used · resets Jul 30 at 12:09pm (Asia/Seoul)
+Current week (all models): 36% used · resets Aug 3 at 12pm (Asia/Seoul)
+
+What's contributing to your limits usage?
+Last 24h: 73% used by subagent-heavy sessions
+Top skills: 12% used
+Peak context: 57% used`
+	result, err := parseUsage(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if extras, ok := extraWindows(result); ok {
+		t.Errorf("non-quota lines became windows: %v", extras)
+	}
+	ws, _ := result["windows"].([]map[string]any)
+	if len(ws) != 2 {
+		t.Fatalf("windows = %d, want exactly the 2 quota rows: %v", len(ws), ws)
+	}
+}
+
+func TestParseUsage_MultipleExtras(t *testing.T) {
+	// The last row has no reset clause — a window Claude has not started yet.
+	// It must still be reported, just without resetsIn.
 	input := `
-   Current session
-   ██                                                 4% used
-   Resets 12:09pm (Asia/Seoul)
-
-   Current week (all models)
-   ▌                                                  1% used
-   Resets Jul 6 at 11:59am (Asia/Seoul)
-
-   Current week (Fable)
-   █                                                  2% used
-   Resets Jul 6 at 11:59am (Asia/Seoul)
-
-   Current week (Opus)
-   █████                                              10% used
-
-   Esc to cancel`
-	result, err := parseCaptured(input)
+Current session: 4% used · resets 12:09pm (Asia/Seoul)
+Current week (all models): 1% used · resets Aug 6 at 11:59am (Asia/Seoul)
+Current week (Fable): 2% used · resets Aug 6 at 11:59am (Asia/Seoul)
+Current week (Opus): 10% used`
+	result, err := parseUsage(input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -536,154 +525,118 @@ func TestWindowKeys_Finite(t *testing.T) {
 	}
 }
 
-func TestClaudeSessionArgs_ConfigDirOrder(t *testing.T) {
-	args := claudeSessionArgs("sess", "/safe", "/cfgdir", "/bin/claude")
+// TestFetchEnv_ConfigDirReplacesInherited is a REGRESSION GUARD for measuring
+// the wrong account: when a config dir is requested, an inherited
+// CLAUDE_CONFIG_DIR must be removed, not merely followed by the new one. Two
+// assignments for the same name in an environment is a coin flip resolved by
+// the OS, and losing that flip reports the caller's own account's numbers under
+// the other account's key.
+func TestFetchEnv_ConfigDirReplacesInherited(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "/inherited")
 
-	idx := func(v string) int {
-		for i, a := range args {
-			if a == v {
-				return i
+	env := fetchEnv("/wanted")
+
+	var got []string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR=") {
+			got = append(got, kv)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("CLAUDE_CONFIG_DIR assignments = %v, want exactly one", got)
+	}
+	if got[0] != "CLAUDE_CONFIG_DIR=/wanted" {
+		t.Errorf("CLAUDE_CONFIG_DIR = %q, want /wanted", got[0])
+	}
+}
+
+// TestFetchEnv_NoConfigDirKeepsInherited pins the other half of the contract:
+// an empty configDir means "the caller's default account", which is exactly the
+// inherited CLAUDE_CONFIG_DIR. Dropping it here would silently switch the
+// default account to ~/.claude.
+func TestFetchEnv_NoConfigDirKeepsInherited(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "/inherited")
+
+	env := fetchEnv("")
+
+	found := false
+	for _, kv := range env {
+		if kv == "CLAUDE_CONFIG_DIR=/inherited" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("empty configDir must leave the inherited CLAUDE_CONFIG_DIR in place")
+	}
+}
+
+// TestFetchEnv_ScrubsAccountOverrides pins that the probe reads the logged-in
+// subscription account: a custom endpoint or auth token in the caller's
+// environment would otherwise decide whose quota gets reported, and CLAUDECODE
+// makes the CLI treat this as a nested session.
+func TestFetchEnv_ScrubsAccountOverrides(t *testing.T) {
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "secret")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://example.invalid")
+	t.Setenv("PATH_MARKER_FOR_TEST", "kept")
+
+	env := fetchEnv("")
+
+	for _, kv := range env {
+		for _, banned := range []string{"CLAUDECODE=", "ANTHROPIC_AUTH_TOKEN=", "ANTHROPIC_BASE_URL="} {
+			if strings.HasPrefix(kv, banned) {
+				t.Errorf("%s must be scrubbed from the probe environment", strings.TrimSuffix(banned, "="))
 			}
 		}
-		return -1
 	}
-	lastU := -1
-	for i, a := range args {
-		if a == "-u" {
-			lastU = i
+	kept := false
+	for _, kv := range env {
+		if kv == "PATH_MARKER_FOR_TEST=kept" {
+			kept = true
 		}
 	}
-	envIdx := idx("env")
-	cfgIdx := idx("CLAUDE_CONFIG_DIR=/cfgdir")
-	binIdx := idx("/bin/claude")
-
-	if envIdx < 0 || lastU < 0 || cfgIdx < 0 || binIdx < 0 {
-		t.Fatalf("missing expected args: %v", args)
-	}
-	// env < all -u options < CLAUDE_CONFIG_DIR= < claude binary (macOS env rule)
-	if !(envIdx < lastU && lastU < cfgIdx && cfgIdx < binIdx) {
-		t.Errorf("wrong order: env=%d lastU=%d cfg=%d bin=%d (%v)", envIdx, lastU, cfgIdx, binIdx, args)
-	}
-	if args[len(args)-1] != "/bin/claude" {
-		t.Errorf("claude binary must be last, got %q", args[len(args)-1])
+	if !kept {
+		t.Error("unrelated environment variables must be passed through")
 	}
 }
 
-func TestClaudeSessionArgs_NoConfigDir(t *testing.T) {
-	args := claudeSessionArgs("sess", "/safe", "", "/bin/claude")
-	for _, a := range args {
-		if strings.HasPrefix(a, "CLAUDE_CONFIG_DIR") {
-			t.Errorf("must not inject CLAUDE_CONFIG_DIR when configDir empty: %v", args)
-		}
-	}
-	if args[len(args)-1] != "/bin/claude" {
-		t.Errorf("claude binary must be last, got %q", args[len(args)-1])
-	}
-}
-
-func TestClaudeSessionArgs_PrintsSessionID(t *testing.T) {
-	args := claudeSessionArgs("sess", "/safe", "", "/bin/claude")
-	joined := strings.Join(args, " ")
-	// Creation must print the session ID (-P -F '#{session_id}'): every later
-	// tmux command targets that ID, because name targets fall back to prefix
-	// matching and can silently resolve to a sibling account's session.
-	if !strings.Contains(joined, "-P -F #{session_id}") {
-		t.Errorf("new-session args must request the session id, got: %v", args)
-	}
-}
-
-// TestScreenComplete pins the settle gate: a frame whose usage bars are drawn
-// but whose Resets lines are still loading must not be treated as final —
-// parsing it is exactly how rows intermittently lost their reset times.
-func TestScreenComplete(t *testing.T) {
-	cases := []struct {
-		name string
-		text string
-		want bool
-	}{
-		{
-			name: "every bar has its Resets line",
-			text: "Current session\n██ 8% used\nResets 5:50pm (Asia/Seoul)\n\n" +
-				"Current week (all models)\n█ 2% used\nResets Jul 20 at 12pm (Asia/Seoul)\n",
-			want: true,
-		},
-		{
-			name: "last bar still missing its Resets line",
-			text: "Current session\n██ 8% used\nResets 5:50pm (Asia/Seoul)\n\n" +
-				"Current week (all models)\n█ 2% used\n",
-			want: false,
-		},
-		{
-			name: "next block header rendered before this bar's Resets",
-			text: "Current session\n██ 8% used\nCurrent week (all models)\n█ 2% used\nResets Jul 20 at 12pm\n",
-			want: false,
-		},
-		{
-			name: "no bars at all is vacuously complete",
-			text: "Claude Code\nloading...\n",
-			want: true,
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := screenComplete(c.text); got != c.want {
-				t.Errorf("screenComplete = %v, want %v\n%s", got, c.want, c.text)
-			}
-		})
-	}
-}
-
-// requireTmux creates a real tmux session running the production new-session
-// argument list (with a harmless idle command standing in for the claude
-// binary) and returns its session ID. Skips when tmux is unavailable.
-func requireTmux(t *testing.T, ctx context.Context, name string) string {
-	t.Helper()
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not available")
-	}
-	id, err := createClaudeSession(ctx, os.Environ(), name, t.TempDir(), "", "cat")
+// TestUsageText_Success pins that the report is read out of the CLI's JSON
+// envelope rather than off raw stdout.
+func TestUsageText_Success(t *testing.T) {
+	out := []byte(`{"is_error":false,"subtype":"success","num_turns":0,"result":"Current session: 3% used"}`)
+	got, err := usageText(out)
 	if err != nil {
-		t.Fatalf("createClaudeSession(%q): %v", name, err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.HasPrefix(id, "$") {
-		t.Fatalf("session id must be ID-shaped ($n), got %q", id)
+	if got != "Current session: 3% used" {
+		t.Errorf("usageText = %q", got)
 	}
-	// Self-cleaning on every exit path, including t.Fatal before the test's own
-	// kills; killing an already-dead session is a no-op.
-	t.Cleanup(func() { killTmuxSession(id) })
-	return id
 }
 
-// TestKillTmuxSession_DoesNotKillSiblingSession is a REGRESSION GUARD for the
-// cross-account kill: the default account's session name used to be a strict
-// prefix of the other account's ("quota-1" vs "quota-1-<hash>"), and cleanup
-// targeted the NAME — so once the default session had already ended, tmux
-// prefix matching redirected its cleanup onto the sibling's live session and
-// killed the other account's fetch mid-capture (intermittent missing reset
-// times / vanished rows). Cleanup must be a no-op when its own session is
-// gone, whatever other sessions exist.
-func TestKillTmuxSession_DoesNotKillSiblingSession(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	base := fmt.Sprintf("quotatest-%d-%08x", os.Getpid(), time.Now().UnixNano()&0xffffffff)
-	idA := requireTmux(t, ctx, base)
-	idB := requireTmux(t, ctx, base+"-aaaaaaaa") // name extends A's name, like the old per-account naming
-
-	// Simulate the bug window: A's session has already ended when A's cleanup runs.
-	if err := exec.Command("tmux", "kill-session", "-t", idA).Run(); err != nil {
-		t.Fatalf("pre-kill of session A failed: %v", err)
+// TestUsageText_IsError pins that the CLI's own verdict is honored. The failure
+// this guards is silent: an error envelope carries no usage rows, so treating it
+// as a report would surface as an unexplained parse failure instead of the
+// reason the CLI gave (e.g. a logged-out account).
+func TestUsageText_IsError(t *testing.T) {
+	out := []byte(`{"is_error":true,"subtype":"error_during_execution","result":"Invalid API key"}`)
+	_, err := usageText(out)
+	if err == nil {
+		t.Fatal("expected error for is_error=true envelope")
 	}
-	killTmuxSession(idA)
-
-	if err := exec.Command("tmux", "has-session", "-t", idB).Run(); err != nil {
-		t.Fatalf("sibling session was killed: cleanup crossed session boundaries")
+	if !strings.Contains(err.Error(), "Invalid API key") {
+		t.Errorf("error should carry the CLI's message, got: %v", err)
 	}
+}
 
-	// Positive path: cleanup does kill its own live session.
-	killTmuxSession(idB)
-	if err := exec.Command("tmux", "has-session", "-t", idB).Run(); err == nil {
-		t.Fatalf("killTmuxSession left its own session running")
+// TestUsageText_NotJSON pins that unreadable output fails loudly with a preview,
+// so a CLI that stops emitting JSON is diagnosable from the error alone.
+func TestUsageText_NotJSON(t *testing.T) {
+	_, err := usageText([]byte("command not found: claude"))
+	if err == nil {
+		t.Fatal("expected error for non-JSON output")
+	}
+	if !strings.Contains(err.Error(), "command not found") {
+		t.Errorf("error should preview the raw output, got: %v", err)
 	}
 }
 
@@ -706,19 +659,19 @@ func TestAtoi(t *testing.T) {
 	}
 }
 
-// TestParseCaptured_ExtraRowsNotCapped is a REGRESSION GUARD: the parser reports
+// TestParseUsage_ExtraRowsNotCapped is a REGRESSION GUARD: the parser reports
 // every per-model row Claude shows. quota-bar's finite menu is quota-bar's
 // problem — a slot limit must never delete a real row from the data (quota-cli).
-func TestParseCaptured_ExtraRowsNotCapped(t *testing.T) {
+func TestParseUsage_ExtraRowsNotCapped(t *testing.T) {
 	input := `
-Current session      10% used
-Current week (all models)   20% used
-Current week (Fable)   30% used
-Current week (Opus)    40% used
-Current week (Sonnet)  50% used
-Current week (Haiku)   60% used
+Current session: 10% used
+Current week (all models): 20% used
+Current week (Fable): 30% used
+Current week (Opus): 40% used
+Current week (Sonnet): 50% used
+Current week (Haiku): 60% used
 `
-	result, err := parseCaptured(input)
+	result, err := parseUsage(input)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1173,8 +1173,8 @@ func onReady() {
 	// complete, no icon. Only a fresh process is reliable, so in-place exec
 	// is banned here. Gate discipline is unchanged: the refresh gate is taken
 	// only right before the handover (a probe cut by the dying process would
-	// orphan its tmux session with a live claude inside), and on the success
-	// path it is never released because the process exits.
+	// orphan its live claude/codex child), and on the success path it is never
+	// released because the process exits.
 	// The button and the status are separate surfaces: the button's title
 	// never changes (a click always means exactly "check now"), progress and
 	// results appear on the disabled status row below it, and the last result

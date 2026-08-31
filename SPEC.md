@@ -186,7 +186,22 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 - 선택된 추가 Claude 계정은 `CLAUDE_CONFIG_DIR`, 추가 Codex 계정은 `CODEX_HOME`으로 실행한다. 기본 계정은 상속된 해당 변수를 유지한다. 조회한 로그인 계정과 실행 계정이 달라지지 않도록 Claude는 `ANTHROPIC_*`/`CLAUDE_*`의 인증·엔드포인트 override와 `CLAUDECODE`를, Codex는 `CODEX_*`/`OPENAI_*`의 인증·엔드포인트 override를 제거한다.
 - 대화형 Claude/Codex 실행은 지원하지 않는다.
 
-- 첫 인자가 `account`/`update`/`exec-prompt`이면 해당 서브커맨드로 동작한다. 그 외 조회 모드는 `quota-cli [-json] [-timeout N]` 형태만 허용하며, 알 수 없는 positional 인자가 남으면 실행하지 않고 usage와 함께 실패한다.
+**서브커맨드 (세션 로그 조회)**:
+| 명령 | 설명 |
+|------|------|
+| `quota-cli session-log list [-agent all\|claude\|codex] [-account key] [-limit N] [-json]` | configured 계정들의 세션 로그 파일을 최근 수정 순으로 출력 |
+| `quota-cli session-log search [-agent all\|claude\|codex] [-account key] [-limit N] [-max-chars N] [-include-tools] [-json] <query>` | user/assistant 텍스트에서 query를 찾아 제한된 snippet만 출력 |
+| `quota-cli session-log show [-agent all\|claude\|codex] [-account key] [-tail N] [-max-chars N] [-include-tools] [-json] <session-ref>` | session-ref가 가리키는 로그에서 최근 메시지만 출력 |
+
+- 세션 로그 조회는 읽기 전용이다. 로그 파일을 삭제, 이동, 수정, compact하지 않는다.
+- 기본 범위는 `agent=all`이며 `account`를 지정하면 해당 key만 본다. `claude-2`, `codex-2` 같은 추가 계정은 기존 `config.json` 계정 설정에서 로그 root를 계산한다.
+- Claude 기본 계정 로그 root는 `CLAUDE_PROJECTS_DIR`, `CLAUDE_CONFIG_DIR/projects`, `~/.claude/projects` 순서로 정한다. 추가 Claude 계정은 `<configDir>/projects`를 본다.
+- Codex 기본 계정 로그 root는 `CODEX_SESSIONS_DIR`, `CODEX_HOME/sessions`, `~/.codex/sessions` 순서로 정한다. 추가 Codex 계정은 `<home>/sessions`를 본다.
+- 기본 출력은 user/assistant 메시지 텍스트만 포함한다. tool call/result 원문은 `--include-tools`가 있을 때만 검색/출력한다.
+- 토큰 소모를 제한하기 위해 `search` 기본값은 `limit=20`, `max-chars=220`이고, `show` 기본값은 `tail=40`, `max-chars=880`이다. `max-chars=0`은 해당 truncation을 끈다.
+- `show`의 `session-ref`는 configured 로그 root 아래 파일의 정확한 path, basename, 또는 path 부분 문자열로 해석한다. 여러 파일이 맞으면 후보를 출력하고 실패한다.
+
+- 첫 인자가 `account`/`update`/`exec-prompt`/`session-log`이면 해당 서브커맨드로 동작한다. 그 외 조회 모드는 `quota-cli [-json] [-timeout N]` 형태만 허용하며, 알 수 없는 positional 인자가 남으면 실행하지 않고 usage와 함께 실패한다.
 - 검증 규칙은 조회 시 `config.json`을 읽는 규칙과 동일하다(같은 형식/중복 규칙). Claude는 `^claude-\d+$`, Codex는 `^codex-\d+$`.
 
 **동작**:

@@ -6,7 +6,7 @@ Claude Code와 Codex CLI의 사용량(quota)을 조회하는 Go 도구.
 
 | 이름 | 설명 |
 |------|------|
-| `quota-cli` | CLI. quota 출력 및 quota 기반 비대화형 Claude/Codex 실행 |
+| `quota-cli` | CLI. quota 출력, quota 기반 비대화형 Claude/Codex 실행, 세션 로그 검색 |
 | `quota-bar` | macOS 메뉴바 앱. 주기적으로 quota 갱신 표시 |
 
 ## 설치
@@ -120,6 +120,19 @@ quota의 남은 비율을 읽을 수 있으면 그 계정에는 하한선을 적
 `weekly_all`/`session`으로 비교한다. 선택이 끝나면 나머지 인자와 stdin/stdout/stderr, 종료 상태는 각각 `claude -p`와 `codex exec`에 그대로 전달된다.
 Claude 후보는 적어도 `weekly_all` 또는 `session` quota를 갖고 있어야 한다.
 대화형 실행은 지원하지 않는다.
+
+#### 세션 로그 검색
+
+```bash
+quota-cli session-log list --agent=all --limit 20
+quota-cli session-log search "검색어" --account claude-2 --limit 10
+quota-cli session-log show <session-ref> --tail 40
+```
+
+등록된 Claude/Codex 계정 전체의 로컬 세션 로그를 읽기 전용으로 찾는다. 기본 출력은 user/assistant
+텍스트만 포함하며, tool call/result 원문은 `--include-tools`를 지정한 경우에만 포함한다.
+`search`는 기본 20개 결과와 220자 snippet만 출력하고, `show`는 기본 최근 40개 메시지와 메시지당
+880자까지만 출력한다. `--json`으로 구조화 출력도 가능하다.
 
 ### quota-bar
 

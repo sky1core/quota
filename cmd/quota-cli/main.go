@@ -398,12 +398,23 @@ func accountRemove(args []string) int {
 		fmt.Fprintf(os.Stderr, "계정 %q 없음\n", key)
 		return 1
 	}
+	removeExecPromptAccountSetting(&cfg, key)
 	if err := config.Save(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "config save error:", err)
 		return 1
 	}
 	fmt.Printf("제거됨: %s\n", key)
 	return 0
+}
+
+func removeExecPromptAccountSetting(cfg *config.Config, key string) {
+	if cfg.ExecPrompt == nil || len(cfg.ExecPrompt.AccountSettings) == 0 {
+		return
+	}
+	delete(cfg.ExecPrompt.AccountSettings, key)
+	if len(cfg.ExecPrompt.AccountSettings) == 0 {
+		cfg.ExecPrompt = nil
+	}
 }
 
 // --- update subcommand ----------------------------------------------------

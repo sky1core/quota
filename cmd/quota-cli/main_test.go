@@ -161,12 +161,22 @@ func TestCodexAccountAddRemove_RoundTrip(t *testing.T) {
 	if len(cfg.ClaudeAccounts) != 0 {
 		t.Errorf("codex add leaked into claude accounts: %+v", cfg.ClaudeAccounts)
 	}
+	cfg.ExecPrompt = &config.ExecPromptConfig{AccountSettings: map[string]config.ExecPromptAccountSettings{
+		"codex-2": {MinLeftPct: mainTestFloatPtr(25)},
+	}}
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
 
 	if code := accountRemove([]string{"codex-2"}); code != 0 {
 		t.Fatalf("rm exit code = %d, want 0", code)
 	}
-	if cfg2, _ := config.Load(); len(cfg2.CodexAccounts) != 0 {
+	cfg2, _ := config.Load()
+	if len(cfg2.CodexAccounts) != 0 {
 		t.Errorf("after rm: %+v", cfg2.CodexAccounts)
+	}
+	if cfg2.ExecPrompt != nil {
+		t.Errorf("after rm execPrompt setting should be removed: %+v", cfg2.ExecPrompt)
 	}
 }
 
@@ -218,16 +228,30 @@ func TestAccountAddRemove_RoundTrip(t *testing.T) {
 	if cfg2, _ := config.Load(); len(cfg2.ClaudeAccounts) != 1 {
 		t.Errorf("rejected add must not change config: %+v", cfg2.ClaudeAccounts)
 	}
+	cfg.ExecPrompt = &config.ExecPromptConfig{AccountSettings: map[string]config.ExecPromptAccountSettings{
+		"claude-2": {MinLeftPct: mainTestFloatPtr(25)},
+	}}
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
 
 	if code := accountRemove([]string{"claude-2"}); code != 0 {
 		t.Fatalf("rm exit code = %d, want 0", code)
 	}
-	if cfg3, _ := config.Load(); len(cfg3.ClaudeAccounts) != 0 {
+	cfg3, _ := config.Load()
+	if len(cfg3.ClaudeAccounts) != 0 {
 		t.Errorf("after rm: %+v", cfg3.ClaudeAccounts)
+	}
+	if cfg3.ExecPrompt != nil {
+		t.Errorf("after rm execPrompt setting should be removed: %+v", cfg3.ExecPrompt)
 	}
 
 	// Removing a missing key fails.
 	if code := accountRemove([]string{"claude-9"}); code == 0 {
 		t.Error("removing a missing key should fail")
 	}
+}
+
+func mainTestFloatPtr(v float64) *float64 {
+	return &v
 }

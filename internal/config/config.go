@@ -34,10 +34,19 @@ type CodexAccount struct {
 	Home string `json:"home"`
 }
 
+type ExecPromptConfig struct {
+	AccountSettings map[string]ExecPromptAccountSettings `json:"accountSettings,omitempty"`
+}
+
+type ExecPromptAccountSettings struct {
+	MinLeftPct *float64 `json:"minLeftPct,omitempty"`
+}
+
 // Config is the parsed ~/.config/quota/config.json.
 type Config struct {
-	ClaudeAccounts []ClaudeAccount `json:"claudeAccounts"`
-	CodexAccounts  []CodexAccount  `json:"codexAccounts"`
+	ClaudeAccounts []ClaudeAccount   `json:"claudeAccounts"`
+	CodexAccounts  []CodexAccount    `json:"codexAccounts"`
+	ExecPrompt     *ExecPromptConfig `json:"execPrompt,omitempty"`
 }
 
 // Path returns the config file location.

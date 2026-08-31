@@ -17,16 +17,19 @@ import (
 )
 
 const (
-	delegateProbeTimeout      = 40 * time.Second
-	minDelegatedPromptLeftPct = 5.0
+	delegateProbeTimeout        = 40 * time.Second
+	defaultExecPromptMinLeftPct = 5.0
+	minExecPromptMinLeftPct     = 0.0
+	maxExecPromptMinLeftPct     = 100.0
 )
 
 type scoredWindow struct {
-	present     bool
-	left        float64
-	resetKnown  bool
-	leftPerMin  float64
-	compareRate bool
+	present         bool
+	available       float64
+	resetKnown      bool
+	resetMins       float64
+	availablePerMin float64
+	compareRate     bool
 }
 
 type accountScore struct {
@@ -91,6 +94,10 @@ func selectClaudeAccount(cfg config.Config, args []string, now time.Time) (confi
 	if len(skipped) > 0 {
 		return config.ResolvedAccount{}, fmt.Errorf("invalid Claude account config: %s", strings.Join(skipped, "; "))
 	}
+	minLeftPcts, err := execPromptMinLeftPctByAccount(cfg, claudeAccountKeys(accounts), "claude")
+	if err != nil {
+		return config.ResolvedAccount{}, err
+	}
 	results := make([]quotaProbeResult, len(accounts))
 	var wg sync.WaitGroup
 	for i, account := range accounts {
@@ -103,7 +110,7 @@ func selectClaudeAccount(cfg config.Config, args []string, now time.Time) (confi
 	wg.Wait()
 
 	requestedModel := claudeRequestedModel(args)
-	compareModel := shouldCompareClaudeModelWindow(results, requestedModel, now)
+	compareModel := shouldCompareClaudeModelWindow(results, requestedModel, minLeftPcts, now)
 	var failures []string
 	scores := make([]accountScore, len(results))
 	usable := make([]bool, len(results))
@@ -112,7 +119,7 @@ func selectClaudeAccount(cfg config.Config, args []string, now time.Time) (confi
 			failures = append(failures, accounts[i].Key+": "+result.err.Error())
 			continue
 		}
-		score, ok := scoreClaudeQuota(result.quota, requestedModel, compareModel, now)
+		score, ok := scoreClaudeQuota(result.quota, requestedModel, compareModel, minLeftPcts[i], now)
 		if !ok {
 			continue
 		}
@@ -134,6 +141,10 @@ func selectCodexAccount(cfg config.Config, now time.Time) (config.ResolvedCodexA
 	if len(skipped) > 0 {
 		return config.ResolvedCodexAccount{}, fmt.Errorf("invalid Codex account config: %s", strings.Join(skipped, "; "))
 	}
+	minLeftPcts, err := execPromptMinLeftPctByAccount(cfg, codexAccountKeys(accounts), "codex")
+	if err != nil {
+		return config.ResolvedCodexAccount{}, err
+	}
 	results := make([]quotaProbeResult, len(accounts))
 	var wg sync.WaitGroup
 	for i, account := range accounts {
@@ -145,7 +156,7 @@ func selectCodexAccount(cfg config.Config, now time.Time) (config.ResolvedCodexA
 	}
 	wg.Wait()
 
-	compareShortest := shouldCompareCodexShortestWindow(results, now)
+	compareShortest := shouldCompareCodexShortestWindow(results, minLeftPcts, now)
 	var failures []string
 	scores := make([]accountScore, len(results))
 	usable := make([]bool, len(results))
@@ -154,7 +165,7 @@ func selectCodexAccount(cfg config.Config, now time.Time) (config.ResolvedCodexA
 			failures = append(failures, accounts[i].Key+": "+result.err.Error())
 			continue
 		}
-		score, ok := scoreCodexQuota(result.quota, compareShortest, now)
+		score, ok := scoreCodexQuota(result.quota, compareShortest, minLeftPcts[i], now)
 		if !ok {
 			continue
 		}
@@ -168,19 +179,19 @@ func selectCodexAccount(cfg config.Config, now time.Time) (config.ResolvedCodexA
 	return config.ResolvedCodexAccount{}, fmt.Errorf("no account has usable quota%s", failureSuffix(failures))
 }
 
-func scoreClaudeQuota(quota map[string]any, requestedModel string, compareModel bool, now time.Time) (accountScore, bool) {
+func scoreClaudeQuota(quota map[string]any, requestedModel string, compareModel bool, minLeftPct float64, now time.Time) (accountScore, bool) {
 	windows := quotaWindows(quota)
 	session := findWindowByKey(windows, "session")
 	weekly := findWindowByKey(windows, "weekly_all")
 	var modelScore scoredWindow
 	if requestedModel != "" {
 		model := findRequestedModelWindow(windows, requestedModel)
-		modelScore = scoreQuotaWindow(model, now)
+		modelScore = scoreQuotaWindow(model, minLeftPct, now)
 		if belowDelegatedPromptFloor(modelScore) {
 			return accountScore{}, false
 		}
 	}
-	score, ok := buildAccountScore([]map[string]any{weekly, session}, now)
+	score, ok := buildAccountScore([]map[string]any{weekly, session}, minLeftPct, now)
 	if !ok {
 		return accountScore{}, false
 	}
@@ -190,28 +201,28 @@ func scoreClaudeQuota(quota map[string]any, requestedModel string, compareModel 
 	return score, true
 }
 
-func shouldCompareClaudeModelWindow(results []quotaProbeResult, requestedModel string, now time.Time) bool {
+func shouldCompareClaudeModelWindow(results []quotaProbeResult, requestedModel string, minLeftPcts []float64, now time.Time) bool {
 	if requestedModel == "" {
 		return false
 	}
 	usable := 0
 	withModel := 0
-	for _, result := range results {
+	for i, result := range results {
 		if result.err != nil {
 			continue
 		}
-		if _, ok := scoreClaudeQuota(result.quota, requestedModel, false, now); !ok {
+		if _, ok := scoreClaudeQuota(result.quota, requestedModel, false, minLeftPcts[i], now); !ok {
 			continue
 		}
 		usable++
-		if scoreQuotaWindow(findRequestedModelWindow(quotaWindows(result.quota), requestedModel), now).present {
+		if scoreQuotaWindow(findRequestedModelWindow(quotaWindows(result.quota), requestedModel), minLeftPcts[i], now).present {
 			withModel++
 		}
 	}
 	return usable > 0 && usable == withModel
 }
 
-func scoreCodexQuota(quota map[string]any, compareShortest bool, now time.Time) (accountScore, bool) {
+func scoreCodexQuota(quota map[string]any, compareShortest bool, minLeftPct float64, now time.Time) (accountScore, bool) {
 	windows := quotaWindows(quota)
 	if len(windows) == 0 {
 		return accountScore{}, false
@@ -221,7 +232,7 @@ func scoreCodexQuota(quota map[string]any, compareShortest bool, now time.Time) 
 		return accountScore{}, false
 	}
 	for _, window := range windows {
-		score := scoreQuotaWindow(window, now)
+		score := scoreQuotaWindow(window, minLeftPct, now)
 		if belowDelegatedPromptFloor(score) {
 			return accountScore{}, false
 		}
@@ -230,17 +241,17 @@ func scoreCodexQuota(quota map[string]any, compareShortest bool, now time.Time) 
 	if compareShortest && shortestMins != longestMins {
 		priority = append(priority, shortest)
 	}
-	return buildAccountScore(priority, now)
+	return buildAccountScore(priority, minLeftPct, now)
 }
 
-func shouldCompareCodexShortestWindow(results []quotaProbeResult, now time.Time) bool {
+func shouldCompareCodexShortestWindow(results []quotaProbeResult, minLeftPcts []float64, now time.Time) bool {
 	usable := 0
 	withShortest := 0
-	for _, result := range results {
+	for i, result := range results {
 		if result.err != nil {
 			continue
 		}
-		if _, ok := scoreCodexQuota(result.quota, false, now); !ok {
+		if _, ok := scoreCodexQuota(result.quota, false, minLeftPcts[i], now); !ok {
 			continue
 		}
 		_, shortest, longestMins, shortestMins, ok := codexWindowExtremes(quotaWindows(result.quota))
@@ -248,7 +259,7 @@ func shouldCompareCodexShortestWindow(results []quotaProbeResult, now time.Time)
 			continue
 		}
 		usable++
-		if shortestMins != longestMins && scoreQuotaWindow(shortest, now).present {
+		if shortestMins != longestMins && scoreQuotaWindow(shortest, minLeftPcts[i], now).present {
 			withShortest++
 		}
 	}
@@ -274,11 +285,11 @@ func codexWindowExtremes(windows []map[string]any) (longest, shortest map[string
 	return longest, shortest, longestMins, shortestMins, longest != nil
 }
 
-func buildAccountScore(priority []map[string]any, now time.Time) (accountScore, bool) {
+func buildAccountScore(priority []map[string]any, minLeftPct float64, now time.Time) (accountScore, bool) {
 	score := accountScore{windows: make([]scoredWindow, 0, len(priority))}
 	anyPresent := false
 	for _, window := range priority {
-		sw := scoreQuotaWindow(window, now)
+		sw := scoreQuotaWindow(window, minLeftPct, now)
 		if belowDelegatedPromptFloor(sw) {
 			return accountScore{}, false
 		}
@@ -340,10 +351,10 @@ func markRateComparable(scores []accountScore, usable []bool) {
 }
 
 func belowDelegatedPromptFloor(score scoredWindow) bool {
-	return score.present && score.left < minDelegatedPromptLeftPct
+	return score.present && score.available < 0
 }
 
-func scoreQuotaWindow(window map[string]any, now time.Time) scoredWindow {
+func scoreQuotaWindow(window map[string]any, minLeftPct float64, now time.Time) scoredWindow {
 	if window == nil {
 		return scoredWindow{}
 	}
@@ -351,7 +362,7 @@ func scoreQuotaWindow(window map[string]any, now time.Time) scoredWindow {
 	if !ok {
 		return scoredWindow{}
 	}
-	score := scoredWindow{present: true, left: left}
+	score := scoredWindow{present: true, available: left - minLeftPct}
 	remaining, known := quotaResetRemaining(window, now)
 	if known {
 		mins := remaining.Minutes()
@@ -359,7 +370,8 @@ func scoreQuotaWindow(window map[string]any, now time.Time) scoredWindow {
 			mins = 1
 		}
 		score.resetKnown = true
-		score.leftPerMin = left / mins
+		score.resetMins = mins
+		score.availablePerMin = score.available / mins
 	}
 	return score
 }
@@ -394,19 +406,82 @@ func compareScoredWindow(a, b scoredWindow) int {
 	if !a.present {
 		return 0
 	}
-	if a.compareRate && b.compareRate && a.leftPerMin != b.leftPerMin {
-		if a.leftPerMin > b.leftPerMin {
+	if a.compareRate && b.compareRate && a.availablePerMin != b.availablePerMin {
+		if a.availablePerMin > b.availablePerMin {
 			return 1
 		}
 		return -1
 	}
-	if a.left != b.left {
-		if a.left > b.left {
+	if a.available != b.available {
+		if a.available > b.available {
+			return 1
+		}
+		return -1
+	}
+	if a.compareRate && b.compareRate && a.resetMins != b.resetMins {
+		if a.resetMins < b.resetMins {
 			return 1
 		}
 		return -1
 	}
 	return 0
+}
+
+func claudeAccountKeys(accounts []config.ResolvedAccount) []string {
+	keys := make([]string, len(accounts))
+	for i, account := range accounts {
+		keys[i] = account.Key
+	}
+	return keys
+}
+
+func codexAccountKeys(accounts []config.ResolvedCodexAccount) []string {
+	keys := make([]string, len(accounts))
+	for i, account := range accounts {
+		keys[i] = account.Key
+	}
+	return keys
+}
+
+func execPromptMinLeftPctByAccount(cfg config.Config, accountKeys []string, provider string) ([]float64, error) {
+	minLeftPcts := make([]float64, len(accountKeys))
+	allowed := make(map[string]int, len(accountKeys))
+	for i, key := range accountKeys {
+		minLeftPcts[i] = defaultExecPromptMinLeftPct
+		allowed[key] = i
+	}
+	if cfg.ExecPrompt == nil || len(cfg.ExecPrompt.AccountSettings) == 0 {
+		return minLeftPcts, nil
+	}
+	for key, settings := range cfg.ExecPrompt.AccountSettings {
+		if !execPromptAccountSettingKeyShapeValid(key) {
+			return nil, fmt.Errorf("execPrompt.accountSettings key %q must be claude, claude-<N>, codex, or codex-<N>", key)
+		}
+		if !execPromptAccountKeyForProvider(key, provider) {
+			continue
+		}
+		i, ok := allowed[key]
+		if !ok {
+			return nil, fmt.Errorf("execPrompt.accountSettings.%s references an unconfigured %s account", key, provider)
+		}
+		if settings.MinLeftPct == nil {
+			continue
+		}
+		pct := *settings.MinLeftPct
+		if pct < minExecPromptMinLeftPct || pct > maxExecPromptMinLeftPct {
+			return nil, fmt.Errorf("execPrompt.accountSettings.%s.minLeftPct must be between 0 and 100", key)
+		}
+		minLeftPcts[i] = pct
+	}
+	return minLeftPcts, nil
+}
+
+func execPromptAccountSettingKeyShapeValid(key string) bool {
+	return key == "claude" || key == "codex" || config.ClaudeExtraKeyRe.MatchString(key) || config.CodexExtraKeyRe.MatchString(key)
+}
+
+func execPromptAccountKeyForProvider(key, provider string) bool {
+	return key == provider || strings.HasPrefix(key, provider+"-")
 }
 
 func quotaWindows(quota map[string]any) []map[string]any {

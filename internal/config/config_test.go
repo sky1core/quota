@@ -113,6 +113,23 @@ func TestLoad_EmptyAccounts(t *testing.T) {
 	}
 }
 
+func TestLoad_ExecPromptAccountSettings(t *testing.T) {
+	writeConfig(t, `{"execPrompt":{"accountSettings":{"claude":{"minLeftPct":40},"codex-2":{"minLeftPct":5}}}}`)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ExecPrompt == nil {
+		t.Fatal("missing execPrompt config")
+	}
+	if got := c.ExecPrompt.AccountSettings["claude"].MinLeftPct; got == nil || *got != 40 {
+		t.Fatalf("claude minLeftPct = %v, want 40", got)
+	}
+	if got := c.ExecPrompt.AccountSettings["codex-2"].MinLeftPct; got == nil || *got != 5 {
+		t.Fatalf("codex-2 minLeftPct = %v, want 5", got)
+	}
+}
+
 func resolvedKeys(accts []ResolvedAccount) []string {
 	out := make([]string, len(accts))
 	for i, a := range accts {
@@ -332,6 +349,9 @@ func TestSaveLoad_CodexRoundTrip(t *testing.T) {
 	in := Config{
 		ClaudeAccounts: []ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}},
 		CodexAccounts:  []CodexAccount{{Key: "codex-2", Home: "~/.codex-2"}},
+		ExecPrompt: &ExecPromptConfig{AccountSettings: map[string]ExecPromptAccountSettings{
+			"claude": {MinLeftPct: testFloatPtr(40)},
+		}},
 	}
 	if err := Save(in); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -351,6 +371,9 @@ func TestSaveLoad_CodexRoundTrip(t *testing.T) {
 	if len(got.ClaudeAccounts) != 1 || got.ClaudeAccounts[0].Key != "claude-2" {
 		t.Errorf("claude accounts corrupted: %+v", got.ClaudeAccounts)
 	}
+	if got.ExecPrompt == nil || got.ExecPrompt.AccountSettings["claude"].MinLeftPct == nil || *got.ExecPrompt.AccountSettings["claude"].MinLeftPct != 40 {
+		t.Errorf("execPrompt settings corrupted: %+v", got.ExecPrompt)
+	}
 }
 
 func TestResolveAccounts_InvalidDoesNotBlockValid(t *testing.T) {
@@ -369,4 +392,8 @@ func TestResolveAccounts_InvalidDoesNotBlockValid(t *testing.T) {
 	if accts[1].ConfigDir != "/a" {
 		t.Errorf("configDir = %q, want /a", accts[1].ConfigDir)
 	}
+}
+
+func testFloatPtr(v float64) *float64 {
+	return &v
 }

@@ -87,7 +87,15 @@ quota-cli account rm codex-2                   # 계정 제거
 ```json
 {
   "claudeAccounts": [ { "key": "claude-2", "configDir": "~/.claude-2" } ],
-  "codexAccounts":  [ { "key": "codex-2",  "home": "~/.codex-alt" } ]
+  "codexAccounts":  [ { "key": "codex-2",  "home": "~/.codex-alt" } ],
+  "execPrompt": {
+    "accountSettings": {
+      "claude":   { "minLeftPct": 40 },
+      "claude-2": { "minLeftPct": 5 },
+      "codex":    { "minLeftPct": 30 },
+      "codex-2":  { "minLeftPct": 5 }
+    }
+  }
 }
 ```
 
@@ -102,8 +110,9 @@ quota-cli exec-prompt --agent=codex --json "프롬프트"
 ```
 
 등록된 같은 provider 계정들의 60초 공유 캐시를 우선 사용하고, 필요한 계정만 quota를 실측한다.
-적용되는 quota 창이 5% 미만인 계정은 후보에서 제외한다. 장기 quota를 짧은 quota보다 우선하며,
-남은 quota가 리셋까지 남은 시간에 비해 많은 계정을 먼저 쓴다.
+적용되는 quota 창이 계정별 `minLeftPct` 미만인 계정은 후보에서 제외한다. 기본값은 5%이며,
+선택 점수는 남은 quota에서 `minLeftPct`를 뺀 여유분이다. 장기 quota를 짧은 quota보다 우선하며,
+여유분이 리셋까지 남은 시간에 비해 많은 계정을 먼저 쓴다.
 Claude에 `--model`을 지정해도 요청 모델값과 실제 추가 quota row label이 맞을 때만 그 row를 본다. 현재 Opus처럼 전용 row가
 없는 모델은 별도 quota를 가정하지 않고 `weekly_all`/`session`으로 비교한다. Fable처럼 해당 모델
 quota의 남은 비율을 읽을 수 있으면 그 계정에는 하한선을 적용한다. 살아남은 모든 후보가 남은 비율을

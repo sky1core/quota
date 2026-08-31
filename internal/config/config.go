@@ -1,6 +1,6 @@
 // Package config loads the shared quota configuration
-// (~/.config/quota/config.json), currently the list of additional Claude
-// accounts to query beyond the default.
+// (~/.config/quota/config.json), including additional Claude and Codex accounts
+// to query beyond the defaults.
 package config
 
 import (

@@ -13,17 +13,30 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/sky1core/quota/internal/quotacache"
 )
 
-// GetQuota fetches Claude Code quota for the default account.
+// GetQuota fetches Claude Code quota for the default account, always probing
+// live (maxAge 0 disables the shared cache read).
 func GetQuota(timeout time.Duration) (map[string]any, error) {
-	return GetQuotaForConfigDir(timeout, "")
+	return GetQuotaForConfigDir(timeout, "", 0)
 }
 
 // GetQuotaForConfigDir fetches Claude Code quota for the account identified by
 // configDir (its CLAUDE_CONFIG_DIR). An empty configDir queries the default
-// account, identical to GetQuota.
-func GetQuotaForConfigDir(timeout time.Duration, configDir string) (map[string]any, error) {
+// account, identical to GetQuota. When the shared cache holds this account's
+// last probe no older than maxAge, that raw output is re-parsed and returned
+// instead of spawning a new probe; a live probe's result is written back. A
+// non-positive maxAge skips the cache read but still refreshes it on success.
+func GetQuotaForConfigDir(timeout time.Duration, configDir string, maxAge time.Duration) (map[string]any, error) {
+	key := claudeCacheKey(configDir)
+	if raw, ok := quotacache.Get(key, maxAge); ok {
+		if res, err := parseUsage(raw); err == nil {
+			return res, nil
+		}
+	}
+
 	claudeBin, err := findClaudeBin()
 	if err != nil {
 		return nil, err
@@ -78,7 +91,53 @@ func GetQuotaForConfigDir(timeout time.Duration, configDir string) (map[string]a
 		}
 		return nil, fmt.Errorf("%w\n--- output ---\n%s", err, preview)
 	}
+	// Cache the raw report (parseable, so a success) for other consumers, bounded
+	// by the soonest window reset so it is never served past that instant.
+	quotacache.Put(key, text, earliestReset(result))
 	return result, nil
+}
+
+func InvalidateCacheForConfigDir(configDir string) {
+	quotacache.Delete(claudeCacheKey(configDir))
+}
+
+// earliestReset returns the soonest reset instant among a parsed result's
+// windows, or the zero time when none carry one. It bounds the shared-cache
+// entry: once the soonest window has reset, the cached raw is pre-reset and must
+// not be re-parsed (parseReset would roll its now-past reset forward). Windows
+// with only a relative reset carry no resetsAt and are skipped — they cannot
+// roll forward, so maxAge alone bounds them.
+func earliestReset(result map[string]any) time.Time {
+	ws, _ := result["windows"].([]map[string]any)
+	var earliest time.Time
+	for _, w := range ws {
+		at, ok := w["resetsAt"].(time.Time)
+		if !ok {
+			continue
+		}
+		if earliest.IsZero() || at.Before(earliest) {
+			earliest = at
+		}
+	}
+	return earliest
+}
+
+// claudeCacheKey is the shared-cache key for the account a given configDir
+// selects. It is the account's RESOLVED location, not its logical name: an empty
+// configDir means "the inherited CLAUDE_CONFIG_DIR, or ~/.claude" — exactly the
+// account fetchEnv will probe. Keying on the resolved path is what stops a
+// default-account entry cached under one inherited CLAUDE_CONFIG_DIR from being
+// served to a run that inherited a different one.
+func claudeCacheKey(configDir string) string {
+	resolved := configDir
+	if resolved == "" {
+		resolved = os.Getenv("CLAUDE_CONFIG_DIR")
+		if resolved == "" {
+			home, _ := os.UserHomeDir()
+			resolved = filepath.Join(home, ".claude")
+		}
+	}
+	return "claude:" + filepath.Clean(resolved)
 }
 
 // findClaudeBin locates the Claude CLI, preferring PATH and falling back to the
@@ -95,26 +154,27 @@ func findClaudeBin() (string, error) {
 	return p, nil
 }
 
-// fetchEnv builds the environment for the probe:
-//   - CLAUDECODE is dropped so a quota process started from inside Claude Code
-//     does not trip nested-session detection.
-//   - ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL are dropped so quota is read
-//     from the user's logged-in account rather than a custom endpoint.
-//   - CLAUDE_CONFIG_DIR is replaced (not appended) when configDir is set, so an
-//     inherited value can never decide which account gets measured. When
-//     configDir is empty the inherited value stands, which is what selects the
-//     caller's default account.
 func fetchEnv(configDir string) []string {
+	return EnvForConfigDir(os.Environ(), configDir)
+}
+
+func EnvForConfigDir(base []string, configDir string) []string {
 	drop := map[string]bool{
-		"CLAUDECODE":           true,
-		"ANTHROPIC_AUTH_TOKEN": true,
-		"ANTHROPIC_BASE_URL":   true,
+		"CLAUDECODE":                      true,
+		"ANTHROPIC_API_HOST":              true,
+		"ANTHROPIC_API_KEY":               true,
+		"ANTHROPIC_AUTH_TOKEN":            true,
+		"ANTHROPIC_BASE_URL":              true,
+		"CLAUDE_API_KEY":                  true,
+		"CLAUDE_CODE_API_BASE_URL":        true,
+		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN": true,
+		"CLAUDE_CODE_OAUTH_TOKEN":         true,
 	}
 	if configDir != "" {
 		drop["CLAUDE_CONFIG_DIR"] = true
 	}
-	env := make([]string, 0, len(os.Environ())+1)
-	for _, kv := range os.Environ() {
+	env := make([]string, 0, len(base)+1)
+	for _, kv := range base {
 		if eq := strings.IndexByte(kv, '='); eq > 0 && drop[kv[:eq]] {
 			continue
 		}
@@ -307,9 +367,17 @@ func parseUsage(text string) (map[string]any, error) {
 	}
 
 	if len(windows) == 0 {
+		if looksLikeSessionUsageSummary(text) {
+			return nil, errors.New("could not find Claude plan quota rows in /usage output; only session usage summary was returned (check claude.ai subscription auth for this CLAUDE_CONFIG_DIR)")
+		}
 		return nil, errors.New("could not parse claude quota from /usage output")
 	}
 	return map[string]any{"windows": windows}, nil
+}
+
+func looksLikeSessionUsageSummary(text string) bool {
+	clean := stripANSI(text)
+	return strings.Contains(clean, "Total cost:") && strings.Contains(clean, "Usage:")
 }
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)

@@ -52,6 +52,9 @@ const (
 	// cadences to derive the stale threshold, so no normally-refreshed provider
 	// trips a false "stale" warning regardless of which interval is larger.
 	staleMargin = 5 * time.Minute
+	// barCacheAgeCap keeps shared-cache reuse bounded even when the configured
+	// refresh cadence is long.
+	barCacheAgeCap = 3 * time.Minute
 )
 
 // resetCreditSlots is the number of pre-allocated submenu rows under the Codex
@@ -107,6 +110,18 @@ func (s settings) idleInterval() time.Duration {
 		return time.Duration(s.RefreshIdleMinutes) * time.Minute
 	}
 	return defaultRefreshIdle
+}
+
+func (s settings) cacheMaxAge() time.Duration {
+	cadence := s.activeInterval()
+	if idle := s.idleInterval(); idle < cadence {
+		cadence = idle
+	}
+	maxAge := cadence / 2
+	if maxAge > barCacheAgeCap {
+		return barCacheAgeCap
+	}
+	return maxAge
 }
 
 // staleThreshold is the age past which a provider's last success is flagged
@@ -326,7 +341,7 @@ func (d quotaData) applyWindows(provider string, data map[string]any) {
 // d.errs[<provider key>]. Fetches run concurrently; results are consumed
 // serially from a buffered channel, so the store maps are only ever touched by
 // this goroutine.
-func fetchQuota(accounts []config.ResolvedAccount, codexAccounts []config.ResolvedCodexAccount) quotaData {
+func fetchQuota(accounts []config.ResolvedAccount, codexAccounts []config.ResolvedCodexAccount, cacheMaxAge time.Duration) quotaData {
 	timeout := 90 * time.Second
 	d := newQuotaData()
 
@@ -340,13 +355,13 @@ func fetchQuota(accounts []config.ResolvedAccount, codexAccounts []config.Resolv
 
 	for _, a := range accounts {
 		go func(a config.ResolvedAccount) {
-			cq, err := claude.GetQuotaForConfigDir(timeout, a.ConfigDir)
+			cq, err := claude.GetQuotaForConfigDir(timeout, a.ConfigDir, cacheMaxAge)
 			ch <- result{provider: a.Key, claude: true, data: cq, err: err}
 		}(a)
 	}
 	for _, a := range codexAccounts {
 		go func(a config.ResolvedCodexAccount) {
-			kq, err := codex.GetQuotaForHome(timeout, a.Home)
+			kq, err := codex.GetQuotaForHome(timeout, a.Home, cacheMaxAge)
 			ch <- result{provider: a.Key, claude: false, data: kq, err: err}
 		}(a)
 	}
@@ -759,8 +774,9 @@ func onReady() {
 	// if the active interval is configured longer than the idle one.
 	refreshActiveDur := cfg.activeInterval()
 	refreshIdleDur := cfg.idleInterval()
+	cacheMaxAge := cfg.cacheMaxAge()
 	staleThresholdDur := cfg.staleThreshold()
-	log.Printf("refresh cadence: active=%s idle=%s (stale>%s)", refreshActiveDur, refreshIdleDur, staleThresholdDur)
+	log.Printf("refresh cadence: active=%s idle=%s cache<=%s (stale>%s)", refreshActiveDur, refreshIdleDur, cacheMaxAge, staleThresholdDur)
 
 	// Resolve the Claude accounts to show. systray cannot add or remove menu
 	// items at runtime, so the account set (and therefore the menu layout) is
@@ -1002,7 +1018,7 @@ func onReady() {
 		}()
 
 		log.Printf("refresh start")
-		data := fetchQuota(accounts, codexAccounts)
+		data := fetchQuota(accounts, codexAccounts, cacheMaxAge)
 		log.Printf("refresh done")
 
 		mu.Lock()
@@ -1169,11 +1185,10 @@ func onReady() {
 	// otherwise. It used to re-exec in place (same PID, launchd kept
 	// tracking), but a re-exec'd image re-registers its NSStatusItem under a
 	// PID the WindowServer already knew, and on some macOS builds the icon
-	// silently never reappears — seen live: healthy process, restart log
-	// complete, no icon. Only a fresh process is reliable, so in-place exec
-	// is banned here. Gate discipline is unchanged: the refresh gate is taken
-	// only right before the handover (a probe cut by the dying process would
-	// orphan its live claude/codex child), and on the success path it is never
+	// silently never reappears. Only a fresh process is reliable, so in-place
+	// exec is banned here. Gate discipline is unchanged: the refresh gate is
+	// taken only right before the handover, so a probe is not interrupted while
+	// it owns a claude/codex child process. On the success path the gate is never
 	// released because the process exits.
 	// The button and the status are separate surfaces: the button's title
 	// never changes (a click always means exactly "check now"), progress and
@@ -1181,17 +1196,17 @@ func onReady() {
 	// stays visible until the next check. While a flow runs the button is
 	// disabled, so a click is never silently ignored.
 	var updateBusy atomic.Bool
-	// Two hard-won rules shape this flow (a live wedge froze the whole bar):
+	// Two rules shape this flow:
 	//   1. Every systray mutation (SetTitle/Disable/…) is a SYNCHRONOUS
 	//      dispatch to the Cocoa main thread (waitUntilDone:YES inside the
-	//      systray library) and can block forever when it races the closing
-	//      menu's run-loop mode. So: log BEFORE every mutation (a wedge can
-	//      never be silent again), settle briefly after the click before the
-	//      first mutation, and keep a watchdog that reports a stuck flow.
+	//      systray library) and can block until restart when it races the
+	//      closing menu's run-loop mode. So: log BEFORE every mutation, settle
+	//      briefly after the click before the first mutation, and keep a
+	//      watchdog that reports a stuck flow.
 	//   2. The refresh gate is taken as LATE as possible — right before the
 	//      restart handover, which is the only step that needs it — and NO
-	//      systray call happens while holding it. A wedged mutation then
-	//      costs this one flow, never the refresh loop.
+	//      systray call happens while holding it. A blocked mutation then costs
+	//      this one flow, never the refresh loop.
 	menuUpdate := func() {
 		// Belt-and-suspenders against double dispatch; the disabled button
 		// already prevents user-visible re-clicks.
@@ -1205,13 +1220,13 @@ func onReady() {
 			select {
 			case <-flowDone:
 			case <-time.After(10 * time.Minute):
-				log.Printf("update: flow still unfinished after 10m — likely wedged in a systray main-thread dispatch; restart quota-bar to recover")
+				log.Printf("update: flow still unfinished after 10m — likely blocked in a systray main-thread dispatch; restart quota-bar to recover")
 			}
 		}()
 		// Let the menu finish closing before touching systray (rule 1).
 		time.Sleep(500 * time.Millisecond)
 		// status logs the transition, then paints it. The log line comes first
-		// so the on-disk trail is complete even if the paint call wedges.
+		// so the on-disk trail is complete even if the paint call blocks.
 		status := func(s string) {
 			log.Printf("update: %s", s)
 			miUpdateStatus.SetTitle(s)
@@ -1276,7 +1291,7 @@ func onReady() {
 		}
 		// os.Exit (not systray.Quit) on both handover paths: Quit is itself a
 		// Cocoa main-thread dispatch (rule 1), and the restart must not
-		// depend on the wedge-prone run loop to complete — a wedged Quit
+		// depend on a blocking-prone run loop to complete — a blocked Quit
 		// would leave old and new processes running side by side. There is
 		// nothing to tear down gracefully: the gate is held, so no probe is
 		// mid-capture, and the kernel drops the flock when the process dies.

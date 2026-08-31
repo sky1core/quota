@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/sky1core/quota/internal/quotacache"
 )
 
 type rateLimitsResponse struct {
@@ -70,17 +72,28 @@ type rpcResp struct {
 }
 
 // GetQuota fetches Codex quota for the default account (the process's CODEX_HOME,
-// or ~/.codex when unset).
+// or ~/.codex when unset), always probing live (maxAge 0 disables the shared
+// cache read).
 func GetQuota(timeout time.Duration) (map[string]any, error) {
-	return GetQuotaForHome(timeout, "")
+	return GetQuotaForHome(timeout, "", 0)
 }
 
 // GetQuotaForHome fetches Codex quota for the account identified by codexHome
 // (its CODEX_HOME). An empty codexHome queries the default account, identical to
 // GetQuota. codexHome must be an already-expanded absolute path; callers expand
 // "~" via config.ExpandTilde before passing it here (mirrors the Claude
-// GetQuotaForConfigDir contract).
-func GetQuotaForHome(timeout time.Duration, codexHome string) (map[string]any, error) {
+// GetQuotaForConfigDir contract). When the shared cache holds this account's last
+// probe no older than maxAge, that raw response is re-decoded and returned
+// instead of starting app-server; a live probe's response is written back. A
+// non-positive maxAge skips the cache read but still refreshes it on success.
+func GetQuotaForHome(timeout time.Duration, codexHome string, maxAge time.Duration) (map[string]any, error) {
+	key := codexCacheKey(codexHome)
+	if raw, ok := quotacache.Get(key, maxAge); ok {
+		if out, err := parseCachedQuota(raw); err == nil {
+			return out, nil
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -91,11 +104,7 @@ func GetQuotaForHome(timeout time.Duration, codexHome string) (map[string]any, e
 		_ = os.MkdirAll(safeDir, 0o755)
 		cmd.Dir = safeDir
 	}
-	if codexHome != "" {
-		// Select a specific account by CODEX_HOME. Appended last so it wins over
-		// any inherited CODEX_HOME (exec uses the last value for a duplicate key).
-		cmd.Env = append(os.Environ(), "CODEX_HOME="+codexHome)
-	}
+	cmd.Env = EnvForHome(os.Environ(), codexHome)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -196,7 +205,98 @@ func GetQuotaForHome(timeout time.Duration, codexHome string) (map[string]any, e
 		return nil, err
 	}
 
+	out, err := buildOutput(rr)
+	if err != nil {
+		return nil, err
+	}
+	// Cache the raw rate-limits response only until its first data-change boundary.
+	quotacache.Put(key, string(resRaw), cacheValidUntil(rr))
+	return out, nil
+}
+
+func InvalidateCacheForHome(codexHome string) {
+	quotacache.Delete(codexCacheKey(codexHome))
+}
+
+func parseCachedQuota(raw string) (map[string]any, error) {
+	var rr rateLimitsResponse
+	if err := json.Unmarshal([]byte(raw), &rr); err != nil {
+		return nil, err
+	}
 	return buildOutput(rr)
+}
+
+// cacheValidUntil returns the first instant that can change data projected from
+// this response: a quota-window reset or an available reset-credit expiry.
+func cacheValidUntil(rr rateLimitsResponse) time.Time {
+	snap := selectSnapshot(rr)
+	var earliest time.Time
+	for _, w := range []*rateLimitWindow{snap.Primary, snap.Secondary} {
+		if w == nil || w.ResetsAt == nil {
+			continue
+		}
+		at := time.Unix(*w.ResetsAt, 0)
+		if earliest.IsZero() || at.Before(earliest) {
+			earliest = at
+		}
+	}
+	if rr.ResetCredits != nil {
+		for _, credit := range rr.ResetCredits.Credits {
+			if credit.Status != "available" || credit.ExpiresAt == nil {
+				continue
+			}
+			at := time.Unix(*credit.ExpiresAt, 0)
+			if earliest.IsZero() || at.Before(earliest) {
+				earliest = at
+			}
+		}
+	}
+	return earliest
+}
+
+// codexCacheKey is the shared-cache key for the account a given codexHome
+// selects — the account's RESOLVED CODEX_HOME (inherited value or ~/.codex for
+// the default), not its logical name. Mirrors claudeCacheKey; keying on the
+// resolved path keeps one environment's default-account entry from being served
+// to a run that inherited a different CODEX_HOME.
+func codexCacheKey(codexHome string) string {
+	resolved := codexHome
+	if resolved == "" {
+		resolved = os.Getenv("CODEX_HOME")
+		if resolved == "" {
+			home, _ := os.UserHomeDir()
+			resolved = filepath.Join(home, ".codex")
+		}
+	}
+	return "codex:" + filepath.Clean(resolved)
+}
+
+func EnvForHome(base []string, home string) []string {
+	drop := map[string]bool{
+		"CODEX_ACCESS_TOKEN":     true,
+		"CODEX_API_KEY":          true,
+		"CODEX_AUTH":             true,
+		"CODEX_AUTHAPI_BASE_URL": true,
+		"CODEX_URL":              true,
+		"OPENAI_API_KEY":         true,
+		"OPENAI_BASE_URL":        true,
+		"OPENAI_ORGANIZATION":    true,
+		"OPENAI_PROJECT":         true,
+	}
+	if home != "" {
+		drop["CODEX_HOME"] = true
+	}
+	env := make([]string, 0, len(base)+1)
+	for _, kv := range base {
+		if eq := strings.IndexByte(kv, '='); eq > 0 && drop[kv[:eq]] {
+			continue
+		}
+		env = append(env, kv)
+	}
+	if home != "" {
+		env = append(env, "CODEX_HOME="+home)
+	}
+	return env
 }
 
 // WindowKeys returns every window key this provider can emit, in display order.
@@ -292,13 +392,19 @@ func fmtDurMins(mins int) string {
 	return fmt.Sprintf("%dm", m)
 }
 
-func buildOutput(rr rateLimitsResponse) (map[string]any, error) {
-	snap := rr.RateLimits
+// selectSnapshot picks the rate-limit snapshot to report: the "codex" entry in
+// the per-limit map when present, else the top-level snapshot.
+func selectSnapshot(rr rateLimitsResponse) rateLimitSnapshot {
 	if rr.RateLimitsByLimitId != nil {
 		if s, ok := rr.RateLimitsByLimitId["codex"]; ok {
-			snap = s
+			return s
 		}
 	}
+	return rr.RateLimits
+}
+
+func buildOutput(rr rateLimitsResponse) (map[string]any, error) {
+	snap := selectSnapshot(rr)
 
 	out := map[string]any{}
 	// Codex places windows in primary/secondary positionally and changes which

@@ -1,0 +1,753 @@
+package main
+
+import (
+	"bytes"
+	"os"
+	osexec "os/exec"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sky1core/quota/internal/claude"
+	"github.com/sky1core/quota/internal/codex"
+	"github.com/sky1core/quota/internal/config"
+	"github.com/sky1core/quota/internal/quotacache"
+)
+
+func TestClaudeScorePrefersWeeklyQuotaResettingSooner(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	slower, ok := scoreClaudeQuota(testQuota(
+		testWindow("weekly_all", "Week", 80, now.Add(6*24*time.Hour), 0),
+		testWindow("session", "Session", 100, now.Add(time.Hour), 0),
+	), "", false, now)
+	if !ok {
+		t.Fatal("first account should be usable")
+	}
+	sooner, ok := scoreClaudeQuota(testQuota(
+		testWindow("weekly_all", "Week", 80, now.Add(24*time.Hour), 0),
+		testWindow("session", "Session", minDelegatedPromptLeftPct, now.Add(time.Hour), 0),
+	), "", false, now)
+	if !ok {
+		t.Fatal("second account should be usable")
+	}
+	if compareAccountScoresForTest(sooner, slower) <= 0 {
+		t.Fatal("the same weekly quota resetting in one day must rank above six days")
+	}
+}
+
+func TestClaudeScoreWeeklyOutranksSession(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	weeklyRich, _ := scoreClaudeQuota(testQuota(
+		testWindow("weekly_all", "Week", 80, now.Add(3*24*time.Hour), 0),
+		testWindow("session", "Session", 10, now.Add(4*time.Hour), 0),
+	), "", false, now)
+	sessionRich, _ := scoreClaudeQuota(testQuota(
+		testWindow("weekly_all", "Week", 60, now.Add(3*24*time.Hour), 0),
+		testWindow("session", "Session", 100, now.Add(4*time.Hour), 0),
+	), "", false, now)
+	if compareAccountScoresForTest(weeklyRich, sessionRich) <= 0 {
+		t.Fatal("weekly quota must decide before session quota")
+	}
+}
+
+func TestScoreFallsBackToRemainingQuotaWhenResetIsUnknown(t *testing.T) {
+	known := scoredWindow{present: true, left: 50, resetKnown: true, leftPerMin: 0.5}
+	unknown := scoredWindow{present: true, left: 50}
+	if got := compareScoredWindow(known, unknown); got != 0 {
+		t.Fatalf("equal remaining quota with one unknown reset must tie, got %d", got)
+	}
+}
+
+func TestClaudeScoreDoesNotCompareSessionAgainstWeeklySlot(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	withWeekly, _ := scoreClaudeQuota(testQuota(
+		testWindow("weekly_all", "Week", 10, now.Add(6*24*time.Hour), 0),
+		testWindow("session", "Session", 10, now.Add(4*time.Hour), 0),
+	), "", false, now)
+	withoutWeekly, _ := scoreClaudeQuota(testQuota(
+		testWindow("session", "Session", 100, now.Add(time.Hour), 0),
+	), "", false, now)
+	if compareAccountScoresForTest(withWeekly, withoutWeekly) <= 0 {
+		t.Fatal("a session window must not be compared in the weekly slot")
+	}
+}
+
+func TestClaudeScoreUsesRequestedModelWindow(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	first := testQuota(
+		testWindow("weekly_all", "Week", 80, now.Add(24*time.Hour), 0),
+		testWindow("extra_1", "Fable", 80, now.Add(6*24*time.Hour), 0),
+		testWindow("session", "Session", 80, now.Add(4*time.Hour), 0),
+	)
+	second := testQuota(
+		testWindow("weekly_all", "Week", 80, now.Add(6*24*time.Hour), 0),
+		testWindow("extra_1", "Fable", 80, now.Add(24*time.Hour), 0),
+		testWindow("session", "Session", 80, now.Add(4*time.Hour), 0),
+	)
+	firstGeneric, _ := scoreClaudeQuota(first, "", false, now)
+	secondGeneric, _ := scoreClaudeQuota(second, "", false, now)
+	if compareAccountScoresForTest(firstGeneric, secondGeneric) <= 0 {
+		t.Fatal("aggregate weekly comparison should prefer the first account")
+	}
+	firstFable, _ := scoreClaudeQuota(first, "claude-fable-5", true, now)
+	secondFable, _ := scoreClaudeQuota(second, "claude-fable-5", true, now)
+	if compareAccountScoresForTest(secondFable, firstFable) <= 0 {
+		t.Fatal("Fable comparison should prefer the second account")
+	}
+}
+
+func TestClaudeScoreFallsBackWhenRequestedModelWindowIsAbsent(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	withoutRequestedModelRow, ok := scoreClaudeQuota(testQuota(
+		testWindow("weekly_all", "Week", 80, now.Add(24*time.Hour), 0),
+		testWindow("session", "Session", 80, now.Add(time.Hour), 0),
+	), "claude-opus-4", false, now)
+	if !ok {
+		t.Fatal("an account without a requested model quota row should fall back to aggregate Claude quota")
+	}
+	laterReset, ok := scoreClaudeQuota(testQuota(
+		testWindow("weekly_all", "Week", 80, now.Add(6*24*time.Hour), 0),
+		testWindow("session", "Session", 80, now.Add(time.Hour), 0),
+	), "claude-opus-4", false, now)
+	if !ok {
+		t.Fatal("second account should be usable")
+	}
+	if compareAccountScoresForTest(withoutRequestedModelRow, laterReset) <= 0 {
+		t.Fatal("fallback comparison should still use aggregate weekly quota")
+	}
+}
+
+func TestClaudeScoreRequiresAggregateWindowEvenWithModelWindow(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	if _, ok := scoreClaudeQuota(testQuota(
+		testWindow("extra_1", "Fable", 90, now.Add(24*time.Hour), 0),
+	), "fable", true, now); ok {
+		t.Fatal("a model-only Claude report should not be usable without aggregate quota")
+	}
+}
+
+func TestShouldCompareClaudeModelWindowRequiresEveryUsableAccount(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	withFable := testQuota(
+		testWindow("weekly_all", "Week", 80, now.Add(24*time.Hour), 0),
+		testWindow("extra_1", "Fable", 80, now.Add(24*time.Hour), 0),
+		testWindow("session", "Session", 80, now.Add(time.Hour), 0),
+	)
+	withoutFable := testQuota(
+		testWindow("weekly_all", "Week", 80, now.Add(24*time.Hour), 0),
+		testWindow("session", "Session", 80, now.Add(time.Hour), 0),
+	)
+	invalidFable := testQuota(
+		testWindow("weekly_all", "Week", 80, now.Add(24*time.Hour), 0),
+		map[string]any{"key": "extra_1", "label": "Fable"},
+		testWindow("session", "Session", 80, now.Add(time.Hour), 0),
+	)
+	unusableWithoutFable := testQuota(
+		testWindow("weekly_all", "Week", 1, now.Add(24*time.Hour), 0),
+		testWindow("session", "Session", 1, now.Add(time.Hour), 0),
+	)
+	if shouldCompareClaudeModelWindow([]quotaProbeResult{{quota: withFable}, {quota: withoutFable}}, "claude-fable-5", now) {
+		t.Fatal("model comparison should be disabled when a usable account lacks the requested model window")
+	}
+	if shouldCompareClaudeModelWindow([]quotaProbeResult{{quota: withFable}, {quota: invalidFable}}, "claude-fable-5", now) {
+		t.Fatal("model comparison should require a scoreable requested model window")
+	}
+	if !shouldCompareClaudeModelWindow([]quotaProbeResult{{quota: withFable}, {quota: unusableWithoutFable}}, "claude-fable-5", now) {
+		t.Fatal("unusable accounts without model windows should not disable model comparison")
+	}
+	if !shouldCompareClaudeModelWindow([]quotaProbeResult{{quota: withFable}, {err: os.ErrNotExist}}, "claude-fable-5", now) {
+		t.Fatal("probe failures should not disable model comparison")
+	}
+	if !shouldCompareClaudeModelWindow([]quotaProbeResult{{quota: withFable}, {quota: withFable}}, "claude-fable-5", now) {
+		t.Fatal("model comparison should be enabled when every usable account has the requested model window")
+	}
+}
+
+func TestClaudeScoreComparesAggregateWhenModelComparisonDisabled(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	withFable, ok := scoreClaudeQuota(testQuota(
+		testWindow("weekly_all", "Week", 20, now.Add(6*24*time.Hour), 0),
+		testWindow("extra_1", "Fable", 50, now.Add(24*time.Hour), 0),
+		testWindow("session", "Session", 80, now.Add(time.Hour), 0),
+	), "fable", false, now)
+	if !ok {
+		t.Fatal("account with a Fable row above the prompt floor should be usable")
+	}
+	withoutFable, ok := scoreClaudeQuota(testQuota(
+		testWindow("weekly_all", "Week", 80, now.Add(24*time.Hour), 0),
+		testWindow("session", "Session", 80, now.Add(time.Hour), 0),
+	), "fable", false, now)
+	if !ok {
+		t.Fatal("account without a Fable row should fall back to aggregate Claude quota")
+	}
+	if compareAccountScoresForTest(withoutFable, withFable) <= 0 {
+		t.Fatal("a present model row must not be compared against aggregate weekly quota")
+	}
+}
+
+func TestCodexScoreLongestWindowOutranksShortest(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	longRich, _ := scoreCodexQuota(testQuota(
+		testWindow("5h", "5h", 10, now.Add(4*time.Hour), 300),
+		testWindow("weekly", "7d", 80, now.Add(3*24*time.Hour), 10080),
+	), true, now)
+	shortRich, _ := scoreCodexQuota(testQuota(
+		testWindow("5h", "5h", 100, now.Add(4*time.Hour), 300),
+		testWindow("weekly", "7d", 60, now.Add(3*24*time.Hour), 10080),
+	), true, now)
+	if compareAccountScoresForTest(longRich, shortRich) <= 0 {
+		t.Fatal("longest Codex window must decide before the shortest window")
+	}
+}
+
+func TestScoresRejectPromptWindowsBelowFloor(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	if _, ok := scoreClaudeQuota(testQuota(
+		testWindow("weekly_all", "Week", 90, now.Add(24*time.Hour), 0),
+		testWindow("session", "Session", 1, now.Add(time.Minute), 0),
+	), "", false, now); ok {
+		t.Fatal("Claude must not route to an account with a 1% applicable window")
+	}
+	if _, ok := scoreCodexQuota(testQuota(
+		testWindow("5h", "5h", 1, now.Add(time.Minute), 300),
+		testWindow("weekly", "7d", 90, now.Add(24*time.Hour), 10080),
+	), false, now); ok {
+		t.Fatal("Codex must not route to an account with a 1% applicable window")
+	}
+	if _, ok := scoreClaudeQuota(testQuota(
+		testWindow("weekly_all", "Week", 90, now.Add(24*time.Hour), 0),
+		testWindow("extra_1", "Fable", 1, now.Add(time.Minute), 0),
+		testWindow("session", "Session", 90, now.Add(time.Hour), 0),
+	), "fable", false, now); ok {
+		t.Fatal("Claude must not route to an account with a 1% requested model window")
+	}
+}
+
+func TestScoresAllowPromptWindowsAtFloor(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	if _, ok := scoreClaudeQuota(testQuota(
+		testWindow("weekly_all", "Week", minDelegatedPromptLeftPct, now.Add(24*time.Hour), 0),
+		testWindow("session", "Session", minDelegatedPromptLeftPct, now.Add(time.Hour), 0),
+	), "", false, now); !ok {
+		t.Fatal("Claude should allow an account at the delegated prompt floor")
+	}
+	if _, ok := scoreCodexQuota(testQuota(
+		testWindow("5h", "5h", minDelegatedPromptLeftPct, now.Add(time.Hour), 300),
+		testWindow("weekly", "7d", minDelegatedPromptLeftPct, now.Add(24*time.Hour), 10080),
+	), false, now); !ok {
+		t.Fatal("Codex should allow an account at the delegated prompt floor")
+	}
+}
+
+func TestClaudeRequestedModel(t *testing.T) {
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--model", "fable", "prompt"}, "fable"},
+		{[]string{"-m=claude-opus-4", "prompt"}, "claude-opus-4"},
+		{[]string{"--model=sonnet"}, "sonnet"},
+		{[]string{"--", "--model", "fable"}, ""},
+		{[]string{"prompt"}, ""},
+	}
+	for _, tt := range tests {
+		if got := claudeRequestedModel(tt.args); got != tt.want {
+			t.Errorf("claudeRequestedModel(%v) = %q, want %q", tt.args, got, tt.want)
+		}
+	}
+}
+
+func TestFindRequestedModelWindowMatchesActualExtraLabel(t *testing.T) {
+	windows := quotaWindows(testQuota(
+		testWindow("session", "Session", 80, time.Time{}, 0),
+		testWindow("weekly_all", "Week", 80, time.Time{}, 0),
+		testWindow("extra_1", "Fable", 80, time.Time{}, 0),
+		testWindow("extra_2", "Sonnet only", 80, time.Time{}, 0),
+	))
+
+	if got := findRequestedModelWindow(windows, "claude-fable-5"); got == nil || got["label"] != "Fable" {
+		t.Fatalf("claude-fable-5 matched %v, want Fable", got)
+	}
+	if got := findRequestedModelWindow(windows, "claude-sonnet-4"); got == nil || got["label"] != "Sonnet only" {
+		t.Fatalf("claude-sonnet-4 matched %v, want Sonnet only", got)
+	}
+	if got := findRequestedModelWindow(windows, "claude-opus-4"); got != nil {
+		t.Fatalf("claude-opus-4 must not match an unreported model row, got %v", got)
+	}
+}
+
+func TestFindRequestedModelWindowMatchesOpusPlanAliasWhenRowExists(t *testing.T) {
+	windows := quotaWindows(testQuota(
+		testWindow("session", "Session", 80, time.Time{}, 0),
+		testWindow("weekly_all", "Week", 80, time.Time{}, 0),
+		testWindow("extra_1", "Opus", 80, time.Time{}, 0),
+	))
+
+	if got := findRequestedModelWindow(windows, "opusplan"); got == nil || got["label"] != "Opus" {
+		t.Fatalf("opusplan matched %v, want Opus", got)
+	}
+}
+
+func TestDelegatedArgvPreservesForwardedArgs(t *testing.T) {
+	forwarded := []string{"--json", "-m", "gpt-5", "prompt text"}
+	got := delegatedArgv("/bin/codex", []string{"exec"}, forwarded)
+	want := []string{"/bin/codex", "exec", "--json", "-m", "gpt-5", "prompt text"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %v, want %v", got, want)
+	}
+	if !reflect.DeepEqual(forwarded, []string{"--json", "-m", "gpt-5", "prompt text"}) {
+		t.Fatalf("forwarded args mutated: %v", forwarded)
+	}
+}
+
+func TestPromptEnvironmentsSelectOnlyRequestedAccount(t *testing.T) {
+	base := []string{
+		"PATH=/bin",
+		"CLAUDECODE=1",
+		"CLAUDE_CONFIG_DIR=/old-claude",
+		"ANTHROPIC_API_HOST=https://example.invalid",
+		"ANTHROPIC_API_KEY=secret",
+		"ANTHROPIC_AUTH_TOKEN=secret",
+		"ANTHROPIC_BASE_URL=https://example.invalid",
+		"CLAUDE_API_KEY=secret",
+		"CLAUDE_CODE_API_BASE_URL=https://example.invalid",
+		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN=secret",
+		"CLAUDE_CODE_OAUTH_TOKEN=secret",
+		"CODEX_HOME=/old-codex",
+		"CODEX_ACCESS_TOKEN=secret",
+		"CODEX_API_KEY=secret",
+		"OPENAI_API_KEY=secret",
+		"OPENAI_BASE_URL=https://example.invalid",
+	}
+	claudeEnv := envMap(claude.EnvForConfigDir(base, "/new-claude"))
+	if claudeEnv["CLAUDE_CONFIG_DIR"] != "/new-claude" {
+		t.Fatalf("CLAUDE_CONFIG_DIR = %q", claudeEnv["CLAUDE_CONFIG_DIR"])
+	}
+	for _, key := range []string{
+		"CLAUDECODE", "ANTHROPIC_API_HOST", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+		"CLAUDE_API_KEY", "CLAUDE_CODE_API_BASE_URL", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+	} {
+		if _, ok := claudeEnv[key]; ok {
+			t.Fatalf("%s must be removed", key)
+		}
+	}
+	if claudeEnv["CODEX_HOME"] != "/old-codex" {
+		t.Fatal("Claude selection must not alter CODEX_HOME")
+	}
+
+	codexEnv := envMap(codex.EnvForHome(base, "/new-codex"))
+	if codexEnv["CODEX_HOME"] != "/new-codex" {
+		t.Fatalf("CODEX_HOME = %q", codexEnv["CODEX_HOME"])
+	}
+	for _, key := range []string{"CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"} {
+		if _, ok := codexEnv[key]; ok {
+			t.Fatalf("%s must be removed", key)
+		}
+	}
+	if codexEnv["CLAUDE_CONFIG_DIR"] != "/old-claude" {
+		t.Fatal("Codex selection must not alter CLAUDE_CONFIG_DIR")
+	}
+}
+
+func TestDefaultPromptEnvironmentsPreserveInheritedAccount(t *testing.T) {
+	base := []string{"CLAUDE_CONFIG_DIR=/inherited-claude", "CODEX_HOME=/inherited-codex"}
+	if got := envMap(claude.EnvForConfigDir(base, ""))["CLAUDE_CONFIG_DIR"]; got != "/inherited-claude" {
+		t.Fatalf("default Claude account changed inherited config dir: %q", got)
+	}
+	if got := envMap(codex.EnvForHome(base, ""))["CODEX_HOME"]; got != "/inherited-codex" {
+		t.Fatalf("default Codex account changed inherited home: %q", got)
+	}
+}
+
+func TestExecDelegatedPreservesProcessContract(t *testing.T) {
+	cmd := osexec.Command(os.Args[0], "-test.run=^TestExecDelegatedHelper$")
+	cmd.Env = append(os.Environ(), "QUOTA_DELEGATE_HELPER=1", "DELEGATE_MARKER=marker")
+	cmd.Stdin = strings.NewReader("input-line\n")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	exitErr, ok := err.(*osexec.ExitError)
+	if !ok || exitErr.ExitCode() != 23 {
+		t.Fatalf("exit = %v, want 23", err)
+	}
+	if got, want := stdout.String(), "out:input-line:forwarded-value\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+	if got, want := stderr.String(), "err:marker\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
+func TestExecDelegatedHelper(t *testing.T) {
+	if os.Getenv("QUOTA_DELEGATE_HELPER") != "1" {
+		return
+	}
+	const script = `read line; printf 'out:%s:%s\n' "$line" "$1"; printf 'err:%s\n' "$DELEGATE_MARKER" >&2; exit 23`
+	if err := execDelegated("/bin/sh", []string{"-c", script, "delegated-test"}, []string{"forwarded-value"}, os.Environ()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSelectClaudeAccountUsesSharedCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	defaultRaw := "Current session: 10% used - resets in 4h\nCurrent week (all models): 80% used - resets in 6d"
+	extraRaw := "Current session: 10% used - resets in 4h\nCurrent week (all models): 20% used - resets in 1d"
+	validUntil := time.Now().Add(time.Hour)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude"), defaultRaw, validUntil)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), extraRaw, validUntil)
+
+	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}}}
+	selected, err := selectClaudeAccount(cfg, nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.Key != "claude-2" {
+		t.Fatalf("selected account = %q, want claude-2", selected.Key)
+	}
+}
+
+func TestSelectClaudeAccountSkipsBelowPromptFloor(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	defaultRaw := "Current session: 10% used - resets in 4h\nCurrent week (all models): 99% used - resets in 1m"
+	extraRaw := "Current session: 10% used - resets in 4h\nCurrent week (all models): 50% used - resets in 6d"
+	validUntil := time.Now().Add(time.Hour)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude"), defaultRaw, validUntil)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), extraRaw, validUntil)
+
+	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}}}
+	selected, err := selectClaudeAccount(cfg, nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.Key != "claude-2" {
+		t.Fatalf("selected account = %q, want claude-2", selected.Key)
+	}
+}
+
+func TestSelectClaudeAccountFailsWhenAllAccountsBelowPromptFloor(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	defaultRaw := "Current session: 99% used - resets in 1m\nCurrent week (all models): 99% used - resets in 1m"
+	extraRaw := "Current session: 98% used - resets in 2m\nCurrent week (all models): 98% used - resets in 2m"
+	validUntil := time.Now().Add(time.Hour)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude"), defaultRaw, validUntil)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), extraRaw, validUntil)
+
+	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}}}
+	if _, err := selectClaudeAccount(cfg, nil, time.Now()); err == nil {
+		t.Fatal("selection should fail when every Claude account is below the prompt floor")
+	}
+}
+
+func TestSelectClaudeAccountFailsOnInvalidConfiguredAccount(t *testing.T) {
+	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "work", ConfigDir: "~/.claude-work"}}}
+
+	_, err := selectClaudeAccount(cfg, nil, time.Now())
+	if err == nil {
+		t.Fatal("invalid Claude account config should fail before delegation")
+	}
+	if !strings.Contains(err.Error(), "invalid Claude account config") {
+		t.Fatalf("error = %q", err)
+	}
+}
+
+func TestSelectClaudeAccountModelFailureMessage(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	raw := "Current session: 99% used - resets in 1m\nCurrent week (all models): 99% used - resets in 1m\nCurrent week (Fable): 99% used - resets in 1m"
+	validUntil := time.Now().Add(time.Hour)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude"), raw, validUntil)
+
+	_, err := selectClaudeAccount(config.Config{}, []string{"--model", "fable"}, time.Now())
+	if err == nil {
+		t.Fatal("selection should fail when requested model quota is not usable")
+	}
+	if !strings.Contains(err.Error(), "no account has enough applicable Claude quota for --model fable") {
+		t.Fatalf("error = %q", err)
+	}
+}
+
+func TestSelectClaudeAccountUsesModelWindowWhenEveryUsableAccountHasIt(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	defaultRaw := "Current session: 20% used - resets in 4h\nCurrent week (all models): 10% used - resets in 1d\nCurrent week (Fable): 80% used - resets in 1d"
+	extraRaw := "Current session: 20% used - resets in 4h\nCurrent week (all models): 80% used - resets in 1d\nCurrent week (Fable): 10% used - resets in 1d"
+	validUntil := time.Now().Add(time.Hour)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude"), defaultRaw, validUntil)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), extraRaw, validUntil)
+
+	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}}}
+	selected, err := selectClaudeAccount(cfg, []string{"--model", "fable"}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.Key != "claude-2" {
+		t.Fatalf("selected account = %q, want claude-2", selected.Key)
+	}
+}
+
+func TestSelectClaudeAccountModelWindowMixIsOrderIndependent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	defaultRaw := "Current session: 20% used - resets in 4h\nCurrent week (all models): 90% used - resets in 6d\nCurrent week (Fable): 10% used - resets in 1d"
+	bestRaw := "Current session: 20% used - resets in 4h\nCurrent week (all models): 10% used - resets in 1d\nCurrent week (Fable): 20% used - resets in 1d"
+	noModelRaw := "Current session: 20% used - resets in 4h\nCurrent week (all models): 50% used - resets in 1d"
+	validUntil := time.Now().Add(time.Hour)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude"), defaultRaw, validUntil)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), bestRaw, validUntil)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude-3"), noModelRaw, validUntil)
+
+	firstOrder := config.Config{ClaudeAccounts: []config.ClaudeAccount{
+		{Key: "claude-2", ConfigDir: "~/.claude-2"},
+		{Key: "claude-3", ConfigDir: "~/.claude-3"},
+	}}
+	secondOrder := config.Config{ClaudeAccounts: []config.ClaudeAccount{
+		{Key: "claude-3", ConfigDir: "~/.claude-3"},
+		{Key: "claude-2", ConfigDir: "~/.claude-2"},
+	}}
+	for _, cfg := range []config.Config{firstOrder, secondOrder} {
+		selected, err := selectClaudeAccount(cfg, []string{"--model", "fable"}, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if selected.Key != "claude-2" {
+			t.Fatalf("selected account = %q, want claude-2", selected.Key)
+		}
+	}
+}
+
+func TestSelectClaudeAccountResetUnknownMixIsOrderIndependent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	defaultRaw := "Current session: 20% used\nCurrent week (all models): 20% used - resets in 6d"
+	unknownRaw := "Current session: 20% used\nCurrent week (all models): 20% used"
+	soonerRaw := "Current session: 20% used\nCurrent week (all models): 20% used - resets in 1d"
+	validUntil := time.Now().Add(time.Hour)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude"), defaultRaw, validUntil)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), unknownRaw, validUntil)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude-3"), soonerRaw, validUntil)
+
+	firstOrder := config.Config{ClaudeAccounts: []config.ClaudeAccount{
+		{Key: "claude-2", ConfigDir: "~/.claude-2"},
+		{Key: "claude-3", ConfigDir: "~/.claude-3"},
+	}}
+	secondOrder := config.Config{ClaudeAccounts: []config.ClaudeAccount{
+		{Key: "claude-3", ConfigDir: "~/.claude-3"},
+		{Key: "claude-2", ConfigDir: "~/.claude-2"},
+	}}
+	for _, cfg := range []config.Config{firstOrder, secondOrder} {
+		selected, err := selectClaudeAccount(cfg, nil, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if selected.Key != "claude" {
+			t.Fatalf("selected account = %q, want claude", selected.Key)
+		}
+	}
+}
+
+func TestSelectCodexAccountUsesSharedCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+	t.Setenv("CODEX_HOME", "")
+
+	defaultRaw := `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":80,"windowDurationMins":10080}}}`
+	extraRaw := `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":20,"windowDurationMins":10080}}}`
+	validUntil := time.Now().Add(time.Hour)
+	quotacache.Put("codex:"+filepath.Join(home, ".codex"), defaultRaw, validUntil)
+	quotacache.Put("codex:"+filepath.Join(home, ".codex-2"), extraRaw, validUntil)
+
+	cfg := config.Config{CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: "~/.codex-2"}}}
+	selected, err := selectCodexAccount(cfg, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.Key != "codex-2" {
+		t.Fatalf("selected account = %q, want codex-2", selected.Key)
+	}
+}
+
+func TestShouldCompareCodexShortestWindowRequiresEveryUsableAccount(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	twoWindows := testQuota(
+		testWindow("5h", "5h", 80, now.Add(4*time.Hour), 300),
+		testWindow("weekly", "7d", 80, now.Add(6*24*time.Hour), 10080),
+	)
+	weeklyOnly := testQuota(
+		testWindow("weekly", "7d", 80, now.Add(6*24*time.Hour), 10080),
+	)
+	unusableWeeklyOnly := testQuota(
+		testWindow("weekly", "7d", 1, now.Add(6*24*time.Hour), 10080),
+	)
+
+	if shouldCompareCodexShortestWindow([]quotaProbeResult{{quota: twoWindows}, {quota: weeklyOnly}}, now) {
+		t.Fatal("short window comparison should be disabled when a usable account lacks a distinct short window")
+	}
+	if !shouldCompareCodexShortestWindow([]quotaProbeResult{{quota: twoWindows}, {quota: twoWindows}}, now) {
+		t.Fatal("short window comparison should be enabled when every usable account has one")
+	}
+	if !shouldCompareCodexShortestWindow([]quotaProbeResult{{quota: twoWindows}, {quota: unusableWeeklyOnly}}, now) {
+		t.Fatal("unusable accounts without a short window should not disable short window comparison")
+	}
+}
+
+func TestSelectCodexAccountDoesNotPenalizeWeeklyOnlyAccount(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+	t.Setenv("CODEX_HOME", "")
+
+	defaultRaw := `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":10080}}}`
+	extraRaw := `{"rateLimits":{"primary":{"usedPercent":94,"windowDurationMins":300},"secondary":{"usedPercent":10,"windowDurationMins":10080}}}`
+	validUntil := time.Now().Add(time.Hour)
+	quotacache.Put("codex:"+filepath.Join(home, ".codex"), defaultRaw, validUntil)
+	quotacache.Put("codex:"+filepath.Join(home, ".codex-2"), extraRaw, validUntil)
+
+	cfg := config.Config{CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: "~/.codex-2"}}}
+	selected, err := selectCodexAccount(cfg, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.Key != "codex" {
+		t.Fatalf("selected account = %q, want codex", selected.Key)
+	}
+}
+
+func TestSelectCodexAccountSkipsBelowPromptFloor(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+	t.Setenv("CODEX_HOME", "")
+
+	defaultRaw := `{"rateLimits":{"primary":{"usedPercent":99,"windowDurationMins":300},"secondary":{"usedPercent":10,"windowDurationMins":10080}}}`
+	extraRaw := `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":50,"windowDurationMins":10080}}}`
+	validUntil := time.Now().Add(time.Hour)
+	quotacache.Put("codex:"+filepath.Join(home, ".codex"), defaultRaw, validUntil)
+	quotacache.Put("codex:"+filepath.Join(home, ".codex-2"), extraRaw, validUntil)
+
+	cfg := config.Config{CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: "~/.codex-2"}}}
+	selected, err := selectCodexAccount(cfg, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.Key != "codex-2" {
+		t.Fatalf("selected account = %q, want codex-2", selected.Key)
+	}
+}
+
+func TestSelectCodexAccountFailsWhenAllAccountsBelowPromptFloor(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+	t.Setenv("CODEX_HOME", "")
+
+	defaultRaw := `{"rateLimits":{"primary":{"usedPercent":99,"windowDurationMins":300},"secondary":{"usedPercent":99,"windowDurationMins":10080}}}`
+	extraRaw := `{"rateLimits":{"primary":{"usedPercent":98,"windowDurationMins":300},"secondary":{"usedPercent":98,"windowDurationMins":10080}}}`
+	validUntil := time.Now().Add(time.Hour)
+	quotacache.Put("codex:"+filepath.Join(home, ".codex"), defaultRaw, validUntil)
+	quotacache.Put("codex:"+filepath.Join(home, ".codex-2"), extraRaw, validUntil)
+
+	cfg := config.Config{CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: "~/.codex-2"}}}
+	if _, err := selectCodexAccount(cfg, time.Now()); err == nil {
+		t.Fatal("selection should fail when every Codex account is below the prompt floor")
+	}
+}
+
+func TestSelectCodexAccountFailsOnInvalidConfiguredAccount(t *testing.T) {
+	cfg := config.Config{CodexAccounts: []config.CodexAccount{{Key: "work", Home: "~/.codex-work"}}}
+
+	_, err := selectCodexAccount(cfg, time.Now())
+	if err == nil {
+		t.Fatal("invalid Codex account config should fail before delegation")
+	}
+	if !strings.Contains(err.Error(), "invalid Codex account config") {
+		t.Fatalf("error = %q", err)
+	}
+}
+
+func TestParseQuotaDuration(t *testing.T) {
+	for value, want := range map[string]time.Duration{
+		"6d 2h": 6*24*time.Hour + 2*time.Hour,
+		"4h 5m": 4*time.Hour + 5*time.Minute,
+		"0m":    0,
+	} {
+		got, ok := parseQuotaDuration(value)
+		if !ok || got != want {
+			t.Errorf("parseQuotaDuration(%q) = %v/%v, want %v", value, got, ok, want)
+		}
+	}
+	if _, ok := parseQuotaDuration("tomorrow"); ok {
+		t.Fatal("invalid duration must be rejected")
+	}
+}
+
+func TestNumericValueAcceptsIntAndFloat64(t *testing.T) {
+	for _, value := range []any{5, float64(5)} {
+		got, ok := numericValue(value)
+		if !ok || got != 5 {
+			t.Fatalf("numericValue(%T(%v)) = %v/%v, want 5/true", value, value, got, ok)
+		}
+	}
+}
+
+func compareAccountScoresForTest(a, b accountScore) int {
+	scores := []accountScore{a, b}
+	markRateComparable(scores, []bool{true, true})
+	return compareAccountScore(scores[0], scores[1])
+}
+
+func testQuota(windows ...map[string]any) map[string]any {
+	return map[string]any{"windows": windows}
+}
+
+func testWindow(key, label string, left float64, resetsAt time.Time, windowMins int) map[string]any {
+	window := map[string]any{
+		"key":      key,
+		"label":    label,
+		"left":     left,
+		"resetsAt": resetsAt,
+	}
+	if windowMins > 0 {
+		window["windowMins"] = windowMins
+	}
+	return window
+}
+
+func envMap(env []string) map[string]string {
+	out := map[string]string{}
+	for _, item := range env {
+		key, val, ok := strings.Cut(item, "=")
+		if ok {
+			out[key] = val
+		}
+	}
+	return out
+}

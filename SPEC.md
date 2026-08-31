@@ -7,7 +7,7 @@ Go로 작성된 Claude Code와 Codex CLI의 사용량(quota) 조회 도구.
 
 | 바이너리 | 설명 |
 |----------|------|
-| `quota-cli` | CLI 도구. JSON 또는 텍스트로 quota 출력 |
+| `quota-cli` | quota 조회 및 비대화형 Claude/Codex 실행 위임 |
 | `quota-bar` | macOS 메뉴바(systray) 앱. 주기적으로 quota 갱신하여 표시 |
 
 - 둘은 **독립적인 프로그램**이다. 서로를 호출하지 않는다.
@@ -25,6 +25,7 @@ github.com/sky1core/quota
 ├── internal/
 │   ├── claude/claude.go     # Claude Code quota 조회
 │   ├── codex/codex.go       # Codex CLI quota 조회
+│   ├── quotacache/          # 계정별 조회 결과 공유 캐시
 │   ├── render/render.go     # 텍스트 출력 포맷터
 │   └── ui/icon.go           # systray 아이콘 (22x22 PNG)
 ├── go.mod
@@ -149,7 +150,9 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 
 ### quota-cli
 
-**용도**: 터미널에서 quota를 한번 조회하고 결과 출력
+**용도**: 터미널에서 quota를 조회하거나, quota에 따라 계정을 선택해 Claude/Codex를 비대화형으로 실행한다. 계정별 결과는 공유 캐시(§공유 캐시)로 기본 60초 재사용한다.
+
+**지원 OS**: macOS, Linux. Windows는 지원하지 않는다.
 
 **플래그** (조회 모드):
 | 플래그 | 기본값 | 설명 |
@@ -165,17 +168,31 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 | `quota-cli account rm <key>` | 계정 제거. `codex-<N>`이면 Codex 목록에서, 그 외는 Claude 목록에서 제거한다. |
 
 **서브커맨드 (`update`) — 수동 업데이트**: `quota-cli update`는 Go module proxy가 해석한 `@latest` 릴리스 태그(`internal/update.Latest`)를 현재 바이너리 버전과 비교해, 같으면 "이미 최신"을 출력하고, 다르면 `go install <module>/cmd/quota-cli@<latest>`로 설치한 뒤 설치 경로와 버전을 출력한다.
-- **수동 전용**: 어떤 조회 경로도 업데이트를 부수 효과로 일으키지 않는다. quota-cli는 quota-bar를 건드리지 않는다(역도 같다).
+- **수동 전용**: 어떤 조회 경로도 업데이트를 부수 효과로 일으키지 않는다. quota-cli의 update는 quota-bar를 건드리지 않는다(역도 같다). (조회 결과 공유 캐시(§공유 캐시)는 이와 별개 채널이다.)
 - 로컬 빌드에서 실행하면 항상 최신 릴리스로 교체된다: 로컬 빌드의 버전은 릴리스 태그와 일치하지 않는 형태(`v0.9.0+dirty`, 커밋 해시, `dev` 등)라 비교가 불일치한다 — 의도된 동작이며, 최신 태그보다 앞선 dev 빌드라면 사실상 다운그레이드가 되지만 `업데이트: X → Y` 출력에 그대로 드러난다.
 - 요구사항: PATH에 `go` 필요. 제약: 방금 push한 태그는 proxy 캐시로 몇 분 늦게 보일 수 있다.
 
-- `account` 첫 인자가 아니면 조회 모드로 동작한다(기존 동작).
+**서브커맨드 (비대화형 프롬프트 실행)**:
+| 명령 | 실행 대상 |
+|------|-----------|
+| `quota-cli exec-prompt --agent=claude [args...]` | 선택된 Claude 계정으로 `claude -p [args...]` |
+| `quota-cli exec-prompt --agent=codex [args...]` | 선택된 Codex 계정으로 `codex exec [args...]` |
+
+- `--agent`는 필수이며 `claude`/`codex`만 허용한다. 그 뒤 `args`는 순서와 값을 바꾸지 않고 고정 접두(`claude -p`/`codex exec`) 뒤에 전달한다. stdin/stdout/stderr와 최종 종료 상태도 원본 CLI가 직접 담당하며, quota-cli는 선택 결과나 중간 데이터를 출력 스트림에 섞지 않는다.
+- 선택할 provider의 등록 계정만 60초 캐시 기준으로 병렬 조회한다. 조회 실패 계정과 현재 적용되는 quota 창이 5% 미만인 계정은 후보에서 제외하며, 후보가 없으면 원본 CLI를 실행하지 않고 실패한다.
+- 장기 창을 최우선, 짧은 창을 다음 순서로 비교한다. 양쪽 모두 리셋 시각을 알면 `남은 % / 리셋까지 남은 분`이 큰 쪽을 우선해, 같은 잔량이면 먼저 리셋되는 계정을 먼저 소비한다. 리셋 시각을 모르는 쪽이 있으면 남은 %로 비교한다. 모든 비교값이 같으면 config 순서가 빠른 계정을 선택한다.
+- Codex는 실제 `windowMins`가 가장 큰 창을 장기 기준, 가장 작은 창을 짧은 기준으로 사용한다.
+- Claude는 기본적으로 `weekly_all` 다음 `session` 순서로 비교한다. Claude 후보는 적어도 `weekly_all` 또는 `session` 창을 갖고 있어야 한다. `--model`/`-m`이 지정돼도 요청 모델값과 실제 추가 quota row label이 맞을 때만 그 row를 본다. Opus처럼 전용 row가 없는 모델은 별도 quota를 가정하지 않고 `weekly_all`, `session`으로 비교한다. Fable처럼 해당 모델 창의 남은 비율을 읽을 수 있으면 그 계정에는 해당 모델 창의 5% 하한선을 적용한다. 살아남은 모든 후보가 남은 비율을 읽을 수 있는 해당 모델 창을 갖고 있을 때만 해당 모델 창을 우선 비교하고, 일부 후보에만 있으면 `weekly_all`, `session`으로 비교한다.
+- 선택된 추가 Claude 계정은 `CLAUDE_CONFIG_DIR`, 추가 Codex 계정은 `CODEX_HOME`으로 실행한다. 기본 계정은 상속된 해당 변수를 유지한다. 조회한 로그인 계정과 실행 계정이 달라지지 않도록 Claude는 `ANTHROPIC_*`/`CLAUDE_*`의 인증·엔드포인트 override와 `CLAUDECODE`를, Codex는 `CODEX_*`/`OPENAI_*`의 인증·엔드포인트 override를 제거한다.
+- 대화형 Claude/Codex 실행은 지원하지 않는다.
+
+- 첫 인자가 `account`/`update`/`exec-prompt`이면 해당 서브커맨드로 동작한다. 그 외 조회 모드는 `quota-cli [-json] [-timeout N]` 형태만 허용하며, 알 수 없는 positional 인자가 남으면 실행하지 않고 usage와 함께 실패한다.
 - 검증 규칙은 조회 시 `config.json`을 읽는 규칙과 동일하다(같은 형식/중복 규칙). Claude는 `^claude-\d+$`, Codex는 `^codex-\d+$`.
 
 **동작**:
 1. `~/.config/quota/config.json`에서 추가 Claude/Codex 계정 목록을 읽는다 (파일 없거나 목록 비면 각 기본 계정만).
-2. 기본 Claude 계정 + 추가 Claude 계정을 각각 `claude.GetQuotaForConfigDir`로 조회
-3. 기본 Codex 계정 + 추가 Codex 계정을 각각 `codex.GetQuotaForHome`로 조회 (기본 계정은 `home=""`)
+2. 기본 Claude 계정 + 추가 Claude 계정을 각각 `claude.GetQuotaForConfigDir`로 조회 (maxAge 60초 — 캐시가 60초 이내면 재사용, 아니면 실측 후 캐시 갱신)
+3. 기본 Codex 계정 + 추가 Codex 계정을 각각 `codex.GetQuotaForHome`로 조회 (기본 계정은 `home=""`, maxAge 60초)
 4. 2·3은 모두 **병렬** 조회. 모두 완료되면 결과를 JSON 또는 텍스트로 출력
 5. 개별 provider/계정 에러는 errors 배열에 포함, 프로세스 자체는 종료하지 않음
 
@@ -225,17 +242,17 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 2. `~/.config/quota/config.json`을 `config.ResolveAccounts()`(Claude) + `config.ResolveCodexAccounts()`(Codex)로 해석해 조회할 계정 목록 확정 (각 기본 `claude`/`codex` + 유효한 추가 계정). quota-cli와 동일한 규칙·순서를 공유한다. skip된 항목은 로그로만 기록.
 3. systray 아이콘 + 메뉴 구성 (Claude 계정별 그룹 + Codex 계정별 그룹)
 4. 즉시 1회 refresh 실행, 이후 활동 기반 간격으로 자동 refresh (활성/idle 주기는 `quota-bar.json`으로 설정 가능, 기본 3분/30분)
-5. **refresh = 각 Claude 계정 `claude.GetQuotaForConfigDir(timeout, configDir)` (기본 `configDir=""`) + 각 Codex 계정 `codex.GetQuotaForHome(timeout, home)` (기본 `home=""`)를 병렬 호출** (내부 패키지)
+5. **refresh = 각 Claude 계정 `claude.GetQuotaForConfigDir(timeout, configDir, maxAge)` (기본 `configDir=""`) + 각 Codex 계정 `codex.GetQuotaForHome(timeout, home, maxAge)` (기본 `home=""`)를 병렬 호출** (내부 패키지). maxAge는 활성/idle 중 더 짧은 refresh 주기의 절반이며 상한은 180초 — 공유 캐시(§공유 캐시)가 그보다 최근이면 재사용하고, 아니면 실측 후 캐시에 기록한다.
 6. 결과를 메뉴 항목에 표시
 
 **계정 목록 확정 시점 (중요)**: systray는 런타임에 메뉴 항목을 추가·제거할 수 없다. 따라서 계정 수와 메뉴 레이아웃은 **onReady 시작 시점의 config로 고정**된다. `config.json`을 편집해 계정을 추가/제거하면 **quota-bar를 재시작**해야 반영된다.
 
-**수동 업데이트 메뉴 ("Check for Updates…")**: 클릭 시 quota-cli의 `update`와 같은 비교·설치 흐름(`internal/update`)을 수행하고, 설치 성공 시 **설치된 바이너리를 `syscall.Exec`으로 자기 자리에서 재실행**한다(PID 유지 — launchd 추적 유지, pid 락은 `FD_CLOEXEC`라 새 이미지가 재획득).
-- **refresh 게이트는 exec 직전에만 획득한다**(최대 3분 대기) — 조회 중 exec하면 진행 중인 `claude`/`codex` 프로브 프로세스가 고아가 되기 때문이고, 확인·설치는 게이트가 필요 없다(설치는 파일 쓰기일 뿐). 성공 경로에서는 게이트를 반환하지 않는다(프로세스 이미지가 교체되므로).
-- **게이트를 쥔 동안 systray 호출을 하지 않는다.** systray의 모든 메뉴 조작은 Cocoa 메인 스레드 동기 디스패치(`waitUntilDone:YES`)라서 메뉴 닫힘과 경합하면 영구 블로킹될 수 있다(실사고 발생). 그래서 (1) 클릭 직후 첫 조작 전에 짧게 대기하고, (2) 모든 상태 전이는 **로그를 먼저 남긴 뒤** 화면에 그리며(wedge가 나도 침묵 불가), (3) 워치독이 10분 내 미완료 흐름을 로그로 알린다. 조작이 wedge되어도 게이트가 없으므로 refresh 루프는 계속 돈다.
+**수동 업데이트 메뉴 ("Check for Updates…")**: 클릭 시 quota-cli의 `update`와 같은 비교·설치 흐름(`internal/update`)을 수행하고, 설치 성공 시 새 바이너리로 프로세스를 넘긴다. launchd job이 설치 경로를 가리키면 종료해서 launchd가 재시작하게 하고, 그 외에는 새 프로세스를 spawn한 뒤 현재 프로세스가 종료한다. in-place `syscall.Exec`은 사용하지 않는다.
+- **refresh 게이트는 handover 직전에만 획득한다**(최대 3분 대기) — 조회 중 handover하면 진행 중인 `claude`/`codex` 프로브 프로세스가 종료 관리 범위 밖에 남을 수 있기 때문이고, 확인·설치는 게이트가 필요 없다(설치는 파일 쓰기일 뿐). 성공 경로에서는 게이트를 반환하지 않는다(프로세스가 종료되므로).
+- **게이트를 쥔 동안 systray 호출을 하지 않는다.** systray의 모든 메뉴 조작은 Cocoa 메인 스레드 동기 디스패치(`waitUntilDone:YES`)라서 메뉴 닫힘과 경합하면 재시작 전까지 블로킹될 수 있다. 그래서 (1) 클릭 직후 첫 조작 전에 짧게 대기하고, (2) 모든 상태 전이는 **로그를 먼저 남긴 뒤** 화면에 반영하며, (3) 워치독이 10분 내 미완료 흐름을 로그로 알린다. systray 조작이 블로킹되어도 게이트가 없으므로 refresh 루프는 계속 돈다.
 - **버튼과 상태는 분리된 표면이다**: 버튼 제목은 항상 "Check for Updates…"로 불변이며 클릭의 의미는 언제나 "지금 확인" 하나다. 진행 상태와 결과(최신임/실패)는 버튼 아래 별도 비활성 상태 행에 표시하고, 마지막 결과는 다음 확인 때까지 유지된다(첫 사용 전에는 상태 행 숨김). 흐름이 도는 동안 버튼은 비활성화된다 — 클릭이 조용히 무시되는 상태를 만들지 않는다. 실패는 로그에도 남긴다.
 - 수동 전용: 자동 체크·자동 설치는 없다.
-- 알려진 제약: go-install 경로가 아닌 바이너리(예: dev 체크아웃 빌드)를 Start at Login으로 등록한 경우, exec는 go-install 경로의 새 바이너리로 갈아타지만 launchd plist는 등록 시점의 옛 경로를 그대로 가리키므로 다음 launchd 재시작 때 옛 바이너리로 돌아갈 수 있다. `go install`로 설치한 표준 경로에서는 경로가 일치해 문제없다.
+- 알려진 제약: go-install 경로가 아닌 바이너리(예: dev 체크아웃 빌드)를 Start at Login으로 등록한 경우, 업데이트 직후에는 go-install 경로의 새 바이너리로 넘기지만 launchd plist는 등록 시점의 옛 경로를 그대로 가리키므로 다음 launchd 재시작 때 옛 바이너리로 돌아갈 수 있다. `go install`로 설치한 표준 경로에서는 경로가 일치해 문제없다.
 
 **메뉴바 표시**:
 - 아이콘 하나 + 선택된 항목들의 남은 % 표시. 상단 바 공간을 최소화한다.
@@ -340,13 +357,26 @@ Quit
 
 ---
 
+## 공유 캐시
+
+파일: `~/.config/quota/quota-cache.json` (구현: `internal/quotacache`)
+
+quota-cli·quota-bar·위임 실행이 공유하는, 계정별 **마지막 성공 조회의 파싱 전 raw 출력** 저장소. 각 소비자는 자기 신선도 기준에 맞는 값이 있으면 재사용한다.
+
+- **키 = 실제 조회된 경로**(계정 이름이 아님): Claude는 해석된 `CLAUDE_CONFIG_DIR`(기본 계정은 상속값 또는 `~/.claude`), Codex는 해석된 `CODEX_HOME`(기본 계정은 상속값 또는 `~/.codex`). 상속 환경이 다르면 다른 키가 되어, 한 환경의 기본 계정 값이 다른 환경 실행에 잘못 제공되지 않는다.
+- **파싱 전 raw만 저장한다.** 파싱된 결과는 `time.Time`/`int`/`[]map[string]any` 등 Go 타입을 담고 있어 JSON 왕복으로 깨진다(→ string/float64/[]any). 읽을 때 재파싱해 타입 손상을 피한다. 상대 리셋만 있는 provider 출력은 절대 변경 시각을 알 수 없으므로 신선도 기준으로만 제한된다.
+- **성공만 저장한다.** 조회 실패는 캐시하지 않아 일시적 실패가 굳지 않고 매번 재시도된다.
+- **데이터 변경 경계에서 무효화한다.** 저장 시 가장 이른 창 리셋 또는 사용 가능한 초기화권 만료 시각을 함께 기록하고, 그 시각이 지나면 신선도 기준 이내라도 히트를 거부한다. 상대 리셋만 있는 창은 절대 시각이 없어 신선도 기준만 적용된다.
+- **읽기**: 소비자가 자기 신선도 기준(cli/위임 60초, bar는 활성/idle 중 더 짧은 refresh 주기의 절반·상한 180초) 이내이고 데이터 변경 경계 전이면 재사용하고, miss이면 그 계정을 실측해 기록한다. 동시 miss는 각각 실측할 수 있으며 이후 조회부터 캐시를 공유한다.
+- **쓰기**: sidecar 파일 flock으로 직렬화한 read-modify-write + temp→rename 원자적 교체(파일 권한 0o600 — raw에 계정 사용 패턴이 담긴다). 일부 계정만 조회한 소비자가 다른 계정 항목을 덮어쓰지 않는다.
+
 ## Internal 패키지 사양
 
 ### internal/claude
 
 **함수**:
-- `GetQuota(timeout time.Duration) (map[string]any, error)` — 기본 계정 조회 (config-dir 미지정)
-- `GetQuotaForConfigDir(timeout time.Duration, configDir string) (map[string]any, error)` — 지정한 `CLAUDE_CONFIG_DIR` 계정 조회. `configDir`가 빈 문자열이면 `GetQuota`와 동일.
+- `GetQuota(timeout time.Duration) (map[string]any, error)` — 기본 계정 조회 (config-dir 미지정, 항상 실측 = maxAge 0)
+- `GetQuotaForConfigDir(timeout time.Duration, configDir string, maxAge time.Duration) (map[string]any, error)` — 지정한 `CLAUDE_CONFIG_DIR` 계정 조회. `configDir`가 빈 문자열이면 기본 계정. 공유 캐시(§공유 캐시)에 이 계정의 마지막 조회가 `maxAge` 이내로 있으면 그 raw를 재파싱해 반환하고, 실측 시 결과를 캐시에 기록한다. `maxAge`가 0 이하면 캐시 읽기를 건너뛰되 성공 시 갱신은 한다.
 - `WindowKeys() []string` — 슬롯을 미리 만들어야 하는 소비자(quota-bar)가 열거하는 **소비자 힌트**(표시 순서). 데이터의 상한이 아니다 — 모델별 행이 더 많으면 `parseUsage`는 `extra_4` 이상도 반환하고, 슬롯이 없는 소비자만 그것을 무시한다.
 
 - Claude CLI를 **headless(`-p`)로 1회 실행**해 quota 조회. 두 함수는 동일한 조회 로직을 공유하며 config-dir 주입 여부만 다르다.
@@ -357,7 +387,7 @@ Quit
    - 작업 디렉터리 = `~/.config/quota`. Claude CLI는 CWD를 프로젝트 루트로 보고 readdir하므로, 홈에서 실행하면 macOS TCC 보호 폴더(Downloads, Photos, Music, Movies)를 건드린다.
 2. 프로세스 환경 (`fetchEnv`):
    - `CLAUDECODE` 제거: 중첩 세션 감지 회피
-   - `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` 제거: 사용자 로그인 계정 quota를 읽도록 강제 (커스텀 엔드포인트/대체 토큰이 quota를 가로채지 않게)
+   - `ANTHROPIC_API_HOST` / `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` / `CLAUDE_API_KEY` / `CLAUDE_CODE_API_BASE_URL` / `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN` 제거: 사용자 로그인 계정 quota를 읽도록 강제 (커스텀 엔드포인트/대체 토큰이 quota를 가로채지 않게)
    - `CLAUDE_CONFIG_DIR`: config-dir 지정 시 **상속값을 제거하고 지정값을 넣는다**(같은 이름의 할당을 두 번 두지 않는다 — 어느 쪽이 이길지는 OS가 정하므로, 지면 다른 계정 키 아래에 자기 계정 값이 실린다). config-dir 미지정 시에는 상속값을 그대로 둔다 — 그것이 호출자의 기본 계정을 고르는 방식이다.
 3. timeout 초과 시 context로 프로세스를 종료하고 timeout 에러를 반환한다. 실행 실패는 stderr(없으면 stdout) 앞부분을 붙여 에러로 반환한다.
 4. stdout의 JSON 엔벨로프를 파싱(`usageText`)해 `result`(사람이 읽는 /usage 리포트)를 꺼낸다. `is_error: true`면 CLI가 준 메시지를 담아 에러로 실패한다 — 에러 엔벨로프에는 사용량 행이 없으므로 그대로 파싱하면 원인 대신 파싱 실패로 보인다.
@@ -382,11 +412,11 @@ Quit
 ### internal/codex
 
 **함수**:
-- `GetQuota(timeout time.Duration) (map[string]any, error)` — 기본 계정 조회 (CODEX_HOME 미주입)
-- `GetQuotaForHome(timeout time.Duration, codexHome string) (map[string]any, error)` — 지정한 `CODEX_HOME` 계정 조회. `codexHome`가 빈 문자열이면 `GetQuota`와 동일. `codexHome`는 이미 확장된 절대경로여야 하며, 호출자가 `config.ExpandTilde`로 확장해 넘긴다(Claude `GetQuotaForConfigDir`와 대칭).
+- `GetQuota(timeout time.Duration) (map[string]any, error)` — 기본 계정 조회 (CODEX_HOME 미주입, 항상 실측 = maxAge 0)
+- `GetQuotaForHome(timeout time.Duration, codexHome string, maxAge time.Duration) (map[string]any, error)` — 지정한 `CODEX_HOME` 계정 조회. `codexHome`가 빈 문자열이면 기본 계정. `codexHome`는 이미 확장된 절대경로여야 하며, 호출자가 `config.ExpandTilde`로 확장해 넘긴다(Claude `GetQuotaForConfigDir`와 대칭). 공유 캐시 동작은 `GetQuotaForConfigDir`와 동일하다.
 
 **동작**:
-1. `codex app-server` 프로세스를 시작 (stdin/stdout pipe). `codexHome`가 비어있지 않으면 `CODEX_HOME=<codexHome>`을 프로세스 환경 끝에 추가해 주입한다(마지막 값이 우선하므로 상속된 `CODEX_HOME`을 덮어씀). 빈 문자열이면 주입하지 않고 프로세스 환경을 그대로 상속한다.
+1. `codex app-server` 프로세스를 시작 (stdin/stdout pipe). `codexHome`가 비어있지 않으면 상속된 `CODEX_HOME`을 제거하고 `CODEX_HOME=<codexHome>`을 하나만 주입한다. 빈 문자열이면 상속된 `CODEX_HOME`을 유지한다. 두 경우 모두 로그인한 home 계정 대신 환경 override가 사용되지 않도록 `CODEX_ACCESS_TOKEN`/`CODEX_API_KEY`/`CODEX_AUTH`/`CODEX_AUTHAPI_BASE_URL`/`CODEX_URL`과 `OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_ORGANIZATION`/`OPENAI_PROJECT`를 제거한다.
 2. JSON-RPC 2.0 프로토콜:
    - Request #1: `initialize` (clientInfo 전달)
    - Request #2: `account/rateLimits/read`
@@ -428,7 +458,7 @@ Quit
 | `github.com/getlantern/systray` | macOS systray (quota-bar 전용) |
 
 시스템 의존성:
-- `claude` CLI: Claude Code CLI (PATH 또는 `~/.local/bin/claude`). `-p`로 `/usage`를 실행할 수 있어야 한다 — 2.1.214~2.1.220에서 확인.
+- `claude` CLI: Claude Code CLI (PATH 또는 `~/.local/bin/claude`). `-p`로 `/usage`를 실행할 수 있어야 한다 — 2.1.214~2.1.235에서 확인.
 - `codex` CLI: Codex CLI (PATH에 있어야 함)
 - `go`: 수동 업데이트(`quota-cli update`, quota-bar 업데이트 메뉴)에만 필요
 

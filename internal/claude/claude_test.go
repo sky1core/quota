@@ -5,7 +5,62 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sky1core/quota/internal/quotacache"
 )
+
+func TestGetQuotaForConfigDirUsesSharedCache(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", "")
+	configDir := t.TempDir()
+	quotacache.Put(claudeCacheKey(configDir), "Current session: 12% used\n", time.Now().Add(time.Hour))
+
+	result, err := GetQuotaForConfigDir(time.Second, configDir, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, ok := windowByKey(result, "session")
+	if !ok || session["left"] != 88 {
+		t.Fatalf("cached session = %v, want left 88", session)
+	}
+}
+
+func TestInvalidateCacheForConfigDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	configDir := t.TempDir()
+	quotacache.Put(claudeCacheKey(configDir), "Current session: 12% used\n", time.Now().Add(time.Hour))
+
+	InvalidateCacheForConfigDir(configDir)
+
+	if _, ok := quotacache.Get(claudeCacheKey(configDir), time.Minute); ok {
+		t.Fatal("invalidated Claude cache entry should miss")
+	}
+}
+
+func TestEarliestReset(t *testing.T) {
+	later := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	earlier := later.Add(-time.Hour)
+	result := map[string]any{"windows": []map[string]any{
+		{"key": "session", "resetsAt": later},
+		{"key": "weekly_all", "resetsAt": earlier},
+		{"key": "extra_1", "resetsIn": "1h"},
+	}}
+
+	if got := earliestReset(result); !got.Equal(earlier) {
+		t.Fatalf("earliestReset = %v, want %v", got, earlier)
+	}
+}
+
+func TestEarliestResetReturnsZeroWithoutAbsoluteReset(t *testing.T) {
+	result := map[string]any{"windows": []map[string]any{
+		{"key": "session", "resetsIn": "1h"},
+		{"key": "weekly_all"},
+	}}
+
+	if got := earliestReset(result); !got.IsZero() {
+		t.Fatalf("earliestReset = %v, want zero", got)
+	}
+}
 
 func TestToRelative_AlreadyRelative(t *testing.T) {
 	tests := []struct {
@@ -324,9 +379,9 @@ Current week (Sonnet only): 1% used · resets Mar 11 at 7pm (Asia/Seoul)`
 	}
 }
 
-// TestParseUsage_FullReport runs the parser over a full `claude -p "/usage"`
-// report (structure as of CLI 2.1.220), including the whole "What's
-// contributing" section. That section is the parser's main false-match hazard —
+// TestParseUsage_FullReport runs the parser over a full-shaped
+// `claude -p "/usage"` report, including the whole "What's contributing"
+// section. That section is the parser's main false-match hazard —
 // it is full of percentages, in every shape the report uses — so keeping it here
 // is what proves the row pattern separates quota rows from the rest.
 //
@@ -426,6 +481,22 @@ Peak context: 57% used`
 	}
 }
 
+func TestParseUsage_SessionUsageSummaryOnlyError(t *testing.T) {
+	input := `Total cost:            $0.0000
+Total duration (API):  0s
+Total duration (wall): 0s
+Total code changes:    0 lines added, 0 lines removed
+Usage:                 0 input, 0 output, 0 cache read, 0 cache write`
+
+	_, err := parseUsage(input)
+	if err == nil {
+		t.Fatal("session usage summary without quota rows must fail")
+	}
+	if !strings.Contains(err.Error(), "only session usage summary was returned") {
+		t.Fatalf("error = %q", err)
+	}
+}
+
 func TestParseUsage_MultipleExtras(t *testing.T) {
 	// The last row has no reset clause — a window Claude has not started yet.
 	// It must still be reported, just without resetsIn.
@@ -433,7 +504,7 @@ func TestParseUsage_MultipleExtras(t *testing.T) {
 Current session: 4% used · resets 12:09pm (Asia/Seoul)
 Current week (all models): 1% used · resets Aug 6 at 11:59am (Asia/Seoul)
 Current week (Fable): 2% used · resets Aug 6 at 11:59am (Asia/Seoul)
-Current week (Opus): 10% used`
+Current week (Model B): 10% used`
 	result, err := parseUsage(input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -446,8 +517,8 @@ Current week (Opus): 10% used`
 		t.Fatalf("extras len = %d, want 2", len(extras))
 	}
 	// Screen order preserved
-	if extras[0]["label"] != "Fable" || extras[1]["label"] != "Opus" {
-		t.Errorf("extras order = %v, %v; want Fable, Opus", extras[0]["label"], extras[1]["label"])
+	if extras[0]["label"] != "Fable" || extras[1]["label"] != "Model B" {
+		t.Errorf("extras order = %v, %v; want Fable, Model B", extras[0]["label"], extras[1]["label"])
 	}
 	if extras[1]["used"] != 10 {
 		t.Errorf("extras[1] used = %v, want 10", extras[1]["used"])
@@ -576,14 +647,23 @@ func TestFetchEnv_NoConfigDirKeepsInherited(t *testing.T) {
 // makes the CLI treat this as a nested session.
 func TestFetchEnv_ScrubsAccountOverrides(t *testing.T) {
 	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("ANTHROPIC_API_HOST", "https://example.invalid")
+	t.Setenv("ANTHROPIC_API_KEY", "secret")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "secret")
 	t.Setenv("ANTHROPIC_BASE_URL", "https://example.invalid")
+	t.Setenv("CLAUDE_API_KEY", "secret")
+	t.Setenv("CLAUDE_CODE_API_BASE_URL", "https://example.invalid")
+	t.Setenv("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "secret")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "secret")
 	t.Setenv("PATH_MARKER_FOR_TEST", "kept")
 
 	env := fetchEnv("")
 
 	for _, kv := range env {
-		for _, banned := range []string{"CLAUDECODE=", "ANTHROPIC_AUTH_TOKEN=", "ANTHROPIC_BASE_URL="} {
+		for _, banned := range []string{
+			"CLAUDECODE=", "ANTHROPIC_API_HOST=", "ANTHROPIC_API_KEY=", "ANTHROPIC_AUTH_TOKEN=", "ANTHROPIC_BASE_URL=",
+			"CLAUDE_API_KEY=", "CLAUDE_CODE_API_BASE_URL=", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN=", "CLAUDE_CODE_OAUTH_TOKEN=",
+		} {
 			if strings.HasPrefix(kv, banned) {
 				t.Errorf("%s must be scrubbed from the probe environment", strings.TrimSuffix(banned, "="))
 			}
@@ -667,9 +747,9 @@ func TestParseUsage_ExtraRowsNotCapped(t *testing.T) {
 Current session: 10% used
 Current week (all models): 20% used
 Current week (Fable): 30% used
-Current week (Opus): 40% used
-Current week (Sonnet): 50% used
-Current week (Haiku): 60% used
+Current week (Model B): 40% used
+Current week (Model C): 50% used
+Current week (Model D): 60% used
 `
 	result, err := parseUsage(input)
 	if err != nil {
@@ -680,7 +760,7 @@ Current week (Haiku): 60% used
 		t.Fatal("missing per-model rows")
 	}
 	// Four model rows — more than the consumer slot vocabulary (extraSlotVocab=3).
-	want := []string{"Fable", "Opus", "Sonnet", "Haiku"}
+	want := []string{"Fable", "Model B", "Model C", "Model D"}
 	if len(extras) != len(want) {
 		t.Fatalf("parser must not cap model rows: got %d, want %d (%v)", len(extras), len(want), extras)
 	}

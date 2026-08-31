@@ -5,7 +5,51 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sky1core/quota/internal/quotacache"
 )
+
+func TestGetQuotaForHomeUsesSharedCache(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", "")
+	codexHome := t.TempDir()
+	windowMins := 300
+	raw, err := json.Marshal(rateLimitsResponse{RateLimits: rateLimitSnapshot{
+		Primary: &rateLimitWindow{UsedPercent: 12, WindowDurationMins: &windowMins},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quotacache.Put(codexCacheKey(codexHome), string(raw), time.Now().Add(time.Hour))
+
+	result, err := GetQuotaForHome(time.Second, codexHome, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	windows := windowsOf(t, result)
+	if len(windows) != 1 || windows[0]["left"] != 88 {
+		t.Fatalf("cached windows = %v, want one window with left 88", windows)
+	}
+}
+
+func TestInvalidateCacheForHome(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	codexHome := t.TempDir()
+	windowMins := 300
+	raw, err := json.Marshal(rateLimitsResponse{RateLimits: rateLimitSnapshot{
+		Primary: &rateLimitWindow{UsedPercent: 12, WindowDurationMins: &windowMins},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quotacache.Put(codexCacheKey(codexHome), string(raw), time.Now().Add(time.Hour))
+
+	InvalidateCacheForHome(codexHome)
+
+	if _, ok := quotacache.Get(codexCacheKey(codexHome), time.Minute); ok {
+		t.Fatal("invalidated Codex cache entry should miss")
+	}
+}
 
 func TestWinToEntry_Nil(t *testing.T) {
 	if got := winToEntry(nil); got != nil {

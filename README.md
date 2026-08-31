@@ -6,7 +6,7 @@ Claude Code와 Codex CLI의 사용량(quota)을 조회하는 Go 도구.
 
 | 이름 | 설명 |
 |------|------|
-| `quota-cli` | CLI. JSON 또는 텍스트로 quota 출력 |
+| `quota-cli` | CLI. quota 출력 및 quota 기반 비대화형 Claude/Codex 실행 |
 | `quota-bar` | macOS 메뉴바 앱. 주기적으로 quota 갱신 표시 |
 
 ## 설치
@@ -23,9 +23,10 @@ go install github.com/sky1core/quota/cmd/quota-bar@latest
 
 ### 시스템 요구사항
 
+- `quota-cli` 지원 OS — macOS 또는 Linux. Windows는 지원하지 않는다.
 - `claude` CLI — Claude Code CLI (PATH 또는 `~/.local/bin/claude`).
   `claude -p "/usage"`로 사용량을 조회하므로 그 명령을 지원하는 버전이어야 한다 —
-  **2.1.214 이상에서 확인**했다. 더 낮은 버전에서 동작하는지는 확인하지 않았다.
+  **2.1.214~2.1.235에서 확인**했다. 더 낮은 버전에서 동작하는지는 확인하지 않았다.
   구버전이면 Claude quota 조회만 실패하고 Codex 쪽은 영향받지 않는다.
 - `codex` CLI — Codex CLI (PATH)
 
@@ -78,6 +79,7 @@ quota-cli account rm codex-2                   # 계정 제거
 - `key`는 `claude-<N>` 또는 `codex-<N>` 형식이어야 한다. 형식·중복은 `add`가 검증한다.
 - `dir`은 해당 계정의 config 디렉터리(Claude=`CLAUDE_CONFIG_DIR`, Codex=`CODEX_HOME`, `~` 확장 지원).
 - **Codex는 각 `CODEX_HOME`에 별도 로그인**해 두어야 한다(`CODEX_HOME=~/.codex-alt codex login`). 인증 파일 복사가 아니다. 같은 과금 계정을 여러 home에 로그인해도 되지만, 사용량 한도·초기화권은 서버측 계정 단위라 숫자는 동일하게 나온다.
+- **기본 계정은 실행 환경의 `CLAUDE_CONFIG_DIR`/`CODEX_HOME`을 그대로 따른다.** 그 변수가 설정된 셸(예: 에이전트 CLI 안)에서 `quota-cli`를 돌리면 기본 계정 행이 그 계정을 조회하므로, 같은 dir을 추가 계정으로도 등록해 두었다면 두 행에 같은 값이 나온다. 기본 계정을 고정해서 보려면 변수를 지우고 실행한다(`env -u CLAUDE_CONFIG_DIR quota-cli`).
 
 등록하면 `quota-cli`가 기본 계정과 추가 계정을 함께 조회해 각각 `claude`/`claude-2`, `codex`/`codex-2` … 로
 출력한다. 설정은 `~/.config/quota/config.json`에 저장되며, 직접 편집해도 된다:
@@ -88,6 +90,27 @@ quota-cli account rm codex-2                   # 계정 제거
   "codexAccounts":  [ { "key": "codex-2",  "home": "~/.codex-alt" } ]
 }
 ```
+
+#### quota 기반 프롬프트 실행
+
+```bash
+# 선택된 Claude 계정으로 `claude -p` 실행
+quota-cli exec-prompt --agent=claude --model fable "프롬프트"
+
+# 선택된 Codex 계정으로 `codex exec` 실행
+quota-cli exec-prompt --agent=codex --json "프롬프트"
+```
+
+등록된 같은 provider 계정들의 60초 공유 캐시를 우선 사용하고, 필요한 계정만 quota를 실측한다.
+적용되는 quota 창이 5% 미만인 계정은 후보에서 제외한다. 장기 quota를 짧은 quota보다 우선하며,
+남은 quota가 리셋까지 남은 시간에 비해 많은 계정을 먼저 쓴다.
+Claude에 `--model`을 지정해도 요청 모델값과 실제 추가 quota row label이 맞을 때만 그 row를 본다. 현재 Opus처럼 전용 row가
+없는 모델은 별도 quota를 가정하지 않고 `weekly_all`/`session`으로 비교한다. Fable처럼 해당 모델
+quota의 남은 비율을 읽을 수 있으면 그 계정에는 하한선을 적용한다. 살아남은 모든 후보가 남은 비율을
+읽을 수 있는 해당 모델 quota를 갖고 있을 때만 그 quota를 우선 비교하고, 일부 후보에만 있으면
+`weekly_all`/`session`으로 비교한다. 선택이 끝나면 나머지 인자와 stdin/stdout/stderr, 종료 상태는 각각 `claude -p`와 `codex exec`에 그대로 전달된다.
+Claude 후보는 적어도 `weekly_all` 또는 `session` quota를 갖고 있어야 한다.
+대화형 실행은 지원하지 않는다.
 
 ### quota-bar
 

@@ -1,10 +1,102 @@
 package main
 
 import (
+	"flag"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky1core/quota/internal/config"
 )
+
+func TestParseQueryArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantJSON    bool
+		wantTimeout time.Duration
+		wantErr     string
+		wantHelp    bool
+	}{
+		{name: "defaults", wantTimeout: 40 * time.Second},
+		{name: "flags", args: []string{"-json", "-timeout", "5"}, wantJSON: true, wantTimeout: 5 * time.Second},
+		{name: "unknown positional", args: []string{"bogus"}, wantErr: `unexpected argument: "bogus"`},
+		{name: "positional after flag", args: []string{"-json", "bogus"}, wantErr: `unexpected argument: "bogus"`},
+		{name: "unknown flag", args: []string{"--bogus"}, wantErr: "flag provided but not defined"},
+		{name: "help", args: []string{"-h"}, wantHelp: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseQueryArgs(tt.args)
+			if tt.wantHelp {
+				if err != flag.ErrHelp {
+					t.Fatalf("error = %v, want flag.ErrHelp", err)
+				}
+				return
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.jsonOut != tt.wantJSON || got.timeout != tt.wantTimeout {
+				t.Fatalf("options = %+v, want json=%v timeout=%v", got, tt.wantJSON, tt.wantTimeout)
+			}
+		})
+	}
+}
+
+func TestRunExecPromptWith(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		agent    string
+		wantArgs []string
+		wantCode int
+	}{
+		{name: "claude", args: []string{"--agent=claude", "--model", "fable", "prompt"}, agent: "claude", wantArgs: []string{"--model", "fable", "prompt"}, wantCode: 11},
+		{name: "codex", args: []string{"--agent=codex", "--json", "prompt"}, agent: "codex", wantArgs: []string{"--json", "prompt"}, wantCode: 12},
+		{name: "missing agent", wantCode: 2},
+		{name: "unknown agent", args: []string{"--agent=other", "prompt"}, wantCode: 2},
+		{name: "positional claude agent", args: []string{"claude", "prompt"}, wantCode: 2},
+		{name: "positional codex agent", args: []string{"codex", "prompt"}, wantCode: 2},
+		{name: "split agent selector", args: []string{"--agent", "claude", "prompt"}, wantCode: 2},
+		{name: "misplaced agent selector", args: []string{"--model", "fable", "--agent=claude", "prompt"}, wantCode: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := ""
+			var gotArgs []string
+			claudeRunner := func(args []string) int {
+				called = "claude"
+				gotArgs = args
+				return 11
+			}
+			codexRunner := func(args []string) int {
+				called = "codex"
+				gotArgs = args
+				return 12
+			}
+
+			if gotCode := runExecPromptWith(tt.args, claudeRunner, codexRunner); gotCode != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d", gotCode, tt.wantCode)
+			}
+			if called != tt.agent {
+				t.Fatalf("called agent = %q, want %q", called, tt.agent)
+			}
+			if !reflect.DeepEqual(gotArgs, tt.wantArgs) {
+				t.Fatalf("forwarded args = %#v, want %#v", gotArgs, tt.wantArgs)
+			}
+		})
+	}
+}
 
 func TestValidateNewAccount(t *testing.T) {
 	existing := []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "/a"}}

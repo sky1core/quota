@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -29,17 +30,86 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "account" {
 		os.Exit(runAccount(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "exec-prompt" {
+		os.Exit(runExecPrompt(os.Args[2:]))
+	}
 	runQuery()
 }
 
-func runQuery() {
-	var (
-		jsonOut  = flag.Bool("json", false, "Output JSON")
-		timeoutS = flag.Int("timeout", 40, "Timeout seconds")
-	)
-	flag.Parse()
+func printExecPromptUsage() {
+	fmt.Fprint(os.Stderr, `usage:
+  quota-cli exec-prompt --agent=claude [args...]
+  quota-cli exec-prompt --agent=codex  [args...]
+`)
+}
 
-	timeout := time.Duration(*timeoutS) * time.Second
+func runExecPrompt(args []string) int {
+	return runExecPromptWith(args, runClaudePrompt, runCodexPrompt)
+}
+
+func runExecPromptWith(args []string, claudeRunner, codexRunner func([]string) int) int {
+	if len(args) == 0 {
+		printExecPromptUsage()
+		return 2
+	}
+
+	switch args[0] {
+	case "--agent=claude":
+		return claudeRunner(args[1:])
+	case "--agent=codex":
+		return codexRunner(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "invalid exec-prompt agent selector: %q\n\n", args[0])
+		printExecPromptUsage()
+		return 2
+	}
+}
+
+// cliCacheMaxAge is how fresh a shared-cache entry must be for a CLI query to
+// reuse it instead of probing live. Short, because a terminal query wants
+// near-current numbers; the window still absorbs back-to-back runs.
+const cliCacheMaxAge = 60 * time.Second
+
+type queryOptions struct {
+	jsonOut bool
+	timeout time.Duration
+}
+
+func parseQueryArgs(args []string) (queryOptions, error) {
+	fs, jsonOut, timeoutS := newQueryFlagSet(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return queryOptions{}, err
+	}
+	if fs.NArg() > 0 {
+		return queryOptions{}, fmt.Errorf("unexpected argument: %q", fs.Arg(0))
+	}
+	return queryOptions{jsonOut: *jsonOut, timeout: time.Duration(*timeoutS) * time.Second}, nil
+}
+
+func newQueryFlagSet(output io.Writer) (*flag.FlagSet, *bool, *int) {
+	fs := flag.NewFlagSet("quota-cli", flag.ContinueOnError)
+	fs.SetOutput(output)
+	jsonOut := fs.Bool("json", false, "Output JSON")
+	timeoutS := fs.Int("timeout", 40, "Timeout seconds")
+	return fs, jsonOut, timeoutS
+}
+
+func printQueryUsage() {
+	fs, _, _ := newQueryFlagSet(os.Stderr)
+	fs.Usage()
+}
+
+func runQuery() {
+	opts, err := parseQueryArgs(os.Args[1:])
+	if err == flag.ErrHelp {
+		printQueryUsage()
+		return
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		printQueryUsage()
+		os.Exit(2)
+	}
 
 	out := map[string]any{}
 	var errs []any
@@ -71,7 +141,7 @@ func runQuery() {
 		wg.Add(1)
 		go func(a config.ResolvedAccount) {
 			defer wg.Done()
-			q, err := claude.GetQuotaForConfigDir(timeout, a.ConfigDir)
+			q, err := claude.GetQuotaForConfigDir(opts.timeout, a.ConfigDir, cliCacheMaxAge)
 			if err != nil {
 				addErr(a.Key, err.Error())
 				return
@@ -87,7 +157,7 @@ func runQuery() {
 		wg.Add(1)
 		go func(a config.ResolvedCodexAccount) {
 			defer wg.Done()
-			kq, err := codex.GetQuotaForHome(timeout, a.Home)
+			kq, err := codex.GetQuotaForHome(opts.timeout, a.Home, cliCacheMaxAge)
 			if err != nil {
 				addErr(a.Key, err.Error())
 				return
@@ -105,7 +175,7 @@ func runQuery() {
 	}
 	out["errors"] = errs
 
-	if *jsonOut {
+	if opts.jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(out); err != nil {

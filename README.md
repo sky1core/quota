@@ -6,7 +6,7 @@ Claude Code와 Codex CLI의 사용량(quota)을 조회하는 Go 도구.
 
 | 이름 | 설명 |
 |------|------|
-| `quota-cli` | CLI. quota 출력, quota 기반 비대화형 Claude/Codex 실행, 세션 로그 검색 |
+| `quota-cli` | CLI. quota 출력, quota 기반 비대화형 Claude/Codex 실행/추천, 세션 로그 검색 |
 | `quota-bar` | macOS 메뉴바 앱. 주기적으로 quota 갱신 표시 |
 
 ## 설치
@@ -120,6 +120,21 @@ quota의 남은 비율을 읽을 수 있으면 그 계정에는 하한선을 적
 `weekly_all`/`session`으로 비교한다. 선택이 끝나면 나머지 인자와 stdin/stdout/stderr, 종료 상태는 각각 `claude -p`와 `codex exec`에 그대로 전달된다.
 Claude 후보는 적어도 `weekly_all` 또는 `session` quota를 갖고 있어야 한다.
 대화형 실행은 지원하지 않는다.
+
+#### quota 기반 agent 선택
+
+```bash
+quota-cli select-agent
+quota-cli select-agent --agent=claude --model=fable
+quota-cli select-agent --json
+```
+
+등록된 Claude/Codex 계정 전체를 60초 공유 캐시 기준으로 비교해 어느 provider/account를 쓸지
+선택한다. 실제 프롬프트는 실행하지 않고, 선택된 계정의 실행 prefix(`claude -p` 또는 `codex exec`),
+추가 계정에 필요한 환경 변수, 현재 셸에서 제거해야 할 override 환경 변수 이름을 출력한다.
+`exec-prompt`와 같은 `minLeftPct` 설정을 적용한다.
+기본 통합 모드는 모델별 Claude row를 보지 않으며, 모델별 row는 `--agent=claude --model=...`에서만
+적용한다.
 
 #### 세션 로그 검색
 

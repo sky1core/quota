@@ -172,12 +172,15 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 - 로컬 빌드에서 실행하면 항상 최신 릴리스로 교체된다: 로컬 빌드의 버전은 릴리스 태그와 일치하지 않는 형태(`v0.9.0+dirty`, 커밋 해시, `dev` 등)라 비교가 불일치한다 — 의도된 동작이며, 최신 태그보다 앞선 dev 빌드라면 사실상 다운그레이드가 되지만 `업데이트: X → Y` 출력에 그대로 드러난다.
 - 요구사항: PATH에 `go` 필요. 제약: 방금 push한 태그는 proxy 캐시로 몇 분 늦게 보일 수 있다.
 
-**서브커맨드 (비대화형 프롬프트 실행)**:
+**서브커맨드 (비대화형 프롬프트 실행/agent 선택)**:
 | 명령 | 실행 대상 |
 |------|-----------|
 | `quota-cli exec-prompt --agent=claude [args...]` | 선택된 Claude 계정으로 `claude -p [args...]` |
 | `quota-cli exec-prompt --agent=codex [args...]` | 선택된 Codex 계정으로 `codex exec [args...]` |
+| `quota-cli select-agent [--agent=all\|claude\|codex] [--json]` | 선택된 provider/account와 실행 prefix 출력 |
+| `quota-cli select-agent --agent=claude --model=<model>` | Claude 모델 row를 반영한 Claude 계정 선택 |
 
+**`exec-prompt` 동작**:
 - `--agent`는 필수이며 `claude`/`codex`만 허용한다. 그 뒤 `args`는 순서와 값을 바꾸지 않고 고정 접두(`claude -p`/`codex exec`) 뒤에 전달한다. stdin/stdout/stderr와 최종 종료 상태도 원본 CLI가 직접 담당하며, quota-cli는 선택 결과나 중간 데이터를 출력 스트림에 섞지 않는다.
 - 선택할 provider의 등록 계정만 60초 캐시 기준으로 병렬 조회한다. 조회 실패 계정과 현재 적용되는 quota 창이 계정별 `minLeftPct` 미만인 계정은 후보에서 제외하며, 후보가 없으면 원본 CLI를 실행하지 않고 실패한다.
 - 장기 창을 최우선, 짧은 창을 다음 순서로 비교한다. 비교값은 `남은 % - minLeftPct`이며, 양쪽 모두 리셋 시각을 알면 `비교값 / 리셋까지 남은 분`이 큰 쪽을 우선해, 같은 비교값이면 먼저 리셋되는 계정을 먼저 소비한다. 리셋 시각을 모르는 쪽이 있으면 비교값으로 비교한다. 모든 비교값이 같으면 config 순서가 빠른 계정을 선택한다.
@@ -185,6 +188,13 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 - Claude는 기본적으로 `weekly_all` 다음 `session` 순서로 비교한다. Claude 후보는 적어도 `weekly_all` 또는 `session` 창을 갖고 있어야 한다. `--model`/`-m`이 지정돼도 요청 모델값과 실제 추가 quota row label이 맞을 때만 그 row를 본다. Opus처럼 전용 row가 없는 모델은 별도 quota를 가정하지 않고 `weekly_all`, `session`으로 비교한다. Fable처럼 해당 모델 창의 남은 비율을 읽을 수 있으면 그 계정에는 해당 모델 창의 계정별 `minLeftPct` 하한선을 적용한다. 살아남은 모든 후보가 남은 비율을 읽을 수 있는 해당 모델 창을 갖고 있을 때만 해당 모델 창을 우선 비교하고, 일부 후보에만 있으면 `weekly_all`, `session`으로 비교한다.
 - 선택된 추가 Claude 계정은 `CLAUDE_CONFIG_DIR`, 추가 Codex 계정은 `CODEX_HOME`으로 실행한다. 기본 계정은 상속된 해당 변수를 유지한다. 조회한 로그인 계정과 실행 계정이 달라지지 않도록 Claude는 `ANTHROPIC_*`/`CLAUDE_*`의 인증·엔드포인트 override와 `CLAUDECODE`를, Codex는 `CODEX_*`/`OPENAI_*`의 인증·엔드포인트 override를 제거한다.
 - 대화형 Claude/Codex 실행은 지원하지 않는다.
+
+**`select-agent` 동작**:
+- 사용자의 프롬프트를 실행하지 않는다. stdout에는 선택된 provider/account, 실행 prefix, 추가 계정에 필요한 환경 변수, 현재 셸에서 제거해야 할 override 환경 변수 이름, 후보별 quota 창 요약을 출력한다.
+- 기본 `--agent=all`은 Claude/Codex configured 계정을 모두 비교한다. `--agent=claude` 또는 `--agent=codex`는 해당 provider 안에서만 선택한다.
+- quota 조회는 `exec-prompt`와 같이 60초 공유 캐시를 우선 사용한다. `execPrompt.accountSettings.<key>.minLeftPct`도 동일하게 적용한다.
+- 통합 모드에서는 provider 공통 장기/단기 창만 비교하고 Claude 모델별 extra row는 보지 않는다. `--model`은 `--agent=claude`에서만 허용한다.
+- 후보가 없으면 후보별 실패/제외 이유를 출력한 뒤 non-zero로 종료한다. JSON 모드는 같은 정보를 `selected`, `candidates`, `error`, `generated`로 출력하며 후보별 실행 정보는 `command`, `setEnv`, `unsetEnv`에 둔다.
 
 **서브커맨드 (세션 로그 조회)**:
 | 명령 | 설명 |
@@ -201,7 +211,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 - 토큰 소모를 제한하기 위해 `search` 기본값은 `limit=20`, `max-chars=220`이고, `show` 기본값은 `tail=40`, `max-chars=880`이다. `max-chars=0`은 해당 truncation을 끈다.
 - `show`의 `session-ref`는 configured 로그 root 아래 파일의 정확한 path, basename, 또는 path 부분 문자열로 해석한다. 여러 파일이 맞으면 후보를 출력하고 실패한다.
 
-- 첫 인자가 `account`/`update`/`exec-prompt`/`session-log`이면 해당 서브커맨드로 동작한다. 그 외 조회 모드는 `quota-cli [-json] [-timeout N]` 형태만 허용하며, 알 수 없는 positional 인자가 남으면 실행하지 않고 usage와 함께 실패한다.
+- 첫 인자가 `account`/`update`/`exec-prompt`/`select-agent`/`session-log`이면 해당 서브커맨드로 동작한다. 그 외 조회 모드는 `quota-cli [-json] [-timeout N]` 형태만 허용하며, 알 수 없는 positional 인자가 남으면 실행하지 않고 usage와 함께 실패한다.
 - 검증 규칙은 조회 시 `config.json`을 읽는 규칙과 동일하다(같은 형식/중복 규칙). Claude는 `^claude-\d+$`, Codex는 `^codex-\d+$`.
 
 **동작**:
@@ -250,7 +260,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 - `codexAccounts` (optional): 기본 계정 외에 추가로 조회할 Codex 계정 목록. `claudeAccounts`와 **대칭 구조**다.
   - `key` (string, 필수): 출력 top-level 키. **`codex-<정수>` 형식이어야 한다**(정규식 `^codex-\d+$`, 예: `codex-2`). 기본 계정 `codex` 및 다른 항목과 중복 불가.
   - `home` (string, 필수): 해당 계정의 `CODEX_HOME` 디렉터리. `~`는 홈으로 확장된다. 서로 다른 계정은 서로 다른 `home`을 가리켜야 한다. 각 home에는 **동일/다른 계정을 별도 로그인**해 두어야 한다(인증 파일 복사가 아니라 `CODEX_HOME=<home> codex login`).
-- `execPrompt.accountSettings` (optional): `exec-prompt` 전용 계정별 설정. 키는 `claude`, `claude-<정수>`, `codex`, `codex-<정수>`만 허용한다. 현재 필드는 `minLeftPct`뿐이며 없으면 5, 값은 0 이상 100 이하의 숫자여야 한다. 이 설정은 조회 출력과 quota-bar 표시에 영향을 주지 않는다.
+- `execPrompt.accountSettings` (optional): 프롬프트 실행/agent 선택용 계정별 설정. `exec-prompt`와 `select-agent`가 사용한다. 키는 `claude`, `claude-<정수>`, `codex`, `codex-<정수>`만 허용한다. 현재 필드는 `minLeftPct`뿐이며 없으면 5, 값은 0 이상 100 이하의 숫자여야 한다. 이 설정은 조회 출력과 quota-bar 표시에 영향을 주지 않는다.
 - 파일이 없거나 목록이 비면 각 기본 계정만 조회한다(기존 동작).
 - 다음 항목은 건너뛰고 `errors`에 기록한다: 빈 `key`/`dir`, 형식 위반, 중복 `key`, 중복 `dir`. (중복 `configDir`/`home`은 같은 계정을 두 번 조회하는 설정 오류이므로 금지.)
 

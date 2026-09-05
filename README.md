@@ -6,7 +6,7 @@ Claude Code와 Codex CLI의 사용량(quota)을 조회하는 Go 도구.
 
 | 이름 | 설명 |
 |------|------|
-| `quota-cli` | CLI. quota 출력, quota 기반 비대화형 Claude/Codex 실행/추천, 세션 로그 검색 |
+| `quota-cli` | CLI. quota 출력, quota 기반 비대화형 Claude/Codex 실행/추천, 세션 로그 검색, agent hook 정책 관리 |
 | `quota-bar` | macOS 메뉴바 앱. 주기적으로 quota 갱신 표시 |
 
 ## 설치
@@ -148,6 +148,45 @@ quota-cli session-log show <session-ref> --tail 40
 텍스트만 포함하며, tool call/result 원문은 `--include-tools`를 지정한 경우에만 포함한다.
 `search`는 기본 20개 결과와 220자 snippet만 출력하고, `show`는 기본 최근 40개 메시지와 메시지당
 880자까지만 출력한다. `--json`으로 구조화 출력도 가능하다.
+
+#### Agent hook 정책 관리
+
+```bash
+quota-cli agent hooks init --preset=github-history-guard
+quota-cli agent hooks plan
+quota-cli agent hooks apply
+quota-cli agent hooks verify
+quota-cli agent hooks doctor
+```
+
+`agent hooks`는 Claude Code와 Codex CLI의 실행 전 hook이 함께 호출할 단일 정책을 관리한다.
+정책 파일은 기본적으로 `~/.config/quota/agent-hooks.d/*.json`에 저장된다. 사용자는 정책을 한 번만
+작성하고, `quota-cli`가 Claude/Codex hook 설정으로 렌더링한다.
+
+기본 preset `github-history-guard`는 PR/Issue 생성·수정 같은 GitHub 협업 메타데이터 작업은 허용하고,
+`git push`, `git send-pack`, `git pull`, `git merge`, `git rebase`, `git commit --amend`, `git reset --hard`,
+`git filter-branch`, `git hook run`, `git for-each-repo`, `git update-ref`, `git replace`, `git reflog expire`, 강제 branch reset, branch
+delete/move/copy, tag force/delete, `gh pr merge`, `gh pr update-branch`, `gh pr checkout/co --force`, `gh repo sync`, `gh release create`,
+`gh release delete`, raw `gh api`처럼 코드 이력이나 ref 상태를 바꾸는 명령은 차단한다. 보호 명령을 숨길 수 있는
+`git config alias.*`/`include.*`, shell `alias`/`source`/`.`/`trap`/`xargs`,
+`gh alias set/import/delete`, `gh extension exec`, 알 수 없는 `git`/`gh` alias·extension dispatch도 차단한다.
+`gh stack link <number> <number>`만 허용하고 다른 `gh stack ...` 형태는 차단한다.
+
+`plan`은 설치될 hook 위치와 명령을 보여주고 파일을 수정하지 않는다. `plan`/`doctor`/`apply`는
+`--runtime=claude|codex|all`, `--binary <quota-cli-path>`를 받을 수 있다. `apply`는 현재 사용자 계정의
+Claude/Codex hook 설정 파일을 백업한 뒤 managed hook을 설치한다. 적용 전에 enabled 정책이 최소 1개 있어야
+하며, `--policy-dir`를 지정하면 hook 명령도 같은 정책 디렉터리를 사용한다. `--binary`와 `--policy-dir`의
+상대 경로는 설치 시 절대 경로로 고정된다. `verify`는 정책에 내장된
+positive/negative 케이스를 evaluator로 검사하고, `doctor`는 Claude/Codex 양쪽 hook 설정에 evaluator가
+설치되어 있는지 확인한다. 정적으로 볼 수 없는 shell interpreter stdin/script/startup 파일 실행과
+interactive/login shell startup 실행은 차단한다. 각 agent가 새 hook 설정을 신뢰·재로드해야 실제 실행 전 차단이 적용된다.
+
+hook이 호출하는 내부 명령은 다음 형태다:
+
+```bash
+quota-cli agent hooks eval --runtime=claude
+quota-cli agent hooks eval --runtime=codex
+```
 
 ### quota-bar
 

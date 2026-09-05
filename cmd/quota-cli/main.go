@@ -39,6 +39,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "session-log" {
 		os.Exit(runSessionLog(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "agent" {
+		os.Exit(runAgent(os.Args[2:]))
+	}
 	runQuery()
 }
 

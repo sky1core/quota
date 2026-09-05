@@ -7,7 +7,7 @@ Go로 작성된 Claude Code와 Codex CLI의 사용량(quota) 조회 도구.
 
 | 바이너리 | 설명 |
 |----------|------|
-| `quota-cli` | quota 조회 및 비대화형 Claude/Codex 실행 위임 |
+| `quota-cli` | quota 조회, 비대화형 Claude/Codex 실행 위임, agent hook 정책 관리 |
 | `quota-bar` | macOS 메뉴바(systray) 앱. 주기적으로 quota 갱신하여 표시 |
 
 - 둘은 **독립적인 프로그램**이다. 서로를 호출하지 않는다.
@@ -25,6 +25,7 @@ github.com/sky1core/quota
 ├── internal/
 │   ├── claude/claude.go     # Claude Code quota 조회
 │   ├── codex/codex.go       # Codex CLI quota 조회
+│   ├── agenthooks/          # Claude/Codex 공통 agent hook 정책 평가
 │   ├── quotacache/          # 계정별 조회 결과 공유 캐시
 │   ├── render/render.go     # 텍스트 출력 포맷터
 │   └── ui/icon.go           # systray 아이콘 (22x22 PNG)
@@ -180,6 +181,17 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 | `quota-cli select-agent [--agent=all\|claude\|codex] [--json]` | 선택된 provider/account와 실행 prefix 출력 |
 | `quota-cli select-agent --agent=claude --model=<model>` | Claude 모델 row를 반영한 Claude 계정 선택 |
 
+**서브커맨드 (`agent hooks`) — Claude/Codex agent hook 정책 관리**:
+| 명령 | 설명 |
+|------|------|
+| `quota-cli agent hooks init --preset=github-history-guard [--force]` | 기본 정책 파일을 `~/.config/quota/agent-hooks.d/` 아래에 생성 |
+| `quota-cli agent hooks list [--json]` | 정책 파일 목록과 rule/test 개수 출력 |
+| `quota-cli agent hooks plan [--runtime=all\|claude\|codex] [--binary <path>] [--json]` | Claude/Codex hook 설치 위치와 evaluator 명령 출력, 파일은 수정하지 않음 |
+| `quota-cli agent hooks apply [--runtime=all\|claude\|codex] [--binary <path>]` | 현재 사용자 계정의 Claude/Codex hook 설정 파일을 백업 후 evaluator hook 설치 |
+| `quota-cli agent hooks verify [--json]` | 정책 파일 검증과 내장 positive/negative test 실행 |
+| `quota-cli agent hooks doctor [--runtime=all\|claude\|codex] [--binary <path>] [--json]` | Claude/Codex 양쪽 hook 설정에 evaluator hook이 설치되어 있는지 확인 |
+| `quota-cli agent hooks eval [--runtime=claude\|codex] [--command <shell-command>]` | hook에서 호출되는 내부 evaluator. 차단 시 exit code 2 |
+
 **`exec-prompt` 동작**:
 - `--agent`는 필수이며 `claude`/`codex`만 허용한다. 그 뒤 `args`는 순서와 값을 바꾸지 않고 고정 접두(`claude -p`/`codex exec`) 뒤에 전달한다. stdin/stdout/stderr와 최종 종료 상태도 원본 CLI가 직접 담당하며, quota-cli는 선택 결과나 중간 데이터를 출력 스트림에 섞지 않는다.
 - 선택할 provider의 등록 계정만 60초 캐시 기준으로 병렬 조회한다. 조회 실패 계정과 현재 적용되는 quota 창이 계정별 `minLeftPct` 미만인 계정은 후보에서 제외하며, 후보가 없으면 원본 CLI를 실행하지 않고 실패한다.
@@ -195,6 +207,15 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 - quota 조회는 `exec-prompt`와 같이 60초 공유 캐시를 우선 사용한다. `execPrompt.accountSettings.<key>.minLeftPct`도 동일하게 적용한다.
 - 통합 모드에서는 provider 공통 장기/단기 창만 비교하고 Claude 모델별 extra row는 보지 않는다. `--model`은 `--agent=claude`에서만 허용한다.
 - 후보가 없으면 후보별 실패/제외 이유를 출력한 뒤 non-zero로 종료한다. JSON 모드는 같은 정보를 `selected`, `candidates`, `error`, `generated`로 출력하며 후보별 실행 정보는 `command`, `setEnv`, `unsetEnv`에 둔다.
+
+**`agent hooks` 동작**:
+- 정책 파일은 기본적으로 `~/.config/quota/agent-hooks.d/*.json`에서 읽는다. 모든 `agent hooks` 하위 명령은 `--policy-dir <dir>`로 다른 정책 디렉터리를 지정할 수 있다.
+- `init --preset=github-history-guard`는 PR/Issue 생성·수정 같은 GitHub 협업 메타데이터 작업은 허용하면서 `git push`, `git send-pack`, `git pull`, `git merge`, `git rebase`, `git commit --amend`, `git reset --hard`, `git filter-branch`, `git hook run`, `git for-each-repo`, `git update-ref`, `git replace`, `git reflog expire`, 강제 branch reset, branch delete/move/copy, tag force/delete, `git config alias.*`/`include.*`, shell `alias`/`source`/`.`/`trap`/`xargs`, `gh pr merge`, `gh pr update-branch`, `gh pr checkout/co --force`, `gh repo edit --visibility`, `gh repo sync`, `gh release create/delete`, raw `gh api`, `gh alias set/import/delete`, `gh extension exec`, 알 수 없는 `git`/`gh` alias·extension dispatch, 허용 형식 밖의 `gh stack ...`를 차단하는 기본 정책을 생성한다. 기존 정책 파일이 있으면 `--force` 없이는 덮어쓰지 않는다.
+- `apply`는 enabled 정책이 최소 1개 없으면 hook 설정을 쓰지 않는다. 설정 파일이 이미 있으면 `<path>.bak.<timestamp>` 백업을 만든 뒤, 기존 managed evaluator hook만 교체하고 다른 hook은 보존한다. managed 여부는 evaluator 호출이 실제 실행 명령(command position)이고 apply가 설치하는 `--runtime=` 인자를 포함할 때만 인정하므로, 인자에 evaluator argv 문자열이 들어있을 뿐인 다른 hook은 교체하지 않는다. `--policy-dir`를 지정한 경우 설치되는 evaluator 명령도 같은 디렉터리를 인자로 받으며, `--binary`와 `--policy-dir`의 상대 경로는 적용 시점의 절대 경로로 고정한다.
+- Claude 쪽 설치 대상은 `CLAUDE_CONFIG_DIR/settings.json` 또는 기본 `~/.claude/settings.json`의 `hooks.PreToolUse`/`matcher=Bash`다. Codex 쪽 설치 대상은 `CODEX_HOME/hooks.json` 또는 기본 `~/.codex/hooks.json`의 `hooks.PreToolUse`/`matcher=Bash`다.
+- `eval`은 hook event의 `tool_input.command` 또는 `tool_input.cmd`를 읽고, `--command`가 있으면 그 문자열을 직접 평가한다. 허용이면 exit code 0, 차단이면 exit code 2와 차단 사유를 반환한다. 정책 파일 로드 오류나 enabled 정책 부재도 hook 경로에서는 차단 실패로 처리하지 않도록 exit code 2를 반환한다.
+- shell command 평가는 `mvdan.cc/sh/v3/syntax` parser로 수행한다. `git`/`gh`의 대표 global option, `env`/`sudo`/`command`/`builtin`/`exec` wrapper, `env -S`와 결합 short option 형태, `eval`, `sh -c` 계열 nested script는 정규화해 본다. shell interpreter에 정적으로 볼 수 있는 `-c` script가 없거나 startup env/file 또는 interactive/login startup으로 숨은 script가 실행될 수 있으면 stdin/script 파일 내용을 증명할 수 없으므로 차단한다. 동적 명령어 이름(`$cmd ...`)이나 동적 wrapper script(`sh -c "$cmd"`), 보호 대상 명령의 동적 인자(`git "$subcommand" ...`)는 정적으로 안전성을 증명할 수 없으므로 차단한다. quote·escape 없이 glob metacharacter(`*`, `?`, `[`)를 포함하거나 실제 brace expansion을 일으키는 `{...}`(최상위에 `,` 또는 `..` sequence가 있는 그룹)을 포함한 단어도 셸이 확장하므로 정적 리터럴로 보지 않고 같은 규칙으로 처리한다. 반면 `HEAD@{u}`·`stash@{0}`처럼 확장을 일으키지 않는 `{...}`와 backslash로 escape된 metacharacter는 리터럴로 취급한다. `&&`/`;`/`|` 등으로 이어진 복합 명령은 모든 statement를 평가해 하나라도 차단이면 전체를 차단하고, 모든 statement가 허용일 때만 허용한다.
+- `verify`는 정책 파일 스키마와 enabled 정책의 내장 테스트를 실행한다. glob 패턴은 `path.Match` 문법으로 로드/검증 시점에 확인하며, 잘못된 패턴은 정책/규칙을 명시한 오류로 load·verify를 실패시킨다. `doctor`는 enabled 정책 존재와 Claude/Codex managed hook 존재 여부를 확인한다. agent 런타임의 hook 신뢰·재로드 상태는 각 런타임이 담당하므로, 설정 파일에 hook이 있어도 새 세션 또는 hook 관리 화면에서 재로드가 필요할 수 있다.
 
 **서브커맨드 (세션 로그 조회)**:
 | 명령 | 설명 |
@@ -490,6 +511,7 @@ quota-cli·quota-bar·위임 실행이 공유하는, 계정별 **마지막 성�
 | 패키지 | 용도 |
 |--------|------|
 | `github.com/getlantern/systray` | macOS systray (quota-bar 전용) |
+| `mvdan.cc/sh/v3` | agent hook command parser |
 
 시스템 의존성:
 - `claude` CLI: Claude Code CLI (PATH 또는 `~/.local/bin/claude`). `-p`로 `/usage`를 실행할 수 있어야 한다 — 2.1.214~2.1.235에서 확인.

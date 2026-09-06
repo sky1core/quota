@@ -26,6 +26,7 @@ github.com/sky1core/quota
 │   ├── claude/claude.go     # Claude Code quota 조회
 │   ├── codex/codex.go       # Codex CLI quota 조회
 │   ├── agenthooks/          # Claude/Codex 공통 agent hook 정책 평가
+│   ├── agentoverlay/        # spec 파일 기반 Claude/Codex 지침 오버레이 설치·검증
 │   ├── quotacache/          # 계정별 조회 결과 공유 캐시
 │   ├── render/render.go     # 텍스트 출력 포맷터
 │   └── ui/icon.go           # systray 아이콘 (22x22 PNG)
@@ -192,6 +193,15 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 | `quota-cli agent hooks doctor [--runtime=all\|claude\|codex] [--binary <path>] [--json]` | Claude/Codex 양쪽 hook 설정에 evaluator hook이 설치되어 있는지 확인 |
 | `quota-cli agent hooks eval [--runtime=claude\|codex] [--command <shell-command>]` | hook에서 호출되는 내부 evaluator. 차단 시 exit code 2 |
 
+**서브커맨드 (`agent overlay`) — spec 파일 기반 Claude/Codex 지침 오버레이 설치·검증**: 공통 플래그는 `--spec <file>`, `--json`이고 종료 코드는 usage 2, 실패 1, 성공 0이다.
+| 명령 | 설명 |
+|------|------|
+| `quota-cli agent overlay init [--spec <file>] [--force]` | placeholder 명령이 든 spec 템플릿 생성. 기존 파일은 `--force` 없이 거부 |
+| `quota-cli agent overlay plan [--spec <file>] [--runtime=all\|claude\|codex]` | 대상 파일 경로와 이벤트별 상태(Claude present/missing/stale, Codex present/missing/mismatch) 출력, 파일은 수정하지 않음 |
+| `quota-cli agent overlay apply [--spec <file>] [--runtime=all\|claude\|codex]` | Claude settings에 spec 엔트리를 백업 후 설치. Codex apply는 미지원 |
+| `quota-cli agent overlay doctor [--spec <file>] [--runtime=all\|claude\|codex]` | runtime별 상태(installed/degraded/unconfigured/error) 보고. verify 명령은 실행하지 않으며 최고 상태는 installed |
+| `quota-cli agent overlay verify [--spec <file>]` | 엔트리 검사 + 런타임별 verify 명령 실행. 모든 configured 런타임이 enforced일 때만 exit 0 |
+
 **`exec-prompt` 동작**:
 - `--agent`는 필수이며 `claude`/`codex`만 허용한다. 그 뒤 `args`는 순서와 값을 바꾸지 않고 고정 접두(`claude -p`/`codex exec`) 뒤에 전달한다. stdin/stdout/stderr와 최종 종료 상태도 원본 CLI가 직접 담당하며, quota-cli는 선택 결과나 중간 데이터를 출력 스트림에 섞지 않는다.
 - 선택할 provider의 등록 계정만 60초 캐시 기준으로 병렬 조회한다. 조회 실패 계정과 현재 적용되는 quota 창이 계정별 `minLeftPct` 미만인 계정은 후보에서 제외하며, 후보가 없으면 원본 CLI를 실행하지 않고 실패한다.
@@ -216,6 +226,15 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 - `eval`은 hook event의 `tool_input.command` 또는 `tool_input.cmd`를 읽고, `--command`가 있으면 그 문자열을 직접 평가한다. 허용이면 exit code 0, 차단이면 exit code 2와 차단 사유를 반환한다. 정책 파일 로드 오류나 enabled 정책 부재도 hook 경로에서는 차단 실패로 처리하지 않도록 exit code 2를 반환한다.
 - shell command 평가는 `mvdan.cc/sh/v3/syntax` parser로 수행한다. `git`/`gh`의 대표 global option, `env`/`sudo`/`command`/`builtin`/`exec` wrapper, `env -S`와 결합 short option 형태, `eval`, `sh -c` 계열 nested script는 정규화해 본다. shell interpreter에 정적으로 볼 수 있는 `-c` script가 없거나 startup env/file 또는 interactive/login startup으로 숨은 script가 실행될 수 있으면 stdin/script 파일 내용을 증명할 수 없으므로 차단한다. 동적 명령어 이름(`$cmd ...`)이나 동적 wrapper script(`sh -c "$cmd"`), 보호 대상 명령의 동적 인자(`git "$subcommand" ...`)는 정적으로 안전성을 증명할 수 없으므로 차단한다. quote·escape 없이 glob metacharacter(`*`, `?`, `[`)를 포함하거나 실제 brace expansion을 일으키는 `{...}`(최상위에 `,` 또는 `..` sequence가 있는 그룹)을 포함한 단어도 셸이 확장하므로 정적 리터럴로 보지 않고 같은 규칙으로 처리한다. 반면 `HEAD@{u}`·`stash@{0}`처럼 확장을 일으키지 않는 `{...}`와 backslash로 escape된 metacharacter는 리터럴로 취급한다. `&&`/`;`/`|` 등으로 이어진 복합 명령은 모든 statement를 평가해 하나라도 차단이면 전체를 차단하고, 모든 statement가 허용일 때만 허용한다.
 - `verify`는 정책 파일 스키마와 enabled 정책의 내장 테스트를 실행한다. glob 패턴은 `path.Match` 문법으로 로드/검증 시점에 확인하며, 잘못된 패턴은 정책/규칙을 명시한 오류로 load·verify를 실패시킨다. `doctor`는 enabled 정책 존재와 Claude/Codex managed hook 존재 여부를 확인한다. agent 런타임의 hook 신뢰·재로드 상태는 각 런타임이 담당하므로, 설정 파일에 hook이 있어도 새 세션 또는 hook 관리 화면에서 재로드가 필요할 수 있다.
+
+**`agent overlay` 동작**:
+- spec 파일은 기본적으로 `~/.config/quota/agent-overlay.json`에서 읽고, 모든 서브커맨드가 `--spec <file>`로 재정의한다. spec 파일이 없으면 `init`을 제외한 모든 명령이 명시적 오류로 실패한다 — 값이 비었을 때 다른 계층에서 끌어오는 암시적 기본값/fallback은 없다.
+- spec 스키마는 `version`(정수, 1만 지원. 다른 값은 명시 오류), 선택적 `claude`/`codex`/`verify` 섹션으로 구성된다. spec JSON은 알 수 없는 필드를 허용하지 않는다(중첩 구조 포함) — 오타 키는 조용히 무시하지 않고 명시 오류로 load를 실패시킨다. `claude.hooks`와 `codex.hooks`는 `이벤트이름 → [ { command } ]` 맵이며, hook 이벤트 이름은 고정 목록이 아니라 spec에 적힌 키를 그대로 쓴다. `claude.replaces`는 이전 spec 버전이 설치했던 command 문자열 배열로, apply가 교체 대상으로 삼는다 — 비교는 문자열 완전 일치(`==`)뿐이고 접두·패턴·argv[0] 해석은 없다. `codex` 엔트리는 `additionalContextLimit`를 선택적으로 가질 수 있고, `codex.settings`는 top-level 설정 키/값 맵이다. `verify`는 런타임별로 분리되어 `verify.claude.command`/`verify.codex.command`가 각각 argv 배열이다(전역 `verify.command`는 없다). 모든 hook `command`는 비어 있으면 검증 오류이고, 각 `verify.<runtime>.command`는 비어 있지 않은 argv[0]을 요구한다. 생략된 runtime 섹션은 `doctor`에서 `unconfigured`로 보고한다.
+- `init`은 위 스키마를 그대로 담은 placeholder spec을 생성한다. 모든 command는 `/path/to/overlay-hook` 형태의 placeholder이며 사용자가 실제 명령으로 교체한다. 기존 파일은 `--force` 없이는 덮어쓰지 않고, 쓰기는 임시 파일 + rename으로 원자적이다.
+- `plan`은 대상 파일을 수정하지 않고 이벤트별 상태만 보여준다. Claude 엔트리 상태는 spec command와 문자열 완전 일치하면 `present`, 같은 이벤트에 `claude.replaces`의 command가 있으면 `stale`(apply가 교체 예정), 그 외는 `missing`이다. Codex는 설정값 일치 여부와 hook command 문자열 존재 여부(엔트리의 `type`이 `command`일 때만 존재로 인정)를 본다. 대상 파일 파싱 실패는 오류로 exit 1.
+- `apply`의 Claude 대상은 `CLAUDE_CONFIG_DIR/settings.json` 또는 기본 `~/.claude/settings.json`의 `hooks.<event>`다. 기존 파일은 충돌 없는 `<path>.bak.<timestamp>` 백업(같은 초 반복 적용에도 기존 백업을 덮지 않음) 후 임시 파일 + rename으로 원자적으로 쓴다. managed 판정은 같은 이벤트에서 command 문자열이 (a) spec command와 완전 일치하거나 (b) `claude.replaces`에 든 command와 완전 일치하는 엔트리뿐이며, argv[0] 추론은 없다. 이 command 일치는 엔트리 형태와 무관하게 적용되므로(plain string, `type`이 다른 object 포함) managed command의 잘못된 변형도 남기지 않고 spec 버전으로 교체하며, 그 외 엔트리는 제거·수정하지 않는다. Codex apply는 지원하지 않는다 — `config.toml`은 주석·trust hash가 있는 대형 TOML이라 자동 재작성이 위험하므로 `codex apply is not supported in v1; use plan/doctor`로 명시 실패(exit 1)하고, `--runtime=all`에서는 Claude만 적용한 뒤 같은 안내를 남긴다.
+- `doctor`는 verify 명령을 실행하지 않으며 최고 상태가 `installed`다(`enforced`는 verify만 판정). runtime별로 `installed`(모든 엔트리 존재 + Codex 설정값 일치 + 실효 저해 요인 없음), `degraded`(엔트리 누락/불일치 또는 실효 저해 요인 — 원인 문자열, 누락 엔트리, Codex의 경우 추가할 TOML 스니펫과 값 불일치 replace 안내 출력), `unconfigured`(spec에 해당 runtime 없음), `error`(대상 파일 파싱 불가)로 보고한다. Claude는 settings 루트의 `disableAllHooks`가 true면 엔트리가 모두 있어도 `installed`가 아니라 원인을 표시한 `degraded`다. Claude 엔트리는 이 설치기가 쓰는 정확한 형태 — 비어 있지 않은 `matcher`가 없는 그룹 안의 `type=="command"` object — 일 때만 존재로 인정하고, string 형태·다른 `type`·matcher로 실행 범위가 제한된 그룹의 같은 command는 stale이다(apply가 정규화). Codex 검사는 `CODEX_HOME/config.toml` 또는 기본 `~/.codex/config.toml`을 TOML 파서로 **읽기 전용** 파싱해 top-level 설정값 일치와 `[[hooks.<event>]]` 그룹 아래 `[[hooks.<event>.hooks]]`의 command·`type=="command"`(및 spec에 있으면 `additionalContextLimit`) 일치를 확인한다. 누락 키/hook은 "add to ..." 스니펫으로, 값 불일치 키는 중복 키로 TOML을 깨지 않도록 스니펫에 넣지 않고 "replace the value of `<key>` with `<value>`" 별도 안내로 출력한다. degraded/error가 있으면 exit 1.
+- `verify`는 doctor와 동일한 엔트리 검사에 더해 런타임별 verify 명령을 실행한다. 엔트리가 설치된(installed) configured 런타임의 `verify.<runtime>.command`를 현재 작업 디렉터리에서 실행해 exit 0이면 그 런타임을 `enforced`로 올린다. verify 명령이 없으면 `degraded`("live verification not configured"), 명령이 non-zero면 `degraded`(원인에 exit code)다. `unconfigured` 런타임은 건너뛴다. 모든 configured 런타임이 `enforced`일 때만 exit 0이고, 하나라도 degraded/error면 exit 1.
 
 **서브커맨드 (세션 로그 조회)**:
 | 명령 | 설명 |

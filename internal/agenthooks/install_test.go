@@ -26,7 +26,7 @@ func TestApplyClaudeHookPreservesOtherHooks(t *testing.T) {
 	if !plan.Present {
 		t.Fatal("plan should be present after apply")
 	}
-	root, err := readJSONObject(path)
+	root, err := ReadJSONObject(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestApplyClaudeHookPreservesUnrelatedArgvHook(t *testing.T) {
 	if _, err := Apply("claude", "/bin/quota-cli", policyDir); err != nil {
 		t.Fatal(err)
 	}
-	root, err := readJSONObject(path)
+	root, err := ReadJSONObject(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestApplyClaudeHookPreservesUnrelatedCommandPositionHook(t *testing.T) {
 	if _, err := Apply("claude", "/bin/quota-cli", policyDir); err != nil {
 		t.Fatal(err)
 	}
-	root, err := readJSONObject(path)
+	root, err := ReadJSONObject(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestApplyReplacesOnlyEvaluatorExecutables(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				root, err := readJSONObject(path)
+				root, err := ReadJSONObject(path)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -185,7 +185,7 @@ func TestApplyClaudeHookRemovesStaleCustomBinaryHook(t *testing.T) {
 	if _, err := Apply("claude", "./qc", policyDir); err != nil {
 		t.Fatal(err)
 	}
-	root, err := readJSONObject(path)
+	root, err := ReadJSONObject(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestApplyClaudeHookPreservesManagedStatusMessage(t *testing.T) {
 	if _, err := Apply("claude", "/bin/quota-cli", policyDir); err != nil {
 		t.Fatal(err)
 	}
-	root, err := readJSONObject(path)
+	root, err := ReadJSONObject(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func TestApplyCodexHookCreatesHooksJSON(t *testing.T) {
 	if plan.Path != filepath.Join(home, ".codex", "hooks.json") {
 		t.Fatalf("path = %q", plan.Path)
 	}
-	root, err := readJSONObject(plan.Path)
+	root, err := ReadJSONObject(plan.Path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,6 +380,43 @@ func TestDetectRejectsDuplicatePolicyDir(t *testing.T) {
 
 	if Detect("claude", "/bin/quota-cli", policyDir).Present {
 		t.Fatal("hook with duplicate policy dir should not match")
+	}
+}
+
+// P2-4: two writes in the same process (same wall-clock second) must produce two
+// distinct backups, and the very first original content must survive in one of
+// them rather than being overwritten by the second backup.
+func TestWriteJSONObjectWithBackupNeverOverwrites(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(path, []byte(`{"v":"original"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteJSONObjectWithBackup(path, map[string]any{"v": "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteJSONObjectWithBackup(path, map[string]any{"v": "second"}); err != nil {
+		t.Fatal(err)
+	}
+	matches, err := filepath.Glob(path + ".bak.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 2 {
+		t.Fatalf("backups = %v, want 2", matches)
+	}
+	foundOriginal := false
+	for _, m := range matches {
+		b, err := os.ReadFile(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), "original") {
+			foundOriginal = true
+		}
+	}
+	if !foundOriginal {
+		t.Fatalf("original content was overwritten; backups = %v", matches)
 	}
 }
 

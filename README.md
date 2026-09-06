@@ -188,6 +188,67 @@ quota-cli agent hooks eval --runtime=claude
 quota-cli agent hooks eval --runtime=codex
 ```
 
+#### Agent overlay 지침 오버레이
+
+```bash
+quota-cli agent overlay init
+quota-cli agent overlay plan
+quota-cli agent overlay apply
+quota-cli agent overlay doctor
+quota-cli agent overlay verify
+```
+
+`agent overlay`는 Claude/Codex CLI에 지침 오버레이용 hook·설정 엔트리를 설치·검증한다.
+quota-cli는 범용 기계만 제공하고, 구체 명령 문자열은 사용자의 로컬 spec 파일에 있다.
+spec은 기본적으로 `~/.config/quota/agent-overlay.json`에서 읽으며 모든 서브커맨드가
+`--spec <file>`로 재정의한다. spec 파일이 없으면 `init`을 제외한 모든 명령이 명시적으로
+실패한다(암시적 기본값 없음). spec 스키마는 `version`(1 고정), 선택적 `claude`/`codex`/`verify`
+섹션이며, hook 이벤트 이름은 고정 목록이 아니라 spec에 적힌 키를 그대로 쓴다.
+
+```json
+{
+  "version": 1,
+  "claude": {
+    "hooks": { "SessionStart": [ { "command": "/path/to/overlay-hook session" } ] },
+    "replaces": [ "/path/to/overlay-hook session --previous" ]
+  },
+  "codex": {
+    "settings": { "project_doc_max_bytes": 32768 },
+    "hooks": { "SessionStart": [ { "command": "/path/to/overlay-hook codex-session", "additionalContextLimit": 0 } ] }
+  },
+  "verify": {
+    "claude": { "command": ["/path/to/overlay-hook", "verify", "claude"] },
+    "codex": { "command": ["/path/to/overlay-hook", "verify", "codex"] }
+  }
+}
+```
+
+spec JSON은 알 수 없는 필드를 허용하지 않아 오타 키는 조용히 무시하지 않고 load를 실패시킨다.
+`claude.replaces`는 이전 버전이 설치했던 command 문자열 배열로, 비교는 문자열 완전 일치(`==`)뿐이며
+접두·패턴·argv[0] 해석은 없다.
+
+- `init [--force]`: placeholder 명령이 든 spec 템플릿 생성. 기존 파일은 `--force` 없이 거부.
+- `plan [--runtime=all|claude|codex]`: 대상 파일 경로와 이벤트별 상태(Claude present/missing/stale,
+  Codex present/missing/mismatch)를 보여주며 파일을 수정하지 않는다.
+- `apply [--runtime=...]`: Claude는 `CLAUDE_CONFIG_DIR/settings.json`(없으면 `~/.claude/settings.json`)의
+  `hooks.<event>`에 spec 엔트리를 충돌 없는 백업 후 원자적으로 설치한다. 같은 이벤트에서 command
+  문자열이 spec command와 완전 일치하거나 `claude.replaces`에 든 command와 완전 일치하는 managed
+  엔트리만 spec 버전으로 교체하고, 그 외 엔트리는 보존한다(argv[0] 추론 없음). **Codex apply는 지원하지
+  않는다**(`config.toml`은 주석·trust hash가 있는 대형 TOML이라 자동 재작성이 위험) — Codex는
+  `plan`/`doctor`로 확인하고 손으로 반영한다.
+- `doctor [--runtime=...]`: verify 명령을 실행하지 않으며 최고 상태는 `installed`다. runtime별 상태를
+  `installed`(모든 엔트리 존재 + Codex 설정값 일치 + 실효 저해 요인 없음),
+  `degraded`(누락/불일치 또는 실효 저해 요인 — 원인, 누락 엔트리, Codex는 추가할 TOML 스니펫과 값
+  불일치 replace 안내 출력), `unconfigured`(spec에 해당 runtime 없음), `error`(대상 파일 파싱 불가)로
+  보고한다. Claude settings 루트의 `disableAllHooks: true`는 엔트리가 있어도 `degraded`다. Codex는
+  `CODEX_HOME/config.toml`(없으면 `~/.codex/config.toml`)을 **읽기 전용**으로 파싱하며, hook 엔트리는
+  `type=="command"`일 때만 존재로 인정한다. 누락 키/hook은 add 스니펫으로, 값 불일치 키는
+  "replace the value of ..." 별도 안내로 출력한다. degraded/error가 있으면 exit 1.
+- `verify [--spec <file>]`: doctor 엔트리 검사에 더해 엔트리가 설치된 configured 런타임의
+  `verify.<runtime>.command`를 현재 작업 디렉터리에서 실행한다. exit 0이면 그 런타임을 `enforced`로
+  올리고, 명령이 없으면 "live verification not configured", 명령이 실패하면 exit code를 원인으로 한
+  `degraded`다. 모든 configured 런타임이 `enforced`일 때만 exit 0이다.
+
 ### quota-bar
 
 ```bash

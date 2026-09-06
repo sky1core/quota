@@ -104,7 +104,7 @@ func Apply(runtime, binary, policyDir string) (HookPlan, error) {
 
 func applyClaude(binary, policyDir string) (HookPlan, error) {
 	plan := HookPlan{Runtime: "claude", Path: ClaudeSettingsPath(), Command: HookCommand("claude", binary, policyDir), Binary: hookBinary(binary), PolicyDir: policyDir}
-	root, err := readJSONObject(plan.Path)
+	root, err := ReadJSONObject(plan.Path)
 	if err != nil {
 		return plan, err
 	}
@@ -121,7 +121,7 @@ func applyClaude(binary, policyDir string) (HookPlan, error) {
 	})
 	hooks["PreToolUse"] = pre
 	root["hooks"] = hooks
-	if err := writeJSONObjectWithBackup(plan.Path, root); err != nil {
+	if err := WriteJSONObjectWithBackup(plan.Path, root); err != nil {
 		return plan, err
 	}
 	plan.Present = true
@@ -130,7 +130,7 @@ func applyClaude(binary, policyDir string) (HookPlan, error) {
 
 func applyCodex(binary, policyDir string) (HookPlan, error) {
 	plan := HookPlan{Runtime: "codex", Path: CodexHooksPath(), Command: HookCommand("codex", binary, policyDir), Binary: hookBinary(binary), PolicyDir: policyDir}
-	root, err := readJSONObject(plan.Path)
+	root, err := ReadJSONObject(plan.Path)
 	if err != nil {
 		return plan, err
 	}
@@ -151,7 +151,7 @@ func applyCodex(binary, policyDir string) (HookPlan, error) {
 	})
 	hooks["PreToolUse"] = pre
 	root["hooks"] = hooks
-	if err := writeJSONObjectWithBackup(plan.Path, root); err != nil {
+	if err := WriteJSONObjectWithBackup(plan.Path, root); err != nil {
 		return plan, err
 	}
 	plan.Present = true
@@ -168,7 +168,7 @@ func Detect(runtime, binary, policyDir string) HookPlan {
 	default:
 		return HookPlan{Runtime: runtime}
 	}
-	root, err := readJSONObject(plan.Path)
+	root, err := ReadJSONObject(plan.Path)
 	if err != nil {
 		return plan
 	}
@@ -179,7 +179,9 @@ func Detect(runtime, binary, policyDir string) HookPlan {
 	return plan
 }
 
-func readJSONObject(path string) (map[string]any, error) {
+// ReadJSONObject reads path as a JSON object, returning an empty object for a
+// missing or empty file. It is shared with the agentoverlay package.
+func ReadJSONObject(path string) (map[string]any, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -200,20 +202,19 @@ func readJSONObject(path string) (map[string]any, error) {
 	return root, nil
 }
 
-func writeJSONObjectWithBackup(path string, root map[string]any) error {
+// WriteJSONObjectWithBackup writes root to path atomically (temp file + rename),
+// first copying any existing file to a fresh path.bak.<timestamp> that never
+// overwrites an earlier backup, even for repeated writes within the same second.
+// It is shared with the agentoverlay package.
+func WriteJSONObjectWithBackup(path string, root map[string]any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	if _, err := os.Stat(path); err == nil {
-		backup := fmt.Sprintf("%s.bak.%s", path, time.Now().Format("20060102-150405"))
-		b, err := os.ReadFile(path)
-		if err != nil {
+	if b, err := os.ReadFile(path); err == nil {
+		if err := writeUniqueBackup(path, b); err != nil {
 			return err
 		}
-		if err := os.WriteFile(backup, b, 0o600); err != nil {
-			return err
-		}
-	} else if err != nil && !os.IsNotExist(err) {
+	} else if !os.IsNotExist(err) {
 		return err
 	}
 	b, err := json.MarshalIndent(root, "", "  ")
@@ -226,6 +227,29 @@ func writeJSONObjectWithBackup(path string, root map[string]any) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// writeUniqueBackup writes content to a fresh path.bak.<nanosecond-timestamp>,
+// creating the file with O_EXCL so a name collision (coarse clocks, repeated or
+// concurrent writes) can never overwrite an earlier backup; on collision it
+// retries with an increasing -N suffix.
+func writeUniqueBackup(path string, content []byte) error {
+	base := fmt.Sprintf("%s.bak.%s", path, time.Now().Format("20060102-150405.000000000"))
+	candidate := base
+	for i := 1; ; i++ {
+		f, err := os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			if _, err := f.Write(content); err != nil {
+				f.Close()
+				return err
+			}
+			return f.Close()
+		}
+		if !os.IsExist(err) {
+			return err
+		}
+		candidate = fmt.Sprintf("%s-%d", base, i)
+	}
 }
 
 func objectAt(root map[string]any, key string) map[string]any {

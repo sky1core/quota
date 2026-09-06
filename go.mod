@@ -3,6 +3,7 @@ module github.com/sky1core/quota
 go 1.25.11
 
 require (
+	github.com/BurntSushi/toml v1.5.0
 	github.com/getlantern/systray v1.2.2
 	mvdan.cc/sh/v3 v3.13.1
 )

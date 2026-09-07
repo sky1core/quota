@@ -1,16 +1,18 @@
 package agentoverlay
 
+import "strings"
+
 // Per-entry presence status.
 const (
 	StatusPresent  = "present"
 	StatusMissing  = "missing"
-	StatusStale    = "stale"    // Claude: a claude.replaces command is present and will be replaced
+	StatusStale    = "stale"    // Claude: a managed entry differs or a replaced command remains
 	StatusMismatch = "mismatch" // Codex: a setting value or hook differs from the spec
 )
 
 // Per-runtime doctor/verify state.
 const (
-	StateInstalled    = "installed" // config entries present with no impediment (doctor's highest state)
+	StateInstalled    = "installed" // supported entries match with no inspected blocker
 	StateEnforced     = "enforced"  // the runtime's verify command exited 0 (verify only)
 	StateDegraded     = "degraded"
 	StateUnconfigured = "unconfigured"
@@ -21,6 +23,7 @@ type EntryStatus struct {
 	Event   string `json:"event"`
 	Command string `json:"command"`
 	Status  string `json:"status"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 type SettingStatus struct {
@@ -34,6 +37,7 @@ type RuntimePlan struct {
 	Runtime    string          `json:"runtime"`
 	Path       string          `json:"path"`
 	Configured bool            `json:"configured"`
+	Reasons    []string        `json:"reasons,omitempty"`
 	Settings   []SettingStatus `json:"settings,omitempty"`
 	Entries    []EntryStatus   `json:"entries,omitempty"`
 	Error      string          `json:"error,omitempty"`
@@ -67,4 +71,35 @@ func hookGroups(v any) []any {
 		return groups
 	}
 	return []any{}
+}
+
+func doctorFromPlan(plan RuntimePlan) RuntimeDoctor {
+	doc := RuntimeDoctor{Runtime: plan.Runtime, Path: plan.Path, State: StateInstalled}
+	if !plan.Configured {
+		doc.State = StateUnconfigured
+		return doc
+	}
+	if plan.Error != "" {
+		doc.State = StateError
+		doc.Error = plan.Error
+		return doc
+	}
+	reasons := append([]string{}, plan.Reasons...)
+	for _, entry := range plan.Entries {
+		if entry.Status != StatusPresent {
+			doc.Missing = append(doc.Missing, entry)
+			reasons = append(reasons, entry.Event+": "+entry.Reason)
+		}
+	}
+	for _, setting := range plan.Settings {
+		if setting.Status != StatusPresent {
+			doc.Settings = append(doc.Settings, setting)
+			reasons = append(reasons, setting.Key+": "+setting.Status)
+		}
+	}
+	if len(reasons) > 0 {
+		doc.State = StateDegraded
+		doc.Reason = strings.Join(reasons, "; ")
+	}
+	return doc
 }

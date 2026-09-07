@@ -361,7 +361,7 @@ func TestAgentOverlayDoctorCodexValueMismatchReplaces(t *testing.T) {
 		t.Fatalf("doctor codex code = %d want 1 stdout=%s", code, stdout.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "replace the value of project_doc_max_bytes with 32768") {
+	if !strings.Contains(out, "replace the value of project_doc_max_bytes using") {
 		t.Fatalf("missing replace instruction: %q", out)
 	}
 	if strings.Contains(out, "add to ") {

@@ -78,6 +78,7 @@ func LoadSpec(path string) (*Spec, error) {
 	var spec Spec
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
+	dec.UseNumber()
 	if err := dec.Decode(&spec); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -100,9 +101,18 @@ func (s Spec) Validate() error {
 		if err := validateHooks("claude", s.Claude.Hooks); err != nil {
 			return err
 		}
+		managed := map[string]bool{}
+		for _, entries := range s.Claude.Hooks {
+			for _, e := range entries {
+				managed[e.Command] = true
+			}
+		}
 		for _, r := range s.Claude.Replaces {
 			if strings.TrimSpace(r) == "" {
 				return errors.New("claude.replaces has an empty command")
+			}
+			if managed[r] {
+				return fmt.Errorf("claude.replaces command %q is also a claude hook command", r)
 			}
 		}
 	}
@@ -110,10 +120,18 @@ func (s Spec) Validate() error {
 		if err := validateHooks("codex", s.Codex.Hooks); err != nil {
 			return err
 		}
-		for key := range s.Codex.Settings {
+		for key, value := range s.Codex.Settings {
+			if _, err := normalizeForTOML(value); err != nil {
+				return fmt.Errorf("codex.settings.%s: %w", key, err)
+			}
 			if strings.TrimSpace(key) == "" {
 				return errors.New("codex settings has an empty key")
 			}
+		}
+	}
+	if s.Codex != nil && len(s.Codex.Hooks) > 0 {
+		if _, exists := s.Codex.Settings["hooks"]; exists {
+			return errors.New("codex.settings.hooks conflicts with codex.hooks")
 		}
 	}
 	if s.Verify != nil {
@@ -142,7 +160,20 @@ func validateHooks(runtime string, hooks map[string][]HookEntry) error {
 		if strings.TrimSpace(event) == "" {
 			return fmt.Errorf("%s hooks has an empty event name", runtime)
 		}
+		seen := map[string]bool{}
 		for _, e := range entries {
+			if seen[e.Command] {
+				return fmt.Errorf("%s hook %q has a duplicate command", runtime, event)
+			}
+			seen[e.Command] = true
+			if e.AdditionalContextLimit != nil {
+				if runtime == "claude" {
+					return fmt.Errorf("claude hook %q does not support additionalContextLimit", event)
+				}
+				if *e.AdditionalContextLimit < 0 {
+					return fmt.Errorf("%s hook %q additionalContextLimit must be nonnegative", runtime, event)
+				}
+			}
 			if strings.TrimSpace(e.Command) == "" {
 				return fmt.Errorf("%s hook %q has an empty command", runtime, event)
 			}

@@ -1,7 +1,6 @@
 package agenthooks
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -103,58 +102,47 @@ func Apply(runtime, binary, policyDir string) (HookPlan, error) {
 }
 
 func applyClaude(binary, policyDir string) (HookPlan, error) {
-	plan := HookPlan{Runtime: "claude", Path: ClaudeSettingsPath(), Command: HookCommand("claude", binary, policyDir), Binary: hookBinary(binary), PolicyDir: policyDir}
-	root, err := ReadJSONObject(plan.Path)
-	if err != nil {
-		return plan, err
-	}
-	hooks := objectAt(root, "hooks")
-	pre := hookGroups(hooks["PreToolUse"])
-	pre = appendWithoutManagedHook(pre, plan.Command)
-	pre = append(pre, map[string]any{
-		"matcher": "Bash",
-		"hooks": []any{map[string]any{
-			"type":          "command",
-			"command":       plan.Command,
-			"statusMessage": hookStatusMessage,
-		}},
-	})
-	hooks["PreToolUse"] = pre
-	root["hooks"] = hooks
-	if err := WriteJSONObjectWithBackup(plan.Path, root); err != nil {
-		return plan, err
-	}
-	plan.Present = true
-	return plan, nil
+	return applyHook("claude", ClaudeSettingsPath(), binary, policyDir)
 }
 
 func applyCodex(binary, policyDir string) (HookPlan, error) {
-	plan := HookPlan{Runtime: "codex", Path: CodexHooksPath(), Command: HookCommand("codex", binary, policyDir), Binary: hookBinary(binary), PolicyDir: policyDir}
-	root, err := ReadJSONObject(plan.Path)
+	return applyHook("codex", CodexHooksPath(), binary, policyDir)
+}
+
+func applyHook(runtime, path, binary, policyDir string) (HookPlan, error) {
+	plan := HookPlan{Runtime: runtime, Path: path, Command: HookCommand(runtime, binary, policyDir), Binary: hookBinary(binary), PolicyDir: policyDir}
+	root, err := UpdateJSONObjectWithBackup(path, func(root map[string]any) error {
+		if v, exists := root["hooks"]; exists {
+			if _, ok := v.(map[string]any); !ok {
+				return fmt.Errorf("hooks must be an object")
+			}
+		}
+		if runtime == "codex" {
+			if _, exists := root["description"]; !exists {
+				root["description"] = "quota agent hook policy"
+			}
+		}
+		hooks := objectAt(root, "hooks")
+		if v, exists := hooks["PreToolUse"]; exists {
+			if _, ok := v.([]any); !ok {
+				return fmt.Errorf("hooks.PreToolUse must be an array")
+			}
+		}
+		pre := appendWithoutManagedHook(hookGroups(hooks["PreToolUse"]), plan.Command)
+		entry := map[string]any{"type": "command", "command": plan.Command, "statusMessage": hookStatusMessage}
+		if runtime == "codex" {
+			entry["timeout"] = 30
+		}
+		hooks["PreToolUse"] = append(pre, map[string]any{"matcher": "Bash", "hooks": []any{entry}})
+		return nil
+	})
 	if err != nil {
 		return plan, err
 	}
-	if _, ok := root["description"]; !ok {
-		root["description"] = "quota agent hook policy"
+	plan.Present = containsManagedHook(root, runtime, binary, policyDir)
+	if !plan.Present {
+		return plan, fmt.Errorf("saved hook did not pass installation inspection")
 	}
-	hooks := objectAt(root, "hooks")
-	pre := hookGroups(hooks["PreToolUse"])
-	pre = appendWithoutManagedHook(pre, plan.Command)
-	pre = append(pre, map[string]any{
-		"matcher": "Bash",
-		"hooks": []any{map[string]any{
-			"type":          "command",
-			"command":       plan.Command,
-			"timeout":       float64(30),
-			"statusMessage": hookStatusMessage,
-		}},
-	})
-	hooks["PreToolUse"] = pre
-	root["hooks"] = hooks
-	if err := WriteJSONObjectWithBackup(plan.Path, root); err != nil {
-		return plan, err
-	}
-	plan.Present = true
 	return plan, nil
 }
 
@@ -177,56 +165,6 @@ func Detect(runtime, binary, policyDir string) HookPlan {
 		plan.Binary = foundBinary
 	}
 	return plan
-}
-
-// ReadJSONObject reads path as a JSON object, returning an empty object for a
-// missing or empty file. It is shared with the agentoverlay package.
-func ReadJSONObject(path string) (map[string]any, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]any{}, nil
-		}
-		return nil, err
-	}
-	if len(strings.TrimSpace(string(b))) == 0 {
-		return map[string]any{}, nil
-	}
-	var root map[string]any
-	if err := json.Unmarshal(b, &root); err != nil {
-		return nil, err
-	}
-	if root == nil {
-		root = map[string]any{}
-	}
-	return root, nil
-}
-
-// WriteJSONObjectWithBackup writes root to path atomically (temp file + rename),
-// first copying any existing file to a fresh path.bak.<timestamp> that never
-// overwrites an earlier backup, even for repeated writes within the same second.
-// It is shared with the agentoverlay package.
-func WriteJSONObjectWithBackup(path string, root map[string]any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	if b, err := os.ReadFile(path); err == nil {
-		if err := writeUniqueBackup(path, b); err != nil {
-			return err
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	b, err := json.MarshalIndent(root, "", "  ")
-	if err != nil {
-		return err
-	}
-	b = append(b, '\n')
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
 }
 
 // writeUniqueBackup writes content to a fresh path.bak.<nanosecond-timestamp>,

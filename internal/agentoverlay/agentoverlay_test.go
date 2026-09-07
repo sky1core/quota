@@ -66,7 +66,7 @@ func commandsForEvent(root map[string]any, event string) []string {
 		groupMap, _ := group.(map[string]any)
 		hooks, _ := groupMap["hooks"].([]any)
 		for _, hook := range hooks {
-			if cmd, ok := hookCommandString(hook); ok {
+			if cmd, ok := hookAnyFormCommand(hook); ok {
 				out = append(out, cmd)
 			}
 		}
@@ -437,7 +437,7 @@ func TestDoctorCodexDetectsMismatchAndMissing(t *testing.T) {
 	if strings.Contains(doc.Snippet, "project_doc_max_bytes") {
 		t.Fatalf("mismatched setting key must not appear in add snippet:\n%s", doc.Snippet)
 	}
-	if !containsSubstr(doc.Replacements, "replace the value of project_doc_max_bytes with 32768") {
+	if !containsSubstr(doc.Replacements, "replace the value of project_doc_max_bytes using") {
 		t.Fatalf("replacements = %v, want value-replace instruction", doc.Replacements)
 	}
 }
@@ -459,7 +459,7 @@ func TestDoctorCodexRejectsNonCommandHookType(t *testing.T) {
 	if doc.State != StateDegraded {
 		t.Fatalf("state = %q, want degraded for non-command hook type", doc.State)
 	}
-	if len(doc.Missing) != 1 || doc.Missing[0].Status != StatusMissing {
+	if len(doc.Missing) != 1 || doc.Missing[0].Status != StatusMismatch {
 		t.Fatalf("missing = %+v, want the hook reported not present", doc.Missing)
 	}
 }
@@ -488,7 +488,7 @@ func TestDoctorCodexDetectsContextLimitMismatch(t *testing.T) {
 	if doc.Snippet != "" {
 		t.Fatalf("mismatched hook must not produce an add snippet:\n%s", doc.Snippet)
 	}
-	if !containsSubstr(doc.Replacements, "additionalContextLimit=0") {
+	if !containsSubstr(doc.Replacements, "additionalContextLimit = 0") {
 		t.Fatalf("replacements = %v, want hook replace instruction", doc.Replacements)
 	}
 }

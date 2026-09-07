@@ -386,16 +386,16 @@ func TestDetectRejectsDuplicatePolicyDir(t *testing.T) {
 // P2-4: two writes in the same process (same wall-clock second) must produce two
 // distinct backups, and the very first original content must survive in one of
 // them rather than being overwritten by the second backup.
-func TestWriteJSONObjectWithBackupNeverOverwrites(t *testing.T) {
+func TestUpdateJSONObjectWithBackupNeverOverwrites(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "settings.json")
 	if err := os.WriteFile(path, []byte(`{"v":"original"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteJSONObjectWithBackup(path, map[string]any{"v": "first"}); err != nil {
+	if _, err := UpdateJSONObjectWithBackup(path, func(root map[string]any) error { root["v"] = "first"; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteJSONObjectWithBackup(path, map[string]any{"v": "second"}); err != nil {
+	if _, err := UpdateJSONObjectWithBackup(path, func(root map[string]any) error { root["v"] = "second"; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	matches, err := filepath.Glob(path + ".bak.*")

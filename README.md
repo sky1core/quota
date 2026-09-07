@@ -235,19 +235,34 @@ spec JSON은 알 수 없는 필드를 허용하지 않아 오타 키는 조용�
   문자열이 spec command와 완전 일치하거나 `claude.replaces`에 든 command와 완전 일치하는 managed
   엔트리만 spec 버전으로 교체하고, 그 외 엔트리는 보존한다(argv[0] 추론 없음). **Codex apply는 지원하지
   않는다**(`config.toml`은 주석·trust hash가 있는 대형 TOML이라 자동 재작성이 위험) — Codex는
-  `plan`/`doctor`로 확인하고 손으로 반영한다.
+  `plan`/`doctor`로 확인하고 손으로 반영한다. 새 hook은 Codex의 `/hooks`에서 검토·신뢰해야
+  실행된다([hook 신뢰 절차](https://developers.openai.com/codex/hooks#review-and-trust-hooks)).
+  quota의 `doctor`는 Codex에 저장된 hook 신뢰 상태를 검사하지 않는다.
 - `doctor [--runtime=...]`: verify 명령을 실행하지 않으며 최고 상태는 `installed`다. runtime별 상태를
-  `installed`(모든 엔트리 존재 + Codex 설정값 일치 + 실효 저해 요인 없음),
+  `installed`(검사한 대상 파일의 관리 항목이 지원 형태와 일치하고 검사 대상인 명시적 방해 조건이 없음),
   `degraded`(누락/불일치 또는 실효 저해 요인 — 원인, 누락 엔트리, Codex는 추가할 TOML 스니펫과 값
   불일치 replace 안내 출력), `unconfigured`(spec에 해당 runtime 없음), `error`(대상 파일 파싱 불가)로
   보고한다. Claude settings 루트의 `disableAllHooks: true`는 엔트리가 있어도 `degraded`다. Codex는
   `CODEX_HOME/config.toml`(없으면 `~/.codex/config.toml`)을 **읽기 전용**으로 파싱하며, hook 엔트리는
   `type=="command"`일 때만 존재로 인정한다. 누락 키/hook은 add 스니펫으로, 값 불일치 키는
-  "replace the value of ..." 별도 안내로 출력한다. degraded/error가 있으면 exit 1.
+  교체용 별도 안내로 출력한다. degraded/error가 있으면 exit 1.
 - `verify [--spec <file>]`: doctor 엔트리 검사에 더해 엔트리가 설치된 configured 런타임의
   `verify.<runtime>.command`를 현재 작업 디렉터리에서 실행한다. exit 0이면 그 런타임을 `enforced`로
   올리고, 명령이 없으면 "live verification not configured", 명령이 실패하면 exit code를 원인으로 한
   `degraded`다. 모든 configured 런타임이 `enforced`일 때만 exit 0이다.
+
+설치·스니펫 생성·진단은 같은 기대 설정을 사용한다. command가 같아도 그룹 조건이나 실행 필드가
+다르면 정상으로 인정하지 않는다. 빈 matcher와 생략, 문자열 statusMessage만 동등한 표현으로
+허용하며, `if`·`args` 등 지원하지 않는 추가 필드는 원인과 함께 `degraded`로 보고한다.
+Codex의 `features.hooks = false`도 진단하며, apply는 전역 비활성화 설정을 임의로 변경하지 않는다.
+`installed`는 실제 실행 성공을 뜻하지 않고, `enforced`는 지정된 검증 명령이 확인한 범위만 보장한다.
+
+Claude overlay와 agent hooks의 JSON 설치는 경로별 잠금 안에서 최신 설정을 읽고 수정·백업·저장한 뒤
+다시 읽어 확인한다. 서로 다른 quota 프로세스의 동시 적용을 직렬화하며 외부 편집기는 이 보장 대상이
+아니다. 신규 파일 권한에는 umask를 적용하고 기존 권한은 보존한다. 반복 적용으로 값이 같으면
+파일이나 백업을 쓰지 않는다. JSON 숫자의 정밀도를 보존하며,
+Claude의 Codex 전용 필드, 음수 context limit, TOML 숫자 범위 초과, `replaces`와 현재 명령의 중복은
+입력 오류로 거부한다.
 
 ### quota-bar
 

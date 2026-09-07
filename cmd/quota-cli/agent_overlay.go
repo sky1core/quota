@@ -290,11 +290,17 @@ func printOverlayPlan(w io.Writer, plan agentoverlay.RuntimePlan) {
 		fmt.Fprintf(w, "  error: %s\n", plan.Error)
 		return
 	}
+	for _, reason := range plan.Reasons {
+		fmt.Fprintf(w, "  reason: %s\n", reason)
+	}
 	for _, s := range plan.Settings {
 		fmt.Fprintf(w, "  setting %s  %s\n", s.Key, s.Status)
 	}
 	for _, e := range plan.Entries {
 		fmt.Fprintf(w, "  %s %s  %s\n", e.Event, e.Command, e.Status)
+		if e.Reason != "" {
+			fmt.Fprintf(w, "    reason: %s\n", e.Reason)
+		}
 	}
 }
 
@@ -311,13 +317,16 @@ func printOverlayDoctor(w io.Writer, doc agentoverlay.RuntimeDoctor) {
 	}
 	for _, m := range doc.Missing {
 		fmt.Fprintf(w, "  %s %s  %s\n", m.Event, m.Command, m.Status)
+		if m.Reason != "" {
+			fmt.Fprintf(w, "    reason: %s\n", m.Reason)
+		}
 	}
 	if doc.Snippet != "" {
 		fmt.Fprintf(w, "  add to %s:\n", doc.Path)
 		printIndentedBlock(w, doc.Snippet)
 	}
 	for _, r := range doc.Replacements {
-		fmt.Fprintf(w, "  %s\n", r)
+		printIndentedBlock(w, r)
 	}
 	if doc.Verify != nil {
 		fmt.Fprintf(w, "  live verification: exit %d\n", doc.Verify.ExitCode)

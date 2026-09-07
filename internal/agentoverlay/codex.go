@@ -44,27 +44,29 @@ func inspectCodex(spec *Spec, root map[string]any) RuntimePlan {
 		plan.Error = err.Error()
 		return plan
 	}
-	if features, exists := root["features"]; exists {
-		if obj, ok := features.(map[string]any); ok {
-			canonical, hasCanonical := obj["hooks"]
-			alias, hasAlias := obj["codex_hooks"]
-			if hasCanonical && hasAlias && !settingsValueEqual(canonical, alias) {
-				plan.Reasons = append(plan.Reasons, "conflicting features.hooks and features.codex_hooks are unsupported")
-			}
-			keys := []string{"hooks"}
-			if _, exists := obj["hooks"]; !exists {
-				keys = []string{"codex_hooks"}
-			}
-			for _, key := range keys {
-				for _, reason := range blockingBool(obj, key, false) {
-					plan.Reasons = append(plan.Reasons, "features."+reason)
+	if hasCodexHookEntries(expected) {
+		if features, exists := root["features"]; exists {
+			if obj, ok := features.(map[string]any); ok {
+				canonical, hasCanonical := obj["hooks"]
+				alias, hasAlias := obj["codex_hooks"]
+				if hasCanonical && hasAlias && !settingsValueEqual(canonical, alias) {
+					plan.Reasons = append(plan.Reasons, "conflicting features.hooks and features.codex_hooks are unsupported")
 				}
+				keys := []string{"hooks"}
+				if _, exists := obj["hooks"]; !exists {
+					keys = []string{"codex_hooks"}
+				}
+				for _, key := range keys {
+					for _, reason := range blockingBool(obj, key, false) {
+						plan.Reasons = append(plan.Reasons, "features."+reason)
+					}
+				}
+			} else {
+				plan.Reasons = append(plan.Reasons, "features must be a table")
 			}
-		} else {
-			plan.Reasons = append(plan.Reasons, "features must be a table")
 		}
+		plan.Reasons = append(plan.Reasons, blockingBool(root, "allow_managed_hooks_only", true)...)
 	}
-	plan.Reasons = append(plan.Reasons, blockingBool(root, "allow_managed_hooks_only", true)...)
 	for _, key := range sortedKeys(spec.Codex.Settings) {
 		plan.Settings = append(plan.Settings, SettingStatus{Key: key, Status: codexSettingStatus(root, key, expected[key])})
 	}
@@ -78,6 +80,19 @@ func inspectCodex(spec *Spec, root map[string]any) RuntimePlan {
 		}
 	}
 	return plan
+}
+
+func hasCodexHookEntries(config map[string]any) bool {
+	hooks, _ := config["hooks"].(map[string]any)
+	for _, groups := range hooks {
+		for _, rawGroup := range groupArray(groups) {
+			group, _ := rawGroup.(map[string]any)
+			if len(groupArray(group["hooks"])) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func DoctorCodex(spec *Spec) RuntimeDoctor {

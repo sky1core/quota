@@ -2,6 +2,15 @@ package agentoverlay
 
 import "fmt"
 
+func hasHookEntries(hooks map[string][]HookEntry) bool {
+	for _, entries := range hooks {
+		if len(entries) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func blockingBool(root map[string]any, key string, blocked bool) []string {
 	value, exists := root[key]
 	if !exists {

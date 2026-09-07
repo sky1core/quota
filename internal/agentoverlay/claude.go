@@ -32,7 +32,7 @@ func ApplyClaude(spec *Spec) (RuntimePlan, error) {
 		}
 		hooks := objectAt(root, "hooks")
 		for _, event := range sortedKeys(spec.Claude.Hooks) {
-			if v, exists := hooks[event]; exists {
+			if v, exists := hooks[event]; exists && v != nil {
 				if _, ok := v.([]any); !ok {
 					return fmt.Errorf("hooks.%s must be an array", event)
 				}
@@ -69,10 +69,30 @@ func inspectClaude(spec *Spec, root map[string]any) RuntimePlan {
 		plan.Error = err.Error()
 		return plan
 	}
-	plan.Reasons = append(plan.Reasons, blockingBool(root, "disableAllHooks", true)...)
-	plan.Reasons = append(plan.Reasons, blockingBool(root, "allowManagedHooksOnly", true)...)
+	if hasHookEntries(spec.Claude.Hooks) {
+		plan.Reasons = append(plan.Reasons, blockingBool(root, "disableAllHooks", true)...)
+		plan.Reasons = append(plan.Reasons, blockingBool(root, "allowManagedHooksOnly", true)...)
+	}
 	hooks, _ := root["hooks"].(map[string]any)
+	if v, exists := root["hooks"]; exists && hooks == nil {
+		plan.Error = fmt.Sprintf("hooks must be an object (got %T)", v)
+		return plan
+	}
 	for _, event := range sortedKeys(spec.Claude.Hooks) {
+		if v, exists := hooks[event]; exists {
+			if _, ok := v.([]any); !ok {
+				plan.Error = fmt.Sprintf("hooks.%s must be an array", event)
+				return plan
+			}
+		}
+		if len(spec.Claude.Hooks[event]) == 0 {
+			for _, command := range spec.Claude.Replaces {
+				status, _ := inspectHookEntry(hooks[event], claudeHookGroup(HookEntry{Command: command}), command, nil)
+				if status != StatusMissing {
+					plan.Entries = append(plan.Entries, EntryStatus{Event: event, Command: command, Status: StatusStale, Reason: "a command listed in replaces is still present"})
+				}
+			}
+		}
 		for _, e := range spec.Claude.Hooks[event] {
 			status, reason := inspectHookEntry(hooks[event], claudeHookGroup(e), e.Command, spec.Claude.Replaces)
 			if status == StatusMismatch {
@@ -105,7 +125,7 @@ func managedCommandSet(entries []HookEntry, replaces []string) map[string]bool {
 // removeManagedGroups drops every hook whose command string is in managed.
 // Groups emptied by the removal are dropped; all other entries are preserved.
 func removeManagedGroups(groups []any, managed map[string]bool) []any {
-	var out []any
+	out := make([]any, 0, len(groups))
 	for _, group := range groups {
 		groupMap, ok := group.(map[string]any)
 		if !ok {

@@ -27,7 +27,7 @@ func TestClaudeScorePrefersWeeklyQuotaResettingSooner(t *testing.T) {
 	}
 	sooner, ok := scoreClaudeQuota(testQuota(
 		testWindow("weekly_all", "Week", 80, now.Add(24*time.Hour), 0),
-		testWindow("session", "Session", defaultExecPromptMinLeftPct, now.Add(time.Hour), 0),
+		testWindow("session", "Session", 25, now.Add(time.Hour), 0),
 	), "", false, defaultExecPromptMinLeftPct, now)
 	if !ok {
 		t.Fatal("second account should be usable")
@@ -41,7 +41,7 @@ func TestClaudeScoreWeeklyOutranksSession(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	weeklyRich, _ := scoreClaudeQuota(testQuota(
 		testWindow("weekly_all", "Week", 80, now.Add(3*24*time.Hour), 0),
-		testWindow("session", "Session", 10, now.Add(4*time.Hour), 0),
+		testWindow("session", "Session", 25, now.Add(4*time.Hour), 0),
 	), "", false, defaultExecPromptMinLeftPct, now)
 	sessionRich, _ := scoreClaudeQuota(testQuota(
 		testWindow("weekly_all", "Week", 60, now.Add(3*24*time.Hour), 0),
@@ -64,7 +64,7 @@ func TestClaudeScoreDoesNotCompareSessionAgainstWeeklySlot(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	withWeekly, _ := scoreClaudeQuota(testQuota(
 		testWindow("weekly_all", "Week", 10, now.Add(6*24*time.Hour), 0),
-		testWindow("session", "Session", 10, now.Add(4*time.Hour), 0),
+		testWindow("session", "Session", 25, now.Add(4*time.Hour), 0),
 	), "", false, defaultExecPromptMinLeftPct, now)
 	withoutWeekly, _ := scoreClaudeQuota(testQuota(
 		testWindow("session", "Session", 100, now.Add(time.Hour), 0),
@@ -190,7 +190,7 @@ func TestClaudeScoreComparesAggregateWhenModelComparisonDisabled(t *testing.T) {
 func TestCodexScoreLongestWindowOutranksShortest(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	longRich, _ := scoreCodexQuota(testQuota(
-		testWindow("5h", "5h", 10, now.Add(4*time.Hour), 300),
+		testWindow("5h", "5h", 25, now.Add(4*time.Hour), 300),
 		testWindow("weekly", "7d", 80, now.Add(3*24*time.Hour), 10080),
 	), true, defaultExecPromptMinLeftPct, now)
 	shortRich, _ := scoreCodexQuota(testQuota(
@@ -229,15 +229,15 @@ func TestScoresAllowPromptWindowsAtFloor(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	if _, ok := scoreClaudeQuota(testQuota(
 		testWindow("weekly_all", "Week", defaultExecPromptMinLeftPct, now.Add(24*time.Hour), 0),
-		testWindow("session", "Session", defaultExecPromptMinLeftPct, now.Add(time.Hour), 0),
+		testWindow("session", "Session", 25, now.Add(time.Hour), 0),
 	), "", false, defaultExecPromptMinLeftPct, now); !ok {
-		t.Fatal("Claude should allow an account at the delegated prompt floor")
+		t.Fatal("Claude should allow an account whose weekly window sits at the delegated prompt floor")
 	}
 	if _, ok := scoreCodexQuota(testQuota(
-		testWindow("5h", "5h", defaultExecPromptMinLeftPct, now.Add(time.Hour), 300),
+		testWindow("5h", "5h", 25, now.Add(time.Hour), 300),
 		testWindow("weekly", "7d", defaultExecPromptMinLeftPct, now.Add(24*time.Hour), 10080),
 	), false, defaultExecPromptMinLeftPct, now); !ok {
-		t.Fatal("Codex should allow an account at the delegated prompt floor")
+		t.Fatal("Codex should allow an account whose weekly window sits at the delegated prompt floor")
 	}
 }
 
@@ -463,18 +463,18 @@ func TestSelectClaudeAccountScoresSurplusOverConfiguredFloor(t *testing.T) {
 	}
 }
 
-func TestSelectClaudeAccountRejectsConfiguredFloorBelowWindow(t *testing.T) {
+func TestSelectClaudeAccountRejectsWindowBelowConfiguredFloor(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", "")
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 
-	raw := "Current session: 90% used - resets in 4h\nCurrent week (all models): 20% used - resets in 1d"
+	raw := "Current session: 70% used - resets in 4h\nCurrent week (all models): 20% used - resets in 1d"
 	validUntil := time.Now().Add(time.Hour)
 	quotacache.Put("claude:"+filepath.Join(home, ".claude"), raw, validUntil)
 
 	cfg := config.Config{ExecPrompt: &config.ExecPromptConfig{AccountSettings: map[string]config.ExecPromptAccountSettings{
-		"claude": {MinLeftPct: floatPtr(15)},
+		"claude": {MinLeftPct: floatPtr(40)},
 	}}}
 	if _, err := selectClaudeAccount(cfg, nil, time.Now()); err == nil {
 		t.Fatal("selection should fail when a configured floor is above an applicable window")
@@ -746,32 +746,32 @@ func TestShouldCompareCodexShortestWindowRequiresEveryUsableAccount(t *testing.T
 		testWindow("5h", "5h", 80, now.Add(4*time.Hour), 300),
 		testWindow("weekly", "7d", 80, now.Add(6*24*time.Hour), 10080),
 	)
-	weeklyOnly := testQuota(
-		testWindow("weekly", "7d", 80, now.Add(6*24*time.Hour), 10080),
+	fiveHourOnly := testQuota(
+		testWindow("5h", "5h", 80, now.Add(4*time.Hour), 300),
 	)
-	unusableWeeklyOnly := testQuota(
-		testWindow("weekly", "7d", 1, now.Add(6*24*time.Hour), 10080),
+	unusableFiveHourOnly := testQuota(
+		testWindow("5h", "5h", 1, now.Add(4*time.Hour), 300),
 	)
 
-	if shouldCompareCodexShortestWindow([]quotaProbeResult{{quota: twoWindows}, {quota: weeklyOnly}}, defaultPromptFloors(2), now) {
+	if shouldCompareCodexShortestWindow([]quotaProbeResult{{quota: twoWindows}, {quota: fiveHourOnly}}, defaultPromptFloors(2), now) {
 		t.Fatal("short window comparison should be disabled when a usable account lacks a distinct short window")
 	}
 	if !shouldCompareCodexShortestWindow([]quotaProbeResult{{quota: twoWindows}, {quota: twoWindows}}, defaultPromptFloors(2), now) {
 		t.Fatal("short window comparison should be enabled when every usable account has one")
 	}
-	if !shouldCompareCodexShortestWindow([]quotaProbeResult{{quota: twoWindows}, {quota: unusableWeeklyOnly}}, defaultPromptFloors(2), now) {
-		t.Fatal("unusable accounts without a short window should not disable short window comparison")
+	if !shouldCompareCodexShortestWindow([]quotaProbeResult{{quota: twoWindows}, {quota: unusableFiveHourOnly}}, defaultPromptFloors(2), now) {
+		t.Fatal("unusable accounts without a distinct short window should not disable short window comparison")
 	}
 }
 
-func TestSelectCodexAccountDoesNotPenalizeWeeklyOnlyAccount(t *testing.T) {
+func TestSelectCodexAccountExcludesWeeklyOnlyMissingFiveHourWindow(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", "")
 	t.Setenv("CODEX_HOME", "")
 
-	defaultRaw := `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":10080}}}`
-	extraRaw := `{"rateLimits":{"primary":{"usedPercent":94,"windowDurationMins":300},"secondary":{"usedPercent":10,"windowDurationMins":10080}}}`
+	defaultRaw := `{"rateLimits":{"primary":{"usedPercent":50,"windowDurationMins":300},"secondary":{"usedPercent":50,"windowDurationMins":10080}}}`
+	extraRaw := `{"rateLimits":{"primary":{"usedPercent":1,"windowDurationMins":10080}}}`
 	validUntil := time.Now().Add(time.Hour)
 	quotacache.Put("codex:"+filepath.Join(home, ".codex"), defaultRaw, validUntil)
 	quotacache.Put("codex:"+filepath.Join(home, ".codex-2"), extraRaw, validUntil)
@@ -782,7 +782,7 @@ func TestSelectCodexAccountDoesNotPenalizeWeeklyOnlyAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	if selected.Key != "codex" {
-		t.Fatalf("selected account = %q, want codex", selected.Key)
+		t.Fatalf("selected account = %q, want codex (weekly-only codex-2 lacks a 5h window)", selected.Key)
 	}
 }
 

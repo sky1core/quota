@@ -52,7 +52,7 @@ type creditsSnapshot struct {
 }
 
 type rateLimitWindow struct {
-	UsedPercent        int    `json:"usedPercent"`
+	UsedPercent        *int   `json:"usedPercent"`
 	WindowDurationMins *int   `json:"windowDurationMins"`
 	ResetsAt           *int64 `json:"resetsAt"`
 }
@@ -349,10 +349,10 @@ func windowLabel(mins int) string {
 }
 
 func winToEntry(w *rateLimitWindow) map[string]any {
-	if w == nil {
+	if w == nil || w.UsedPercent == nil {
 		return nil
 	}
-	left := 100 - w.UsedPercent
+	left := 100 - *w.UsedPercent
 	// resetsIn is only added when known; an unknown reset omits the key entirely
 	// (like resetsAt) rather than emitting a JSON null, which would violate the
 	// string contract. Consumers already treat a missing key as "unknown".

@@ -15,7 +15,7 @@ func TestGetQuotaForHomeUsesSharedCache(t *testing.T) {
 	codexHome := t.TempDir()
 	windowMins := 300
 	raw, err := json.Marshal(rateLimitsResponse{RateLimits: rateLimitSnapshot{
-		Primary: &rateLimitWindow{UsedPercent: 12, WindowDurationMins: &windowMins},
+		Primary: &rateLimitWindow{UsedPercent: intPtr(12), WindowDurationMins: &windowMins},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +37,7 @@ func TestInvalidateCacheForHome(t *testing.T) {
 	codexHome := t.TempDir()
 	windowMins := 300
 	raw, err := json.Marshal(rateLimitsResponse{RateLimits: rateLimitSnapshot{
-		Primary: &rateLimitWindow{UsedPercent: 12, WindowDurationMins: &windowMins},
+		Primary: &rateLimitWindow{UsedPercent: intPtr(12), WindowDurationMins: &windowMins},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +58,7 @@ func TestWinToEntry_Nil(t *testing.T) {
 }
 
 func TestWinToEntry_Basic(t *testing.T) {
-	w := &rateLimitWindow{UsedPercent: 30}
+	w := &rateLimitWindow{UsedPercent: intPtr(30)}
 	got := winToEntry(w)
 	if got == nil {
 		t.Fatal("expected non-nil")
@@ -82,7 +82,7 @@ func TestWinToEntry_Basic(t *testing.T) {
 
 func TestWinToEntry_WithResetsAt(t *testing.T) {
 	future := time.Now().Add(2*time.Hour + 30*time.Minute).Unix()
-	w := &rateLimitWindow{UsedPercent: 10, ResetsAt: &future}
+	w := &rateLimitWindow{UsedPercent: intPtr(10), ResetsAt: &future}
 	got := winToEntry(w)
 	if got == nil {
 		t.Fatal("expected non-nil")
@@ -98,7 +98,7 @@ func TestWinToEntry_WithResetsAt(t *testing.T) {
 
 func TestWinToEntry_PastResetsAt(t *testing.T) {
 	past := time.Now().Add(-1 * time.Hour).Unix()
-	w := &rateLimitWindow{UsedPercent: 50, ResetsAt: &past}
+	w := &rateLimitWindow{UsedPercent: intPtr(50), ResetsAt: &past}
 	got := winToEntry(w)
 	resetsIn, ok := got["resetsIn"].(string)
 	if !ok {
@@ -114,7 +114,7 @@ func TestWinToEntry_PastResetsAt(t *testing.T) {
 
 func TestWinToEntry_ResetsAtPreserved(t *testing.T) {
 	future := time.Now().Add(3 * time.Hour).Unix()
-	w := &rateLimitWindow{UsedPercent: 10, ResetsAt: &future}
+	w := &rateLimitWindow{UsedPercent: intPtr(10), ResetsAt: &future}
 	got := winToEntry(w)
 	at, ok := got["resetsAt"].(time.Time)
 	if !ok {
@@ -126,7 +126,7 @@ func TestWinToEntry_ResetsAtPreserved(t *testing.T) {
 }
 
 func TestWinToEntry_NoResetsAtKeyWhenNil(t *testing.T) {
-	w := &rateLimitWindow{UsedPercent: 30}
+	w := &rateLimitWindow{UsedPercent: intPtr(30)}
 	got := winToEntry(w)
 	if _, ok := got["resetsAt"]; ok {
 		t.Error("resetsAt key should be absent when ResetsAt is nil")
@@ -134,7 +134,7 @@ func TestWinToEntry_NoResetsAtKeyWhenNil(t *testing.T) {
 }
 
 func TestWinToEntry_FullUsed(t *testing.T) {
-	w := &rateLimitWindow{UsedPercent: 100}
+	w := &rateLimitWindow{UsedPercent: intPtr(100)}
 	got := winToEntry(w)
 	if got["left"] != 0 {
 		t.Errorf("left = %v, want 0", got["left"])
@@ -151,8 +151,8 @@ func TestBuildOutput_Basic(t *testing.T) {
 
 	rr := rateLimitsResponse{
 		RateLimits: rateLimitSnapshot{
-			Primary:   &rateLimitWindow{UsedPercent: 20, WindowDurationMins: &w5h, ResetsAt: &future5h},
-			Secondary: &rateLimitWindow{UsedPercent: 40, WindowDurationMins: &wWeekly, ResetsAt: &futureWk},
+			Primary:   &rateLimitWindow{UsedPercent: intPtr(20), WindowDurationMins: &w5h, ResetsAt: &future5h},
+			Secondary: &rateLimitWindow{UsedPercent: intPtr(40), WindowDurationMins: &wWeekly, ResetsAt: &futureWk},
 			Credits:   &creditsSnapshot{Balance: &balance, HasCredit: true},
 			PlanType:  &planType,
 		},
@@ -207,11 +207,11 @@ func TestBuildOutput_PrefersLimitId(t *testing.T) {
 	w5h := 300
 	rr := rateLimitsResponse{
 		RateLimits: rateLimitSnapshot{
-			Primary: &rateLimitWindow{UsedPercent: 99, WindowDurationMins: &w5h},
+			Primary: &rateLimitWindow{UsedPercent: intPtr(99), WindowDurationMins: &w5h},
 		},
 		RateLimitsByLimitId: map[string]rateLimitSnapshot{
 			"codex": {
-				Primary: &rateLimitWindow{UsedPercent: 15, WindowDurationMins: &w5h},
+				Primary: &rateLimitWindow{UsedPercent: intPtr(15), WindowDurationMins: &w5h},
 			},
 		},
 	}
@@ -235,7 +235,7 @@ func TestBuildOutput_WeeklyOnly(t *testing.T) {
 	wWeekly := 10080
 	rr := rateLimitsResponse{
 		RateLimits: rateLimitSnapshot{
-			Primary: &rateLimitWindow{UsedPercent: 4, WindowDurationMins: &wWeekly},
+			Primary: &rateLimitWindow{UsedPercent: intPtr(4), WindowDurationMins: &wWeekly},
 		},
 	}
 	out, err := buildOutput(rr)
@@ -257,8 +257,8 @@ func TestBuildOutput_SkipsWindowWithoutDuration(t *testing.T) {
 	w5h := 300
 	rr := rateLimitsResponse{
 		RateLimits: rateLimitSnapshot{
-			Primary:   &rateLimitWindow{UsedPercent: 10, WindowDurationMins: &w5h},
-			Secondary: &rateLimitWindow{UsedPercent: 40}, // no duration → skipped
+			Primary:   &rateLimitWindow{UsedPercent: intPtr(10), WindowDurationMins: &w5h},
+			Secondary: &rateLimitWindow{UsedPercent: intPtr(40)}, // no duration → skipped
 		},
 	}
 	out, err := buildOutput(rr)
@@ -278,8 +278,8 @@ func TestBuildOutput_DurationOrder(t *testing.T) {
 	w5h, wWeekly := 300, 10080
 	rr := rateLimitsResponse{
 		RateLimits: rateLimitSnapshot{
-			Primary:   &rateLimitWindow{UsedPercent: 4, WindowDurationMins: &wWeekly},
-			Secondary: &rateLimitWindow{UsedPercent: 20, WindowDurationMins: &w5h},
+			Primary:   &rateLimitWindow{UsedPercent: intPtr(4), WindowDurationMins: &wWeekly},
+			Secondary: &rateLimitWindow{UsedPercent: intPtr(20), WindowDurationMins: &w5h},
 		},
 	}
 	out, err := buildOutput(rr)
@@ -301,8 +301,8 @@ func TestBuildOutput_DistinctDurationsBothKept(t *testing.T) {
 	w240, w600 := 240, 600 // both ≤12h → same "5h" slot key, but different windows
 	rr := rateLimitsResponse{
 		RateLimits: rateLimitSnapshot{
-			Primary:   &rateLimitWindow{UsedPercent: 0, WindowDurationMins: &w240},
-			Secondary: &rateLimitWindow{UsedPercent: 0, WindowDurationMins: &w600},
+			Primary:   &rateLimitWindow{UsedPercent: intPtr(0), WindowDurationMins: &w240},
+			Secondary: &rateLimitWindow{UsedPercent: intPtr(0), WindowDurationMins: &w600},
 		},
 	}
 	out, err := buildOutput(rr)
@@ -324,8 +324,8 @@ func TestBuildOutput_SameDurationDeduped(t *testing.T) {
 	w300a, w300b := 300, 300
 	rr := rateLimitsResponse{
 		RateLimits: rateLimitSnapshot{
-			Primary:   &rateLimitWindow{UsedPercent: 10, WindowDurationMins: &w300a},
-			Secondary: &rateLimitWindow{UsedPercent: 90, WindowDurationMins: &w300b},
+			Primary:   &rateLimitWindow{UsedPercent: intPtr(10), WindowDurationMins: &w300a},
+			Secondary: &rateLimitWindow{UsedPercent: intPtr(90), WindowDurationMins: &w300b},
 		},
 	}
 	out, err := buildOutput(rr)
@@ -346,8 +346,8 @@ func TestBuildOutput_SameDurationDeduped(t *testing.T) {
 func TestBuildOutput_KeysFromVocabulary(t *testing.T) {
 	w5h, wWeekly := 300, 10080
 	rr := rateLimitsResponse{RateLimits: rateLimitSnapshot{
-		Primary:   &rateLimitWindow{UsedPercent: 20, WindowDurationMins: &w5h},
-		Secondary: &rateLimitWindow{UsedPercent: 40, WindowDurationMins: &wWeekly},
+		Primary:   &rateLimitWindow{UsedPercent: intPtr(20), WindowDurationMins: &w5h},
+		Secondary: &rateLimitWindow{UsedPercent: intPtr(40), WindowDurationMins: &wWeekly},
 	}}
 	out, err := buildOutput(rr)
 	if err != nil {
@@ -371,7 +371,7 @@ func TestBuildOutput_NoWindows(t *testing.T) {
 	planType := "pro"
 	rr := rateLimitsResponse{
 		RateLimits: rateLimitSnapshot{
-			Secondary: &rateLimitWindow{UsedPercent: 40}, // no duration → unclassifiable
+			Secondary: &rateLimitWindow{UsedPercent: intPtr(40)}, // no duration → unclassifiable
 			PlanType:  &planType,
 		},
 	}
@@ -440,7 +440,7 @@ func TestBuildOutput_NilCreditsBalance(t *testing.T) {
 	w5h := 300
 	rr := rateLimitsResponse{
 		RateLimits: rateLimitSnapshot{
-			Primary: &rateLimitWindow{UsedPercent: 10, WindowDurationMins: &w5h},
+			Primary: &rateLimitWindow{UsedPercent: intPtr(10), WindowDurationMins: &w5h},
 			Credits: &creditsSnapshot{Balance: nil, HasCredit: false},
 		},
 	}
@@ -542,7 +542,7 @@ func TestBuildOutput_WithResetCredits(t *testing.T) {
 	w5h := 300
 	rr := rateLimitsResponse{
 		RateLimits: rateLimitSnapshot{
-			Primary: &rateLimitWindow{UsedPercent: 10, WindowDurationMins: &w5h},
+			Primary: &rateLimitWindow{UsedPercent: intPtr(10), WindowDurationMins: &w5h},
 		},
 		ResetCredits: &resetCreditsSnapshot{
 			AvailableCount: 1,
@@ -608,11 +608,11 @@ func TestRateLimitsResponseParsing(t *testing.T) {
 	if rr.RateLimits.Primary == nil {
 		t.Fatal("primary should not be nil")
 	}
-	if rr.RateLimits.Primary.UsedPercent != 20 {
-		t.Errorf("primary used = %d, want 20", rr.RateLimits.Primary.UsedPercent)
+	if rr.RateLimits.Primary.UsedPercent == nil || *rr.RateLimits.Primary.UsedPercent != 20 {
+		t.Errorf("primary used = %v, want 20", rr.RateLimits.Primary.UsedPercent)
 	}
-	if rr.RateLimits.Secondary.UsedPercent != 40 {
-		t.Errorf("secondary used = %d, want 40", rr.RateLimits.Secondary.UsedPercent)
+	if rr.RateLimits.Secondary.UsedPercent == nil || *rr.RateLimits.Secondary.UsedPercent != 40 {
+		t.Errorf("secondary used = %v, want 40", rr.RateLimits.Secondary.UsedPercent)
 	}
 	if *rr.RateLimits.Credits.Balance != "100" {
 		t.Errorf("balance = %v", *rr.RateLimits.Credits.Balance)
@@ -620,4 +620,8 @@ func TestRateLimitsResponseParsing(t *testing.T) {
 	if *rr.RateLimits.PlanType != "pro" {
 		t.Errorf("planType = %v", *rr.RateLimits.PlanType)
 	}
+}
+
+func intPtr(value int) *int {
+	return &value
 }

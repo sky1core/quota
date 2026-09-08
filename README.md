@@ -110,15 +110,16 @@ quota-cli exec-prompt --agent=codex --json "프롬프트"
 ```
 
 등록된 같은 provider 계정들의 60초 공유 캐시를 우선 사용하고, 필요한 계정만 quota를 실측한다.
+신규 작업은 **5시간 quota 잔여량이 25% 이상**인 계정에만 배정한다. Claude의 `session`, Codex의
+`windowMins == 300` 창이 없거나 잔여량을 유효한 0~100% 수치로 읽을 수 없어도 제외한다.
 적용되는 quota 창이 계정별 `minLeftPct` 미만인 계정은 후보에서 제외한다. 기본값은 5%이며,
-선택 점수는 남은 quota에서 `minLeftPct`를 뺀 여유분이다. 장기 quota를 짧은 quota보다 우선하며,
+이 보존분은 25% 진입 기준과 별개다. 선택 점수는 남은 quota에서 `minLeftPct`를 뺀 여유분이다. 장기 quota를 짧은 quota보다 우선하며,
 여유분이 리셋까지 남은 시간에 비해 많은 계정을 먼저 쓴다.
 Claude에 `--model`을 지정해도 요청 모델값과 실제 추가 quota row label이 맞을 때만 그 row를 본다. 현재 Opus처럼 전용 row가
 없는 모델은 별도 quota를 가정하지 않고 `weekly_all`/`session`으로 비교한다. Fable처럼 해당 모델
 quota의 남은 비율을 읽을 수 있으면 그 계정에는 하한선을 적용한다. 살아남은 모든 후보가 남은 비율을
 읽을 수 있는 해당 모델 quota를 갖고 있을 때만 그 quota를 우선 비교하고, 일부 후보에만 있으면
 `weekly_all`/`session`으로 비교한다. 선택이 끝나면 나머지 인자와 stdin/stdout/stderr, 종료 상태는 각각 `claude -p`와 `codex exec`에 그대로 전달된다.
-Claude 후보는 적어도 `weekly_all` 또는 `session` quota를 갖고 있어야 한다.
 대화형 실행은 지원하지 않는다.
 
 #### quota 기반 agent 선택
@@ -132,7 +133,7 @@ quota-cli select-agent --json
 등록된 Claude/Codex 계정 전체를 60초 공유 캐시 기준으로 비교해 어느 provider/account를 쓸지
 선택한다. 실제 프롬프트는 실행하지 않고, 선택된 계정의 실행 prefix(`claude -p` 또는 `codex exec`),
 추가 계정에 필요한 환경 변수, 현재 셸에서 제거해야 할 override 환경 변수 이름을 출력한다.
-`exec-prompt`와 같은 `minLeftPct` 설정을 적용한다.
+`exec-prompt`와 같은 5시간 잔여량 25% 진입 기준과 `minLeftPct` 설정을 적용한다.
 기본 통합 모드는 모델별 Claude row를 보지 않으며, 모델별 row는 `--agent=claude --model=...`에서만
 적용한다.
 

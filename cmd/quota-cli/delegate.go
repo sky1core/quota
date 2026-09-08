@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 const (
 	delegateProbeTimeout        = 40 * time.Second
 	defaultExecPromptMinLeftPct = 5.0
+	minFiveHourAdmissionPct     = 25.0
 	minExecPromptMinLeftPct     = 0.0
 	maxExecPromptMinLeftPct     = 100.0
 )
@@ -180,6 +182,9 @@ func selectCodexAccount(cfg config.Config, now time.Time) (config.ResolvedCodexA
 }
 
 func scoreClaudeQuota(quota map[string]any, requestedModel string, compareModel bool, minLeftPct float64, now time.Time) (accountScore, bool) {
+	if fiveHourQuotaRejection(quota, "claude") != "" {
+		return accountScore{}, false
+	}
 	windows := quotaWindows(quota)
 	session := findWindowByKey(windows, "session")
 	weekly := findWindowByKey(windows, "weekly_all")
@@ -223,6 +228,9 @@ func shouldCompareClaudeModelWindow(results []quotaProbeResult, requestedModel s
 }
 
 func scoreCodexQuota(quota map[string]any, compareShortest bool, minLeftPct float64, now time.Time) (accountScore, bool) {
+	if fiveHourQuotaRejection(quota, "codex") != "" {
+		return accountScore{}, false
+	}
 	windows := quotaWindows(quota)
 	if len(windows) == 0 {
 		return accountScore{}, false
@@ -242,6 +250,35 @@ func scoreCodexQuota(quota map[string]any, compareShortest bool, minLeftPct floa
 		priority = append(priority, shortest)
 	}
 	return buildAccountScore(priority, minLeftPct, now)
+}
+
+func fiveHourQuotaRejection(quota map[string]any, provider string) string {
+	found := false
+	for _, window := range quotaWindows(quota) {
+		matches := false
+		switch provider {
+		case "claude":
+			matches = window["key"] == "session"
+		case "codex":
+			mins, ok := numericValue(window["windowMins"])
+			matches = ok && mins == 300
+		}
+		if !matches {
+			continue
+		}
+		found = true
+		left, ok := numericValue(window["left"])
+		if !ok || math.IsNaN(left) || math.IsInf(left, 0) || left < 0 || left > 100 {
+			return "5-hour quota remaining is unreadable or invalid"
+		}
+		if left < minFiveHourAdmissionPct {
+			return fmt.Sprintf("5-hour quota left %g%% is below admission minimum %g%%", left, minFiveHourAdmissionPct)
+		}
+	}
+	if !found {
+		return "missing 5-hour quota window"
+	}
+	return ""
 }
 
 func shouldCompareCodexShortestWindow(results []quotaProbeResult, minLeftPcts []float64, now time.Time) bool {

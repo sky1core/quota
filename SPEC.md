@@ -205,16 +205,17 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 **`exec-prompt` 동작**:
 - `--agent`는 필수이며 `claude`/`codex`만 허용한다. 그 뒤 `args`는 순서와 값을 바꾸지 않고 고정 접두(`claude -p`/`codex exec`) 뒤에 전달한다. stdin/stdout/stderr와 최종 종료 상태도 원본 CLI가 직접 담당하며, quota-cli는 선택 결과나 중간 데이터를 출력 스트림에 섞지 않는다.
 - 선택할 provider의 등록 계정만 60초 캐시 기준으로 병렬 조회한다. 조회 실패 계정과 현재 적용되는 quota 창이 계정별 `minLeftPct` 미만인 계정은 후보에서 제외하며, 후보가 없으면 원본 CLI를 실행하지 않고 실패한다.
+- 신규 작업은 5시간 quota 잔여량이 25% 이상인 계정에만 배정한다. Claude는 `session`, Codex는 실제 `windowMins == 300`인 창으로 판정하며, 해당 창이 없거나 잔여량을 유효한 0~100% 수치로 읽을 수 없으면 제외한다. 이 진입 기준은 계정별 보존분 `minLeftPct`(기본 5%)와 별개로 적용하며 선택 점수에서 차감하지 않는다.
 - 장기 창을 최우선, 짧은 창을 다음 순서로 비교한다. 비교값은 `남은 % - minLeftPct`이며, 양쪽 모두 리셋 시각을 알면 `비교값 / 리셋까지 남은 분`이 큰 쪽을 우선해, 같은 비교값이면 먼저 리셋되는 계정을 먼저 소비한다. 리셋 시각을 모르는 쪽이 있으면 비교값으로 비교한다. 모든 비교값이 같으면 config 순서가 빠른 계정을 선택한다.
 - Codex는 실제 `windowMins`가 가장 큰 창을 장기 기준, 가장 작은 창을 짧은 기준으로 사용한다.
-- Claude는 기본적으로 `weekly_all` 다음 `session` 순서로 비교한다. Claude 후보는 적어도 `weekly_all` 또는 `session` 창을 갖고 있어야 한다. `--model`/`-m`이 지정돼도 요청 모델값과 실제 추가 quota row label이 맞을 때만 그 row를 본다. Opus처럼 전용 row가 없는 모델은 별도 quota를 가정하지 않고 `weekly_all`, `session`으로 비교한다. Fable처럼 해당 모델 창의 남은 비율을 읽을 수 있으면 그 계정에는 해당 모델 창의 계정별 `minLeftPct` 하한선을 적용한다. 살아남은 모든 후보가 남은 비율을 읽을 수 있는 해당 모델 창을 갖고 있을 때만 해당 모델 창을 우선 비교하고, 일부 후보에만 있으면 `weekly_all`, `session`으로 비교한다.
+- Claude는 기본적으로 `weekly_all` 다음 `session` 순서로 비교한다. `--model`/`-m`이 지정돼도 요청 모델값과 실제 추가 quota row label이 맞을 때만 그 row를 본다. Opus처럼 전용 row가 없는 모델은 별도 quota를 가정하지 않고 `weekly_all`, `session`으로 비교한다. Fable처럼 해당 모델 창의 남은 비율을 읽을 수 있으면 그 계정에는 해당 모델 창의 계정별 `minLeftPct` 하한선을 적용한다. 살아남은 모든 후보가 남은 비율을 읽을 수 있는 해당 모델 창을 갖고 있을 때만 해당 모델 창을 우선 비교하고, 일부 후보에만 있으면 `weekly_all`, `session`으로 비교한다.
 - 선택된 추가 Claude 계정은 `CLAUDE_CONFIG_DIR`, 추가 Codex 계정은 `CODEX_HOME`으로 실행한다. 기본 계정은 상속된 해당 변수를 유지한다. 조회한 로그인 계정과 실행 계정이 달라지지 않도록 Claude는 `ANTHROPIC_*`/`CLAUDE_*`의 인증·엔드포인트 override와 `CLAUDECODE`를, Codex는 `CODEX_*`/`OPENAI_*`의 인증·엔드포인트 override를 제거한다.
 - 대화형 Claude/Codex 실행은 지원하지 않는다.
 
 **`select-agent` 동작**:
 - 사용자의 프롬프트를 실행하지 않는다. stdout에는 선택된 provider/account, 실행 prefix, 추가 계정에 필요한 환경 변수, 현재 셸에서 제거해야 할 override 환경 변수 이름, 후보별 quota 창 요약을 출력한다.
 - 기본 `--agent=all`은 Claude/Codex configured 계정을 모두 비교한다. `--agent=claude` 또는 `--agent=codex`는 해당 provider 안에서만 선택한다.
-- quota 조회는 `exec-prompt`와 같이 60초 공유 캐시를 우선 사용한다. `execPrompt.accountSettings.<key>.minLeftPct`도 동일하게 적용한다.
+- quota 조회는 `exec-prompt`와 같이 60초 공유 캐시를 우선 사용한다. 5시간 잔여량 25% 진입 기준과 `execPrompt.accountSettings.<key>.minLeftPct`도 동일하게 적용한다.
 - 통합 모드에서는 provider 공통 장기/단기 창만 비교하고 Claude 모델별 extra row는 보지 않는다. `--model`은 `--agent=claude`에서만 허용한다.
 - 후보가 없으면 후보별 실패/제외 이유를 출력한 뒤 non-zero로 종료한다. JSON 모드는 같은 정보를 `selected`, `candidates`, `error`, `generated`로 출력하며 후보별 실행 정보는 `command`, `setEnv`, `unsetEnv`에 둔다.
 

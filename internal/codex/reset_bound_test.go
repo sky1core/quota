@@ -11,8 +11,8 @@ func TestCacheValidUntilIncludesPastWindowReset(t *testing.T) {
 
 	// Soonest window already reset: the past epoch must be the bound, not zero.
 	rr := rateLimitsResponse{RateLimits: rateLimitSnapshot{
-		Primary:   &rateLimitWindow{UsedPercent: 40, ResetsAt: &past},
-		Secondary: &rateLimitWindow{UsedPercent: 10, ResetsAt: &future},
+		Primary:   &rateLimitWindow{UsedPercent: intPtr(40), ResetsAt: &past},
+		Secondary: &rateLimitWindow{UsedPercent: intPtr(10), ResetsAt: &future},
 	}}
 	if got, want := cacheValidUntil(rr), time.Unix(past, 0); got.IsZero() || !got.Equal(want) {
 		t.Fatalf("past-epoch window must bound the entry: want %v got %v", want, got)
@@ -20,7 +20,7 @@ func TestCacheValidUntilIncludesPastWindowReset(t *testing.T) {
 
 	// No resetsAt anywhere -> zero bound (only maxAge applies).
 	rr2 := rateLimitsResponse{RateLimits: rateLimitSnapshot{
-		Primary: &rateLimitWindow{UsedPercent: 5},
+		Primary: &rateLimitWindow{UsedPercent: intPtr(5)},
 	}}
 	if got := cacheValidUntil(rr2); !got.IsZero() {
 		t.Fatalf("no resetsAt must yield zero bound, got %v", got)

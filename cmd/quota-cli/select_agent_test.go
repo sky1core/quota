@@ -67,9 +67,9 @@ func TestSelectAgentSelectsAcrossProviders(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
 	validUntil := time.Now().Add(time.Hour)
 
-	quotacache.Put("claude:"+filepath.Join(home, ".claude"), "Current session: 80% used - resets in 4h\nCurrent week (all models): 50% used - resets in 3d", validUntil)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), "Current session: 80% used - resets in 4h\nCurrent week (all models): 40% used - resets in 3d", validUntil)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex"), `{"rateLimits":{"primary":{"usedPercent":80,"windowDurationMins":300},"secondary":{"usedPercent":50,"windowDurationMins":10080}}}`, validUntil)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude"), "Current session: 40% used - resets in 4h\nCurrent week (all models): 50% used - resets in 3d", validUntil)
+	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), "Current session: 40% used - resets in 4h\nCurrent week (all models): 40% used - resets in 3d", validUntil)
+	quotacache.Put("codex:"+filepath.Join(home, ".codex"), `{"rateLimits":{"primary":{"usedPercent":40,"windowDurationMins":300},"secondary":{"usedPercent":50,"windowDurationMins":10080}}}`, validUntil)
 	quotacache.Put("codex:"+filepath.Join(home, ".codex-2"), `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":10,"windowDurationMins":10080}}}`, validUntil)
 
 	cfg := config.Config{
@@ -136,7 +136,7 @@ func TestSelectAgentAllModeKeepsMissingLongWindowScoreShape(t *testing.T) {
 	validUntil := time.Now().Add(time.Hour)
 
 	quotacache.Put("claude:"+filepath.Join(home, ".claude"), "Current session: 10% used - resets in 4h", validUntil)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex"), `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":10080}}}`, validUntil)
+	quotacache.Put("codex:"+filepath.Join(home, ".codex"), `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":10,"windowDurationMins":10080}}}`, validUntil)
 
 	result, err := buildSelectAgentResult(config.Config{}, selectAgentOptions{agent: selectAgentAll}, time.Now())
 	if err != nil {

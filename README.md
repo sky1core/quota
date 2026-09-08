@@ -110,8 +110,10 @@ quota-cli exec-prompt --agent=codex --json "프롬프트"
 ```
 
 등록된 같은 provider 계정들의 60초 공유 캐시를 우선 사용하고, 필요한 계정만 quota를 실측한다.
-신규 작업은 **5시간 quota 잔여량이 25% 이상**인 계정에만 배정한다. Claude의 `session`, Codex의
-`windowMins == 300` 창이 없거나 잔여량을 유효한 0~100% 수치로 읽을 수 없어도 제외한다.
+신규 작업은 **5시간 quota 창이 있으면 잔여량이 25% 이상**이어야 배정한다. Claude의 `session`, Codex의
+`windowMins == 300`으로 판정하며, 정상 응답에 주간 창만 있으면 주간 기준으로 배정한다.
+응답에 있는 집계 창의 사용량·기간을 읽지 못하면 `windowErrors`로 구분해 배정에서 제외한다.
+조회 실패나 적용할 quota 창이 없는 계정도 제외한다.
 적용되는 quota 창이 계정별 `minLeftPct` 미만인 계정은 후보에서 제외한다. 기본값은 5%이며,
 이 보존분은 25% 진입 기준과 별개다. 선택 점수는 남은 quota에서 `minLeftPct`를 뺀 여유분이다. 장기 quota를 짧은 quota보다 우선하며,
 여유분이 리셋까지 남은 시간에 비해 많은 계정을 먼저 쓴다.

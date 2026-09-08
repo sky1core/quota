@@ -764,7 +764,7 @@ func TestShouldCompareCodexShortestWindowRequiresEveryUsableAccount(t *testing.T
 	}
 }
 
-func TestSelectCodexAccountExcludesWeeklyOnlyMissingFiveHourWindow(t *testing.T) {
+func TestSelectCodexAccountRanksWeeklyOnlyByWeeklyQuota(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", "")
@@ -781,8 +781,8 @@ func TestSelectCodexAccountExcludesWeeklyOnlyMissingFiveHourWindow(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if selected.Key != "codex" {
-		t.Fatalf("selected account = %q, want codex (weekly-only codex-2 lacks a 5h window)", selected.Key)
+	if selected.Key != "codex-2" {
+		t.Fatalf("selected account = %q, want codex-2 (higher weekly quota)", selected.Key)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -302,6 +303,8 @@ var usageRowRe = regexp.MustCompile(`^(Current\s+.*?):\s*(\d+)%\s+used\b(.*)$`)
 // insensitive because this text is prose, not a field name.
 var resetsClauseRe = regexp.MustCompile(`(?i)\bresets?\s+(.+?)\s*$`)
 
+var usageRowLabelRe = regexp.MustCompile(`^(Current\s+[^:]+)(?::|$)`)
+
 // parseUsage parses the /usage report line by line into the shared
 // self-describing window list: out["windows"] = [{key,label,used,…}], in report
 // order. Each row carries its own label derived from the report text
@@ -310,20 +313,31 @@ var resetsClauseRe = regexp.MustCompile(`(?i)\bresets?\s+(.+?)\s*$`)
 // "extra_N" for per-model rows (whose names change across model generations).
 func parseUsage(text string) (map[string]any, error) {
 	var windows []map[string]any
+	var windowErrors []string
 	seenKey := map[string]bool{}
 	seenExtra := map[string]bool{}
 	extraIdx := 0
 
 	for _, raw := range strings.Split(stripANSI(text), "\n") {
-		m := usageRowRe.FindStringSubmatch(strings.TrimSpace(raw))
+		line := strings.TrimSpace(raw)
+		m := usageRowRe.FindStringSubmatch(line)
 		if m == nil {
+			if mm := usageRowLabelRe.FindStringSubmatch(line); mm != nil && aggregateWindowKey(mm[1]) != "" {
+				windowErrors = append(windowErrors, fmt.Sprintf("claude quota row %q has an unreadable percentage", windowLabel(mm[1])))
+			}
 			continue
 		}
 		screen := strings.TrimSpace(m[1])
 		if screen == "" {
 			continue
 		}
-		pct := atoi(m[2])
+		pct, err := strconv.Atoi(m[2])
+		if err != nil || pct < 0 || pct > 100 {
+			if aggregateWindowKey(screen) != "" {
+				windowErrors = append(windowErrors, fmt.Sprintf("claude quota row %q has an out-of-range percentage", windowLabel(screen)))
+			}
+			continue
+		}
 
 		entry := map[string]any{"used": pct, "left": 100 - pct}
 		if rm := resetsClauseRe.FindStringSubmatch(m[3]); rm != nil {
@@ -339,13 +353,8 @@ func parseUsage(text string) (map[string]any, error) {
 		}
 
 		label := windowLabel(screen)
-		var key string
-		switch {
-		case strings.Contains(screen, "Current session"):
-			key = "session"
-		case strings.Contains(screen, "all models"):
-			key = "weekly_all"
-		default:
+		key := aggregateWindowKey(screen)
+		if key == "" {
 			// Per-model row. Dedupe by label so one model can't take two slots.
 			// NOT capped here: the parser reports every row Claude shows. Slot
 			// limits belong to consumers that have them (quota-bar), never to the
@@ -372,7 +381,22 @@ func parseUsage(text string) (map[string]any, error) {
 		}
 		return nil, errors.New("could not parse claude quota from /usage output")
 	}
-	return map[string]any{"windows": windows}, nil
+	out := map[string]any{"windows": windows}
+	if len(windowErrors) > 0 {
+		out["windowErrors"] = windowErrors
+	}
+	return out, nil
+}
+
+func aggregateWindowKey(screen string) string {
+	screen = strings.Join(strings.Fields(screen), " ")
+	if strings.Contains(screen, "Current session") {
+		return "session"
+	}
+	if strings.Contains(screen, "all models") {
+		return "weekly_all"
+	}
+	return ""
 }
 
 func looksLikeSessionUsageSummary(text string) bool {
@@ -482,15 +506,4 @@ func fmtDuration(d time.Duration) string {
 		return fmt.Sprintf("%dh %dm", hours, mins)
 	}
 	return fmt.Sprintf("%dm", mins)
-}
-
-func atoi(s string) int {
-	var n int
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			break
-		}
-		n = n*10 + int(r-'0')
-	}
-	return n
 }

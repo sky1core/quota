@@ -29,12 +29,21 @@ func TestFiveHourAdmissionRejectsInvalidRemaining(t *testing.T) {
 }
 
 func TestCodexAdmissionUsesActualDuration(t *testing.T) {
-	for _, duration := range []any{nil, "300", 300.9, 10080, 300} {
-		t.Run(fmt.Sprint(duration), func(t *testing.T) {
-			quota := testQuota(map[string]any{"key": "5h", "label": "5h", "windowMins": duration, "left": 25})
-			_, ok := scoreCodexQuota(quota, false, 0, time.Now())
-			if ok != (duration == 300) {
-				t.Fatalf("duration %v: usable = %v", duration, ok)
+	for _, tc := range []struct {
+		duration any
+		left     int
+		allow    bool
+	}{
+		{nil, 25, false}, {"300", 25, false}, {300.9, 25, false},
+		{0, 25, false}, {-300, 25, false}, {math.NaN(), 25, false}, {math.Inf(1), 25, false},
+		{300, 24, false}, {300, 25, true},
+		{10080, 24, true}, {43200, 24, true}, {600, 24, true},
+	} {
+		t.Run(fmt.Sprintf("%v/left%d", tc.duration, tc.left), func(t *testing.T) {
+			quota := testQuota(map[string]any{"key": "5h", "label": "5h", "windowMins": tc.duration, "left": tc.left})
+			_, ok := scoreCodexQuota(quota, false, 5, time.Now())
+			if ok != tc.allow {
+				t.Fatalf("duration %v left %d: usable = %v, want %v", tc.duration, tc.left, ok, tc.allow)
 			}
 		})
 	}
@@ -165,12 +174,12 @@ func TestAdmissionStrongerMinLeftPctStillApplies(t *testing.T) {
 	}
 }
 
-func TestCodexAdmissionRequiresFiveHourWindow(t *testing.T) {
+func TestCodexAdmissionAllowsAbsentButNotUnreadableFiveHourWindow(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	if _, ok := scoreCodexQuota(testQuota(
 		testWindow("weekly", "7d", 90, now.Add(3*24*time.Hour), 10080),
-	), false, defaultExecPromptMinLeftPct, now); ok {
-		t.Fatal("a weekly-only Codex report must be excluded because it has no 5h window")
+	), false, defaultExecPromptMinLeftPct, now); !ok {
+		t.Fatal("a healthy weekly-only Codex report must be usable")
 	}
 	if _, ok := scoreCodexQuota(testQuota(
 		map[string]any{"key": "5h", "label": "5h", "windowMins": 300, "resetsAt": now.Add(time.Hour)},
@@ -185,12 +194,12 @@ func TestCodexAdmissionRequiresFiveHourWindow(t *testing.T) {
 	}
 }
 
-func TestClaudeAdmissionRequiresSessionWindow(t *testing.T) {
+func TestClaudeAdmissionAllowsAbsentButNotUnreadableSessionWindow(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	if _, ok := scoreClaudeQuota(testQuota(
 		testWindow("weekly_all", "Week", 90, now.Add(3*24*time.Hour), 0),
-	), "", false, defaultExecPromptMinLeftPct, now); ok {
-		t.Fatal("a Claude report without a session window must be excluded")
+	), "", false, defaultExecPromptMinLeftPct, now); !ok {
+		t.Fatal("a healthy weekly-only Claude report must be usable")
 	}
 	if _, ok := scoreClaudeQuota(testQuota(
 		testWindow("weekly_all", "Week", 90, now.Add(3*24*time.Hour), 0),

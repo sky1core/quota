@@ -387,6 +387,101 @@ func TestBuildOutput_NoWindows(t *testing.T) {
 	}
 }
 
+func TestBuildOutput_WeeklyOnlyHealthyNoErrors(t *testing.T) {
+	wWeekly := 10080
+	rr := rateLimitsResponse{RateLimits: rateLimitSnapshot{
+		Primary: &rateLimitWindow{UsedPercent: intPtr(4), WindowDurationMins: &wWeekly},
+	}}
+	out, err := buildOutput(rr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := out["windowErrors"]; ok {
+		t.Errorf("healthy weekly-only must not carry windowErrors, got %v", out["windowErrors"])
+	}
+	if ws := windowsOf(t, out); len(ws) != 1 || ws[0]["windowMins"] != 10080 {
+		t.Errorf("windows = %v, want one 10080 window", ws)
+	}
+}
+
+func TestBuildOutput_MalformedPresentAlongsideValid(t *testing.T) {
+	w5h, wWeekly := 300, 10080
+	rr := rateLimitsResponse{RateLimits: rateLimitSnapshot{
+		Primary:   &rateLimitWindow{WindowDurationMins: &w5h}, // present, no usedPercent
+		Secondary: &rateLimitWindow{UsedPercent: intPtr(30), WindowDurationMins: &wWeekly},
+	}}
+	out, err := buildOutput(rr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ws := windowsOf(t, out)
+	if len(ws) != 1 || ws[0]["windowMins"] != 10080 {
+		t.Fatalf("valid weekly window must survive, got %v", ws)
+	}
+	we, ok := out["windowErrors"].([]string)
+	if !ok || len(we) != 1 {
+		t.Fatalf("windowErrors = %v, want one entry for the malformed primary", out["windowErrors"])
+	}
+	if !strings.Contains(we[0], "primary") || !strings.Contains(we[0], "usedPercent") {
+		t.Errorf("windowError should name the primary slot and the field, got %q", we[0])
+	}
+}
+
+func TestBuildOutputReportsEachMalformedSlot(t *testing.T) {
+	badMins := 0
+	rr := rateLimitsResponse{RateLimits: rateLimitSnapshot{
+		Primary:   &rateLimitWindow{UsedPercent: intPtr(10), WindowDurationMins: &badMins}, // nonpositive duration
+		Secondary: &rateLimitWindow{UsedPercent: intPtr(20)},                               // missing duration
+	}}
+	out, err := buildOutput(rr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := out["windows"]; ok {
+		t.Errorf("no valid window should be emitted, got %v", out["windows"])
+	}
+	we, ok := out["windowErrors"].([]string)
+	if !ok || len(we) != 2 {
+		t.Fatalf("windowErrors = %v, want one per malformed slot", out["windowErrors"])
+	}
+}
+
+func TestBuildOutput_OutOfRangeUsedPercent(t *testing.T) {
+	w5h := 300
+	rr := rateLimitsResponse{RateLimits: rateLimitSnapshot{
+		Primary: &rateLimitWindow{UsedPercent: intPtr(150), WindowDurationMins: &w5h},
+	}}
+	out, err := buildOutput(rr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := out["windows"]; ok {
+		t.Errorf("out-of-range window must not be emitted, got %v", out["windows"])
+	}
+	we, _ := out["windowErrors"].([]string)
+	if len(we) != 1 || !strings.Contains(we[0], "usedPercent") {
+		t.Errorf("windowErrors = %v, want a usedPercent range diagnostic", out["windowErrors"])
+	}
+}
+
+func TestBuildOutput_ZeroUsageNoDiagnostic(t *testing.T) {
+	w5h := 300
+	rr := rateLimitsResponse{RateLimits: rateLimitSnapshot{
+		Primary: &rateLimitWindow{UsedPercent: intPtr(0), WindowDurationMins: &w5h},
+	}}
+	out, err := buildOutput(rr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := out["windowErrors"]; ok {
+		t.Errorf("0%% usage is valid, must not carry windowErrors, got %v", out["windowErrors"])
+	}
+	ws := windowsOf(t, out)
+	if len(ws) != 1 || ws[0]["left"] != 100 {
+		t.Errorf("windows = %v, want one window with left 100", ws)
+	}
+}
+
 // windowsOf extracts the windows list from a buildOutput result.
 func windowsOf(t *testing.T, out map[string]any) []map[string]any {
 	t.Helper()

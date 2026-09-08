@@ -235,7 +235,7 @@ func collectClaudeSelectAgentCandidates(cfg config.Config, requestedModel string
 		score, ok := scoreClaudeQuota(results[i].quota, requestedModel, compareModel, minLeftPcts[i], now)
 		if !ok {
 			candidate.Status = selectAgentStatusSkipped
-			candidate.Reason = fiveHourQuotaRejection(results[i].quota, selectAgentClaude)
+			candidate.Reason = quotaAdmissionRejection(results[i].quota, selectAgentClaude)
 			if candidate.Reason == "" {
 				candidate.Reason = selectAgentSkipReason(candidate.Windows, minLeftPcts[i])
 			}
@@ -294,7 +294,7 @@ func collectCodexSelectAgentCandidates(cfg config.Config, now time.Time) ([]sele
 		score, ok := scoreCodexQuota(results[i].quota, compareShortest, minLeftPcts[i], now)
 		if !ok {
 			candidate.Status = selectAgentStatusSkipped
-			candidate.Reason = fiveHourQuotaRejection(results[i].quota, selectAgentCodex)
+			candidate.Reason = quotaAdmissionRejection(results[i].quota, selectAgentCodex)
 			if candidate.Reason == "" {
 				candidate.Reason = selectAgentSkipReason(candidate.Windows, minLeftPcts[i])
 			}

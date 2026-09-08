@@ -528,6 +528,118 @@ Current week (Model B): 10% used`
 	}
 }
 
+func TestParseUsage_WeeklyOnlyNoSessionNoErrors(t *testing.T) {
+	input := `Current week (all models): 20% used · resets Mar 6 at 12pm (Asia/Seoul)
+Current week (Fable): 5% used`
+	result, err := parseUsage(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := windowByKey(result, "session"); ok {
+		t.Error("no session row was present; session window must be absent")
+	}
+	if _, ok := result["windowErrors"]; ok {
+		t.Errorf("absent session is not malformed, must not carry windowErrors: %v", result["windowErrors"])
+	}
+	if _, ok := windowByKey(result, "weekly_all"); !ok {
+		t.Error("weekly window must be preserved")
+	}
+}
+
+func TestParseUsage_MalformedPercentAlongsideValid(t *testing.T) {
+	input := `Current session: N/A% used · resets 5pm (Asia/Seoul)
+Current week (all models): 20% used · resets Mar 6 at 12pm (Asia/Seoul)`
+	result, err := parseUsage(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := windowByKey(result, "session"); ok {
+		t.Error("unreadable session must not become a window")
+	}
+	if _, ok := windowByKey(result, "weekly_all"); !ok {
+		t.Error("valid weekly row must be preserved")
+	}
+	we, ok := result["windowErrors"].([]string)
+	if !ok || len(we) != 1 {
+		t.Fatalf("windowErrors = %v, want one entry for the malformed session row", result["windowErrors"])
+	}
+	if !strings.Contains(we[0], "Session") {
+		t.Errorf("windowError should name the row label, got %q", we[0])
+	}
+}
+
+func TestParseUsage_OutOfRangePercent(t *testing.T) {
+	input := `Current session: 150% used
+Current week (all models): 20% used`
+	result, err := parseUsage(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := windowByKey(result, "session"); ok {
+		t.Error("out-of-range session must not become a window")
+	}
+	we, ok := result["windowErrors"].([]string)
+	if !ok || len(we) != 1 {
+		t.Fatalf("windowErrors = %v, want one out-of-range diagnostic", result["windowErrors"])
+	}
+}
+
+func TestParseUsage_OverflowPercent(t *testing.T) {
+	input := "Current session: 999999999999999999999% used\nCurrent week (all models): 10% used"
+	result, err := parseUsage(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := windowByKey(result, "session"); ok {
+		t.Error("overflowing percent must not become a window")
+	}
+	we, _ := result["windowErrors"].([]string)
+	if len(we) != 1 {
+		t.Fatalf("windowErrors = %v, want one entry", result["windowErrors"])
+	}
+}
+
+func TestParseUsageReportsEachMalformedAggregateRow(t *testing.T) {
+	input := `Current session: N/A% used
+Current week (all models): ??% used
+Current week (Fable): 10% used`
+	result, err := parseUsage(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	we, ok := result["windowErrors"].([]string)
+	if !ok || len(we) != 2 {
+		t.Fatalf("windowErrors = %v, want two diagnostics", result["windowErrors"])
+	}
+	extras, ok := extraWindows(result)
+	if !ok || len(extras) != 1 || extras[0]["label"] != "Fable" {
+		t.Errorf("valid Fable row must survive, got %v", extras)
+	}
+}
+
+func TestParseUsage_ZeroUsageNoDiagnostic(t *testing.T) {
+	input := "Current session: 0% used\nCurrent week (all models): 0% used"
+	result, err := parseUsage(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := result["windowErrors"]; ok {
+		t.Errorf("0%% usage is valid, must not carry windowErrors: %v", result["windowErrors"])
+	}
+	session, ok := windowByKey(result, "session")
+	if !ok || session["left"] != 100 || session["used"] != 0 {
+		t.Errorf("session = %v, want used 0 / left 100", session)
+	}
+}
+
+func TestParseUsage_AllMalformedErrors(t *testing.T) {
+	input := `Current session: N/A% used
+Current week (all models): ??% used`
+	if _, err := parseUsage(input); err == nil {
+		t.Fatal("no valid quota rows must remain a parse error")
+	}
+}
+
 // windowByKey finds a window in the parsed self-describing list by its key.
 func windowByKey(result map[string]any, key string) (map[string]any, bool) {
 	ws, ok := result["windows"].([]map[string]any)
@@ -717,25 +829,6 @@ func TestUsageText_NotJSON(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "command not found") {
 		t.Errorf("error should preview the raw output, got: %v", err)
-	}
-}
-
-func TestAtoi(t *testing.T) {
-	tests := []struct {
-		in   string
-		want int
-	}{
-		{"0", 0},
-		{"42", 42},
-		{"100abc", 100},
-		{"abc", 0},
-		{"", 0},
-	}
-	for _, tt := range tests {
-		got := atoi(tt.in)
-		if got != tt.want {
-			t.Errorf("atoi(%q) = %d, want %d", tt.in, got, tt.want)
-		}
 	}
 }
 

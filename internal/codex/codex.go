@@ -348,6 +348,18 @@ func windowLabel(mins int) string {
 	return strings.Join(parts, " ")
 }
 
+func codexWindowError(w *rateLimitWindow, slot string) (diag string, ok bool) {
+	switch {
+	case w.WindowDurationMins == nil || *w.WindowDurationMins <= 0:
+		return fmt.Sprintf("codex %s window: missing or nonpositive windowDurationMins", slot), false
+	case w.UsedPercent == nil:
+		return fmt.Sprintf("codex %s window: missing usedPercent", slot), false
+	case *w.UsedPercent < 0 || *w.UsedPercent > 100:
+		return fmt.Sprintf("codex %s window: usedPercent out of range", slot), false
+	}
+	return "", true
+}
+
 func winToEntry(w *rateLimitWindow) map[string]any {
 	if w == nil || w.UsedPercent == nil {
 		return nil
@@ -417,13 +429,18 @@ func buildOutput(rr rateLimitsResponse) (map[string]any, error) {
 	// window with no windowDurationMins can't be labeled truthfully and is omitted
 	// (positional/bucketed labeling is the bug this shape removes).
 	var windows []map[string]any
+	var windowErrors []string
 	seen := map[int]bool{}
-	for _, w := range []*rateLimitWindow{snap.Primary, snap.Secondary} {
-		if w == nil || w.WindowDurationMins == nil {
+	for _, sw := range []struct {
+		slot string
+		w    *rateLimitWindow
+	}{{"primary", snap.Primary}, {"secondary", snap.Secondary}} {
+		w := sw.w
+		if w == nil {
 			continue
 		}
-		e := winToEntry(w)
-		if e == nil {
+		if diag, ok := codexWindowError(w, sw.slot); !ok {
+			windowErrors = append(windowErrors, diag)
 			continue
 		}
 		mins := *w.WindowDurationMins
@@ -435,6 +452,7 @@ func buildOutput(rr rateLimitsResponse) (map[string]any, error) {
 			continue
 		}
 		seen[mins] = true
+		e := winToEntry(w)
 		e["key"] = windowKey(mins)
 		e["windowMins"] = mins
 		e["label"] = windowLabel(mins)
@@ -447,6 +465,9 @@ func buildOutput(rr rateLimitsResponse) (map[string]any, error) {
 	})
 	if len(windows) > 0 {
 		out["windows"] = windows
+	}
+	if len(windowErrors) > 0 {
+		out["windowErrors"] = windowErrors
 	}
 	if snap.Credits != nil {
 		bal := ""

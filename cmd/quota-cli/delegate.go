@@ -182,7 +182,7 @@ func selectCodexAccount(cfg config.Config, now time.Time) (config.ResolvedCodexA
 }
 
 func scoreClaudeQuota(quota map[string]any, requestedModel string, compareModel bool, minLeftPct float64, now time.Time) (accountScore, bool) {
-	if fiveHourQuotaRejection(quota, "claude") != "" {
+	if quotaAdmissionRejection(quota, "claude") != "" {
 		return accountScore{}, false
 	}
 	windows := quotaWindows(quota)
@@ -228,7 +228,7 @@ func shouldCompareClaudeModelWindow(results []quotaProbeResult, requestedModel s
 }
 
 func scoreCodexQuota(quota map[string]any, compareShortest bool, minLeftPct float64, now time.Time) (accountScore, bool) {
-	if fiveHourQuotaRejection(quota, "codex") != "" {
+	if quotaAdmissionRejection(quota, "codex") != "" {
 		return accountScore{}, false
 	}
 	windows := quotaWindows(quota)
@@ -252,31 +252,36 @@ func scoreCodexQuota(quota map[string]any, compareShortest bool, minLeftPct floa
 	return buildAccountScore(priority, minLeftPct, now)
 }
 
-func fiveHourQuotaRejection(quota map[string]any, provider string) string {
-	found := false
-	for _, window := range quotaWindows(quota) {
-		matches := false
-		switch provider {
-		case "claude":
-			matches = window["key"] == "session"
-		case "codex":
-			mins, ok := numericValue(window["windowMins"])
-			matches = ok && mins == 300
+func quotaAdmissionRejection(quota map[string]any, provider string) string {
+	if raw, exists := quota["windowErrors"]; exists {
+		windowErrors, ok := raw.([]string)
+		if !ok || len(windowErrors) == 0 {
+			return "invalid quota window diagnostics"
 		}
-		if !matches {
+		return "incomplete quota window data: " + strings.Join(windowErrors, "; ")
+	}
+	for _, window := range quotaWindows(quota) {
+		if provider == "claude" && window["key"] != "session" && window["key"] != "weekly_all" {
 			continue
 		}
-		found = true
 		left, ok := numericValue(window["left"])
 		if !ok || math.IsNaN(left) || math.IsInf(left, 0) || left < 0 || left > 100 {
-			return "5-hour quota remaining is unreadable or invalid"
+			return "quota window remaining is unreadable or invalid"
 		}
-		if left < minFiveHourAdmissionPct {
+		fiveHour := false
+		switch provider {
+		case "claude":
+			fiveHour = window["key"] == "session"
+		case "codex":
+			mins, ok := numericValue(window["windowMins"])
+			if !ok || math.IsNaN(mins) || mins <= 0 || mins >= math.Exp2(strconv.IntSize-1) || math.Trunc(mins) != mins {
+				return "quota window duration is unreadable or invalid"
+			}
+			fiveHour = mins == 300
+		}
+		if fiveHour && left < minFiveHourAdmissionPct {
 			return fmt.Sprintf("5-hour quota left %g%% is below admission minimum %g%%", left, minFiveHourAdmissionPct)
 		}
-	}
-	if !found {
-		return "missing 5-hour quota window"
 	}
 	return ""
 }

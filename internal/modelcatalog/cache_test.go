@@ -21,8 +21,8 @@ func TestSnapshotFreshness(t *testing.T) {
 		want   bool
 	}{
 		{"new", func(s *Snapshot) {}, true},
-		{"before expiry", func(s *Snapshot) { s.FetchedAt = now.Add(-MaxAge + time.Nanosecond) }, true},
-		{"at expiry", func(s *Snapshot) { s.FetchedAt = now.Add(-MaxAge) }, false},
+		{"before expiry", func(s *Snapshot) { s.FetchedAt = now.Add(-3*time.Hour + time.Nanosecond) }, true},
+		{"at expiry", func(s *Snapshot) { s.FetchedAt = now.Add(-3 * time.Hour) }, false},
 		{"future", func(s *Snapshot) { s.FetchedAt = now.Add(time.Second) }, false},
 		{"missing time", func(s *Snapshot) { s.FetchedAt = time.Time{} }, false},
 		{"version change", func(s *Snapshot) { s.CLIVersion = "2.0" }, false},

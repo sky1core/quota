@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const MaxAge = 2 * time.Hour
+const MaxAge = 3 * time.Hour
 
 type Snapshot struct {
 	SchemaVersion int       `json:"schemaVersion"`

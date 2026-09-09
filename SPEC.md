@@ -154,7 +154,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 
 ### quota-cli
 
-**용도**: 터미널에서 quota를 조회하거나, quota에 따라 계정을 선택해 Claude/Codex를 비대화형으로 실행한다. 계정별 결과는 공유 캐시(§공유 캐시)로 기본 60초 재사용한다.
+**용도**: 터미널에서 quota를 조회하거나, quota에 따라 계정을 선택해 Claude/Codex를 비대화형으로 실행한다. 계정별 결과는 공유 캐시(§공유 캐시)로 기본 75초 재사용한다.
 
 **지원 OS**: macOS, Linux. Windows는 지원하지 않는다.
 
@@ -207,7 +207,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 
 **`exec-prompt` 동작**:
 - `--agent=claude` 또는 `--agent=codex`를 첫 옵션으로 지정하면 그 뒤 `args`는 순서와 값을 바꾸지 않고 고정 접두(`claude -p`/`codex exec`) 뒤에 전달한다. `--agent`를 생략하면 아래 모델명 기반 자동 라우팅을 사용한다. stdin/stdout/stderr와 최종 종료 상태는 원본 CLI가 직접 담당하며, quota-cli는 선택 결과나 중간 데이터를 출력 스트림에 섞지 않는다.
-- 선택할 provider의 등록 계정만 60초 캐시 기준으로 병렬 조회한다. 조회 실패 계정과 현재 적용되는 quota 창이 계정별 `minLeftPct` 미만인 계정은 후보에서 제외하며, 후보가 없으면 원본 CLI를 실행하지 않고 실패한다.
+- 선택할 provider의 등록 계정만 75초 캐시 기준으로 병렬 조회한다. 조회 실패 계정과 현재 적용되는 quota 창이 계정별 `minLeftPct` 미만인 계정은 후보에서 제외하며, 후보가 없으면 원본 CLI를 실행하지 않고 실패한다.
 - 신규 작업은 응답에 5시간 quota 창이 있을 때 그 잔여량이 25% 이상이어야 배정한다. Claude는 `session`, Codex는 실제 `windowMins == 300`인 창으로 판정한다. 정상 응답에 주간 창만 있으면 그 창의 `minLeftPct` 기준으로 판단한다. 조회·파싱 오류나 `windowErrors`가 있거나, 적용할 창의 잔여량을 유효한 0~100% 수치로 읽을 수 없거나, 적용할 창이 하나도 없으면 제외한다. 응답에 없는 제한을 계정 종류로 추정하거나 추가하지 않는다. 이 진입 기준은 계정별 보존분 `minLeftPct`(기본 5%)와 별개로 적용하며 선택 점수에서 차감하지 않는다.
 - 장기 창을 최우선, 짧은 창을 다음 순서로 비교한다. 비교값은 `남은 % - minLeftPct`이며, 양쪽 모두 리셋 시각을 알면 `비교값 / 리셋까지 남은 분`이 큰 쪽을 우선해, 같은 비교값이면 먼저 리셋되는 계정을 먼저 소비한다. 리셋 시각을 모르는 쪽이 있으면 비교값으로 비교한다. 모든 비교값이 같으면 config 순서가 빠른 계정을 선택한다.
 - Codex는 실제 `windowMins`가 가장 큰 창을 장기 기준, 가장 작은 창을 짧은 기준으로 사용한다.
@@ -218,7 +218,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 **`select-agent` 동작**:
 - 사용자의 프롬프트를 실행하지 않는다. stdout에는 선택된 provider/account, 실행 prefix, 추가 계정에 필요한 환경 변수, 현재 셸에서 제거해야 할 override 환경 변수 이름, 후보별 quota 창 요약을 출력한다.
 - 기본 `--agent=all`은 Claude/Codex configured 계정을 모두 비교한다. `--agent=claude` 또는 `--agent=codex`는 해당 provider 안에서만 선택한다.
-- quota 조회는 `exec-prompt`와 같이 60초 공유 캐시를 우선 사용한다. 5시간 잔여량 25% 진입 기준과 `execPrompt.accountSettings.<key>.minLeftPct`도 동일하게 적용한다.
+- quota 조회는 `exec-prompt`와 같이 75초 공유 캐시를 우선 사용한다. 5시간 잔여량 25% 진입 기준과 `execPrompt.accountSettings.<key>.minLeftPct`도 동일하게 적용한다.
 - 통합 모드에서는 provider 공통 장기/단기 창만 비교하고 Claude 모델별 extra row는 보지 않는다. `--model`은 `--agent=claude`에서만 허용한다.
 - 후보가 없으면 후보별 실패/제외 이유를 출력한 뒤 non-zero로 종료한다. JSON 모드는 같은 정보를 `selected`, `candidates`, `error`, `generated`로 출력하며 후보별 실행 정보는 `command`, `setEnv`, `unsetEnv`에 둔다.
 
@@ -240,7 +240,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 **모델·effort 메타데이터 캐시**:
 - `quota-cli models [refresh] [--agent=all|claude|codex] [--account=<key>] [--json]`은 등록 계정의 모델·effort 메타데이터를 조회한다. 기본 provider 범위는 `all`이며 `refresh`는 유효기간과 무관하게 다시 조회한다.
 - 캐시는 `~/.config/quota/model-cache/`에서 provider·CLI 절대 경로·계정 설정 디렉터리별로 분리한다. 조회 성공 시각, 조회한 CLI 버전, 모델 ID와 CLI가 제공한 alias 해석값·effort 정보를 저장한다. capability 누락은 미확인으로 보존하고 지원 불가로 추론하지 않는다.
-- provider를 명시한 `exec-prompt` 실행 전과 `select-agent` 선택 결과 반환 전에 선택된 계정의 캐시를 확인한다. 자동 라우팅은 분류 전에 등록된 Codex 계정들의 캐시만 확인한다. 캐시 부재, 성공 시각으로부터 2시간 이상 경과, CLI 버전 변경이면 새로 조회한다. 일반 quota 조회와 quota-bar는 이 조회를 수행하지 않는다.
+- provider를 명시한 `exec-prompt` 실행 전과 `select-agent` 선택 결과 반환 전에 선택된 계정의 캐시를 확인한다. 자동 라우팅은 분류 전에 등록된 Codex 계정들의 캐시만 확인한다. 캐시 부재, 성공 시각으로부터 3시간 이상 경과, CLI 버전 변경이면 새로 조회한다. 일반 quota 조회와 quota-bar는 이 조회를 수행하지 않는다.
 - 성공 시각은 quota가 CLI 목록 응답을 받은 시각이다. CLI 내부 캐시 사용 여부나 서버에서 직접 갱신한 시각을 보장하지 않는다. 수동 갱신도 quota 캐시를 건너뛰고 CLI에 재조회하는 동작이다.
 - 같은 캐시의 조회·교체를 프로세스 간 직렬화하고 원자적으로 저장한다. 조회 실패, 빈 목록, 조회 중 CLI 버전 변경은 기존 내용·성공 시각을 갱신하지 않고 호출을 실패시킨다. 손상된 캐시는 오류로 보고하며 `models refresh`로 복구한다. 실패 시 이전 캐시나 다른 provider로 자동 대체하지 않는다.
 - 목록은 CLI가 보고한 메타데이터이며 실제 프롬프트 실행이나 요청 effort 적용을 증명하지 않는다. 목록 밖 모델은 미확인이고, `exec-prompt`의 원본 CLI 인자 전달 계약은 유지한다.
@@ -290,8 +290,8 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 
 **동작**:
 1. `~/.config/quota/config.json`에서 추가 Claude/Codex 계정 목록을 읽는다 (파일 없거나 목록 비면 각 기본 계정만).
-2. 기본 Claude 계정 + 추가 Claude 계정을 각각 `claude.GetQuotaForConfigDir`로 조회 (maxAge 60초 — 캐시가 60초 이내면 재사용, 아니면 실측 후 캐시 갱신)
-3. 기본 Codex 계정 + 추가 Codex 계정을 각각 `codex.GetQuotaForHome`로 조회 (기본 계정은 `home=""`, maxAge 60초)
+2. 기본 Claude 계정 + 추가 Claude 계정을 각각 `claude.GetQuotaForConfigDir`로 조회 (maxAge 75초 — 캐시가 75초 이내면 재사용, 아니면 실측 후 캐시 갱신)
+3. 기본 Codex 계정 + 추가 Codex 계정을 각각 `codex.GetQuotaForHome`로 조회 (기본 계정은 `home=""`, maxAge 75초)
 4. 2·3은 모두 **병렬** 조회. 모두 완료되면 결과를 JSON 또는 텍스트로 출력
 5. 개별 provider/계정 에러는 errors 배열에 포함, 프로세스 자체는 종료하지 않음
 
@@ -350,7 +350,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 2. `~/.config/quota/config.json`을 `config.ResolveAccounts()`(Claude) + `config.ResolveCodexAccounts()`(Codex)로 해석해 조회할 계정 목록 확정 (각 기본 `claude`/`codex` + 유효한 추가 계정). quota-cli와 동일한 규칙·순서를 공유한다. skip된 항목은 로그로만 기록.
 3. systray 아이콘 + 메뉴 구성 (Claude 계정별 그룹 + Codex 계정별 그룹)
 4. 즉시 1회 refresh 실행, 이후 활동 기반 간격으로 자동 refresh (활성/idle 주기는 `quota-bar.json`으로 설정 가능, 기본 3분/30분)
-5. **refresh = 각 Claude 계정 `claude.GetQuotaForConfigDir(timeout, configDir, maxAge)` (기본 `configDir=""`) + 각 Codex 계정 `codex.GetQuotaForHome(timeout, home, maxAge)` (기본 `home=""`)를 병렬 호출** (내부 패키지). maxAge는 활성/idle 중 더 짧은 refresh 주기의 절반이며 상한은 180초 — 공유 캐시(§공유 캐시)가 그보다 최근이면 재사용하고, 아니면 실측 후 캐시에 기록한다.
+5. **refresh = 각 Claude 계정 `claude.GetQuotaForConfigDir(timeout, configDir, maxAge)` (기본 `configDir=""`) + 각 Codex 계정 `codex.GetQuotaForHome(timeout, home, maxAge)` (기본 `home=""`)를 병렬 호출** (내부 패키지). maxAge는 refresh 주기와 무관하게 2분 — 공유 캐시(§공유 캐시)가 그보다 최근이면 재사용하고, 아니면 실측 후 캐시에 기록한다.
 6. 결과를 메뉴 항목에 표시
 
 **계정 목록 확정 시점 (중요)**: systray는 런타임에 메뉴 항목을 추가·제거할 수 없다. 따라서 계정 수와 메뉴 레이아웃은 **onReady 시작 시점의 config로 고정**된다. `config.json`을 편집해 계정을 추가/제거하면 **quota-bar를 재시작**해야 반영된다.
@@ -475,7 +475,7 @@ quota-cli·quota-bar·위임 실행이 공유하는, 계정별 **마지막 성�
 - **파싱 전 raw만 저장한다.** 파싱된 결과는 `time.Time`/`int`/`[]map[string]any` 등 Go 타입을 담고 있어 JSON 왕복으로 깨진다(→ string/float64/[]any). 읽을 때 재파싱해 타입 손상을 피한다. 상대 리셋만 있는 provider 출력은 절대 변경 시각을 알 수 없으므로 신선도 기준으로만 제한된다.
 - **성공만 저장한다.** 조회 실패는 캐시하지 않아 일시적 실패가 굳지 않고 매번 재시도된다.
 - **데이터 변경 경계에서 무효화한다.** 저장 시 가장 이른 창 리셋 또는 사용 가능한 초기화권 만료 시각을 함께 기록하고, 그 시각이 지나면 신선도 기준 이내라도 히트를 거부한다. 상대 리셋만 있는 창은 절대 시각이 없어 신선도 기준만 적용된다.
-- **읽기**: 소비자가 자기 신선도 기준(cli/위임 60초, bar는 활성/idle 중 더 짧은 refresh 주기의 절반·상한 180초) 이내이고 데이터 변경 경계 전이면 재사용하고, miss이면 그 계정을 실측해 기록한다. 동시 miss는 각각 실측할 수 있으며 이후 조회부터 캐시를 공유한다.
+- **읽기**: 소비자가 자기 신선도 기준(cli/위임 75초, bar 2분) 이내이고 데이터 변경 경계 전이면 재사용하고, miss이면 그 계정을 실측해 기록한다. 동시 miss는 각각 실측할 수 있으며 이후 조회부터 캐시를 공유한다.
 - **쓰기**: sidecar 파일 flock으로 직렬화한 read-modify-write + temp→rename 원자적 교체(파일 권한 0o600 — raw에 계정 사용 패턴이 담긴다). 일부 계정만 조회한 소비자가 다른 계정 항목을 덮어쓰지 않는다.
 
 ## Internal 패키지 사양

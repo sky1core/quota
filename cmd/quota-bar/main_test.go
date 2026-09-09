@@ -320,34 +320,6 @@ func TestSettings_StaleThreshold(t *testing.T) {
 	}
 }
 
-func TestSettings_CacheMaxAge(t *testing.T) {
-	var d settings
-	if got := d.cacheMaxAge(); got != 90*time.Second {
-		t.Errorf("default cacheMaxAge = %s, want 90s", got)
-	}
-	if got := d.cacheMaxAge(); got >= d.activeInterval() {
-		t.Errorf("default cacheMaxAge = %s must be shorter than active interval %s", got, d.activeInterval())
-	}
-
-	fast := settings{RefreshActiveMinutes: 1, RefreshIdleMinutes: 30}
-	if got := fast.cacheMaxAge(); got != 30*time.Second {
-		t.Errorf("cacheMaxAge(active=1,idle=30) = %s, want 30s", got)
-	}
-	if got := fast.cacheMaxAge(); got >= fast.activeInterval() {
-		t.Errorf("fast cacheMaxAge = %s must be shorter than active interval %s", got, fast.activeInterval())
-	}
-
-	slow := settings{RefreshActiveMinutes: 15, RefreshIdleMinutes: 60}
-	if got := slow.cacheMaxAge(); got != barCacheAgeCap {
-		t.Errorf("cacheMaxAge(active=15,idle=60) = %s, want cap %s", got, barCacheAgeCap)
-	}
-
-	inverted := settings{RefreshActiveMinutes: 60, RefreshIdleMinutes: 10}
-	if got := inverted.cacheMaxAge(); got != barCacheAgeCap {
-		t.Errorf("cacheMaxAge(active=60,idle=10) = %s, want cap %s", got, barCacheAgeCap)
-	}
-}
-
 func TestSettings_RefreshIntervalsRoundTrip(t *testing.T) {
 	b, err := json.Marshal(settings{RefreshActiveMinutes: 30, RefreshIdleMinutes: 60})
 	if err != nil {

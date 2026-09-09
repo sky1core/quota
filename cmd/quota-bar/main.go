@@ -51,10 +51,8 @@ const (
 	// staleMargin is added to the slower of the two (possibly configured) refresh
 	// cadences to derive the stale threshold, so no normally-refreshed provider
 	// trips a false "stale" warning regardless of which interval is larger.
-	staleMargin = 5 * time.Minute
-	// barCacheAgeCap keeps shared-cache reuse bounded even when the configured
-	// refresh cadence is long.
-	barCacheAgeCap = 3 * time.Minute
+	staleMargin    = 5 * time.Minute
+	barCacheMaxAge = 2 * time.Minute
 )
 
 // resetCreditSlots is the number of pre-allocated submenu rows under the Codex
@@ -110,18 +108,6 @@ func (s settings) idleInterval() time.Duration {
 		return time.Duration(s.RefreshIdleMinutes) * time.Minute
 	}
 	return defaultRefreshIdle
-}
-
-func (s settings) cacheMaxAge() time.Duration {
-	cadence := s.activeInterval()
-	if idle := s.idleInterval(); idle < cadence {
-		cadence = idle
-	}
-	maxAge := cadence / 2
-	if maxAge > barCacheAgeCap {
-		return barCacheAgeCap
-	}
-	return maxAge
 }
 
 // staleThreshold is the age past which a provider's last success is flagged
@@ -774,7 +760,7 @@ func onReady() {
 	// if the active interval is configured longer than the idle one.
 	refreshActiveDur := cfg.activeInterval()
 	refreshIdleDur := cfg.idleInterval()
-	cacheMaxAge := cfg.cacheMaxAge()
+	cacheMaxAge := barCacheMaxAge
 	staleThresholdDur := cfg.staleThreshold()
 	log.Printf("refresh cadence: active=%s idle=%s cache<=%s (stale>%s)", refreshActiveDur, refreshIdleDur, cacheMaxAge, staleThresholdDur)
 

@@ -85,7 +85,7 @@ func runExecPromptWith(args []string, claudeRunner, codexRunner func([]string) i
 // cliCacheMaxAge is how fresh a shared-cache entry must be for a CLI query to
 // reuse it instead of probing live. Short, because a terminal query wants
 // near-current numbers; the window still absorbs back-to-back runs.
-const cliCacheMaxAge = 60 * time.Second
+const cliCacheMaxAge = 75 * time.Second
 
 type queryOptions struct {
 	jsonOut bool

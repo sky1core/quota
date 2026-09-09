@@ -123,7 +123,7 @@ Codex 계정은 해당 모델·effort를 목록에 제공할 때만 후보가 �
 분류는 모델 지원이나 effort의 실제 적용을 보장하지 않으며, CLI 실행 실패 후 다른 모델로 재시도하지 않는다.
 자동 실행은 `--` 뒤 프롬프트 하나와 stdin을 전달한다. provider 전용 옵션이 필요하면 `--agent`를 명시한다.
 
-등록된 같은 provider 계정들의 60초 공유 캐시를 우선 사용하고, 필요한 계정만 quota를 실측한다.
+등록된 같은 provider 계정들의 75초 공유 캐시를 우선 사용하고, 필요한 계정만 quota를 실측한다.
 신규 작업은 **5시간 quota 창이 있으면 잔여량이 25% 이상**이어야 배정한다. Claude의 `session`, Codex의
 `windowMins == 300`으로 판정하며, 정상 응답에 주간 창만 있으면 주간 기준으로 배정한다.
 응답에 있는 집계 창의 사용량·기간을 읽지 못하면 `windowErrors`로 구분해 배정에서 제외한다.
@@ -147,7 +147,7 @@ quota-cli select-agent --agent=claude --model=fable
 quota-cli select-agent --json
 ```
 
-등록된 Claude/Codex 계정 전체를 60초 공유 캐시 기준으로 비교해 어느 provider/account를 쓸지
+등록된 Claude/Codex 계정 전체를 75초 공유 캐시 기준으로 비교해 어느 provider/account를 쓸지
 선택한다. 실제 프롬프트는 실행하지 않고, 선택된 계정의 실행 prefix(`claude -p` 또는 `codex exec`),
 추가 계정에 필요한 환경 변수, 현재 셸에서 제거해야 할 override 환경 변수 이름을 출력한다.
 `exec-prompt`와 같은 5시간 잔여량 25% 진입 기준과 `minLeftPct` 설정을 적용한다.
@@ -163,7 +163,7 @@ quota-cli models refresh --account=codex
 
 등록된 계정별 CLI 메타데이터에서 모델 ID, alias 해석값, effort 지원 정보를 조회한다.
 `~/.config/quota/model-cache/`에 조회 성공 시각과 CLI 버전을 함께 저장한다.
-provider를 명시한 `exec-prompt`와 `select-agent`는 선택된 계정의 캐시가 없거나 2시간이 지났거나 CLI 버전이 바뀌면
+provider를 명시한 `exec-prompt`와 `select-agent`는 선택된 계정의 캐시가 없거나 3시간이 지났거나 CLI 버전이 바뀌면
 갱신한다. `models refresh`는 즉시 다시 조회한다. 갱신 실패 시 오래된 목록으로 진행하지 않고 오류를 반환한다.
 자동 라우팅은 분류 전에 Codex 계정들의 캐시만 확인한다. 조회 시각은 CLI 응답을 받은 시각이며,
 CLI 자체 캐시가 사용될 수 있으므로 서버 갱신 시각을 뜻하지 않는다. 수동 갱신도 CLI 재조회다.

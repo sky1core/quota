@@ -19,10 +19,12 @@ import (
 
 	"github.com/getlantern/systray"
 
+	"github.com/sky1core/quota/internal/agenthooks"
 	"github.com/sky1core/quota/internal/claude"
 	"github.com/sky1core/quota/internal/codex"
 	"github.com/sky1core/quota/internal/config"
 	"github.com/sky1core/quota/internal/idle"
+	"github.com/sky1core/quota/internal/keepalive"
 	"github.com/sky1core/quota/internal/render"
 	"github.com/sky1core/quota/internal/ui"
 	"github.com/sky1core/quota/internal/update"
@@ -80,7 +82,8 @@ func itemKey(provider, suffix string) string {
 }
 
 type settings struct {
-	Selected []string `json:"selected"`
+	Keepalive *keepalive.Config `json:"keepalive,omitempty"`
+	Selected  []string          `json:"selected"`
 	// ShowResetTime displays each row's reset as an absolute clock time
 	// (e.g. "Mon Jul 6 15:04") instead of the relative time left. Toggled from the
 	// menu; default false keeps the historical relative display.
@@ -217,19 +220,28 @@ func migrateSettings(s settings) settings {
 	return s
 }
 
-func saveSettings(s settings) {
-	if err := os.MkdirAll(filepath.Dir(settingsPath()), 0o755); err != nil {
-		log.Printf("saveSettings: mkdir: %v", err)
-		return
-	}
-	b, err := json.MarshalIndent(s, "", "  ")
+func saveSettings(s settings) error {
+	b, err := json.Marshal(s)
 	if err != nil {
-		log.Printf("saveSettings: marshal: %v", err)
-		return
+		return err
 	}
-	if err := os.WriteFile(settingsPath(), b, 0o644); err != nil {
-		log.Printf("saveSettings: write: %v", err)
+	var fields map[string]any
+	if err = json.Unmarshal(b, &fields); err != nil {
+		return err
 	}
+	_, err = agenthooks.UpdateJSONObjectWithBackup(settingsPath(), func(root map[string]any) error {
+		for _, key := range []string{"selected", "showResetTime", "refreshActiveMinutes", "refreshIdleMinutes", "keepalive"} {
+			delete(root, key)
+		}
+		for key, value := range fields {
+			root[key] = value
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("saveSettings: %v", err)
+	}
+	return err
 }
 
 type quotaData struct {
@@ -868,6 +880,23 @@ func onReady() {
 	miUpdated.Disable()
 	miResetMode := systray.AddMenuItemCheckbox("Reset as clock time", "리셋을 남은시간 대신 절대 시각으로 표시", cfg.ShowResetTime)
 	miRefresh := systray.AddMenuItem("Refresh", "Refresh now")
+	keepaliveConfig := keepalive.DefaultConfig()
+	if cfg.Keepalive != nil {
+		keepaliveConfig = *cfg.Keepalive
+	}
+	miKeepalive := systray.AddMenuItemCheckbox("Keep session caches warm", "기본: 평일 12:30 · PC 무입력 5분 · 최근 50분 활동한 대기 세션 (일정은 설정 파일에서 변경)", keepaliveConfig.Enabled)
+	miKeepaliveStatus := systray.AddMenuItem("Keepalive: off", "잠자기·앱 종료로 놓친 일정은 건너뜁니다. 캐시 유지 효과는 모델에 따라 다릅니다.")
+	miKeepaliveStatus.Disable()
+	keepaliveService := newKeepaliveService(accounts, codexAccounts)
+	if err := keepaliveService.Configure(keepaliveConfig, time.Now()); err != nil {
+		miKeepalive.Uncheck()
+		miKeepalive.Disable()
+		miKeepaliveStatus.SetTitle("Keepalive: invalid settings — see log")
+		log.Printf("keepalive config: %v", err)
+	} else if keepaliveConfig.Enabled {
+		miKeepaliveStatus.SetTitle("Keepalive: on (" + keepaliveConfig.Time + ")")
+	}
+	keepaliveContext, cancelKeepalive := context.WithCancel(context.Background())
 	miAutoStart := systray.AddMenuItemCheckbox("Start at Login", "", isAutoStartEnabled())
 	miVersion := systray.AddMenuItem("quota-bar "+versionString(), "")
 	miVersion.Disable()
@@ -1329,6 +1358,32 @@ func onReady() {
 		os.Exit(0)
 	}
 
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-keepaliveContext.Done():
+				return
+			case <-ticker.C:
+				result := keepaliveService.Tick(keepaliveContext, time.Now())
+				if result.Status != "" {
+					mu.Lock()
+					if !keepaliveConfig.Enabled {
+						mu.Unlock()
+						continue
+					}
+					title, detail := keepaliveResultText(result)
+					if result.Error != nil {
+						log.Printf("keepalive: %v", result.Error)
+					}
+					miKeepaliveStatus.SetTitle(title)
+					miKeepaliveStatus.SetTooltip(detail)
+					mu.Unlock()
+				}
+			}
+		}
+	}()
 	go refresh()
 	go func() {
 		lastRefresh := time.Now()
@@ -1368,6 +1423,29 @@ func onReady() {
 			select {
 			case mi := <-toggleCh:
 				handleToggle(mi)
+			case <-miKeepalive.ClickedCh:
+				mu.Lock()
+				next := keepaliveConfig
+				next.Enabled = !next.Enabled
+				updated, err := changeKeepalive(keepaliveService, cfg, next, time.Now())
+				cfg = updated
+				if cfg.Keepalive != nil {
+					keepaliveConfig = *cfg.Keepalive
+				}
+				if err != nil {
+					if !keepaliveConfig.Enabled {
+						miKeepalive.Uncheck()
+						miKeepaliveStatus.SetTitle("Keepalive: off — settings not saved; see log")
+					}
+					log.Printf("keepalive: %v", err)
+				} else if keepaliveConfig.Enabled {
+					miKeepalive.Check()
+					miKeepaliveStatus.SetTitle("Keepalive: on (" + next.Time + ")")
+				} else {
+					miKeepalive.Uncheck()
+					miKeepaliveStatus.SetTitle("Keepalive: off")
+				}
+				mu.Unlock()
 			case <-miResetMode.ClickedCh:
 				mu.Lock()
 				cfg.ShowResetTime = !cfg.ShowResetTime
@@ -1405,6 +1483,8 @@ func onReady() {
 					miAutoStart.Uncheck()
 				}
 			case <-miQuit.ClickedCh:
+				cancelKeepalive()
+				keepaliveService.Stop()
 				intentionalQuit = true
 				systray.Quit()
 				return

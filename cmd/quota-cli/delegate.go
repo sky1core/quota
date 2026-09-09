@@ -64,7 +64,6 @@ func runClaudePrompt(args []string) int {
 		fmt.Fprintln(os.Stderr, "claude model catalog error:", err)
 		return 1
 	}
-	claude.InvalidateCacheForConfigDir(account.ConfigDir)
 	if err := execDelegated(bin, []string{"-p"}, args, claude.EnvForConfigDir(os.Environ(), account.ConfigDir)); err != nil {
 		fmt.Fprintln(os.Stderr, "claude exec error:", err)
 		return 1
@@ -92,7 +91,6 @@ func runCodexPrompt(args []string) int {
 		fmt.Fprintln(os.Stderr, "codex model catalog error:", err)
 		return 1
 	}
-	codex.InvalidateCacheForHome(account.Home)
 	if err := execDelegated(bin, []string{"exec"}, args, codex.EnvForHome(os.Environ(), account.Home)); err != nil {
 		fmt.Fprintln(os.Stderr, "codex exec error:", err)
 		return 1

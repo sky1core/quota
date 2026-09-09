@@ -328,11 +328,6 @@ func runAutoPrompt(opts autoPromptOptions) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if account.provider == "claude" {
-		claude.InvalidateCacheForConfigDir(account.dir)
-	} else {
-		codex.InvalidateCacheForHome(account.dir)
-	}
 	if err := execDelegated(bin, nil, autoPromptArgs(account, opts.prompt), autoPromptEnv(account, os.Environ())); err != nil {
 		fmt.Fprintln(os.Stderr, account.provider+" exec error:", err)
 		return 1

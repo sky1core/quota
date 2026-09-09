@@ -249,6 +249,7 @@ type quotaData struct {
 	resetsAbs map[string]string // key -> "Mon Jul 6 15:04" (absolute reset time, when known)
 	labels    map[string]string // dynamic slot key -> on-screen label, e.g. "claude_extra_1" -> "Fable"
 	errs      map[string]string // provider key (Claude/Codex account key) -> error message
+	warns     map[string]string
 	// Codex reset credits (초기화권), keyed by Codex account key ("codex",
 	// "codex-2", …). Display-only, not part of the keyed bar-selection machinery.
 	// Each value is that account's usable grants, soonest-expiry first; a
@@ -275,6 +276,7 @@ func newQuotaData() quotaData {
 		resetsAbs:      map[string]string{},
 		labels:         map[string]string{},
 		errs:           map[string]string{},
+		warns:          map[string]string{},
 		codexResetRows: map[string][]resetRow{},
 	}
 }
@@ -330,14 +332,122 @@ func (d quotaData) applyWindows(provider string, data map[string]any) {
 	}
 }
 
-// fetchQuota queries every Claude account plus every Codex account in parallel
-// and stores the results under per-provider keys. Every provider is handled
-// identically: its self-describing windows list is applied by applyWindows to
-// "<account>_<window key>" rows. Codex additionally stores its reset credits
-// under d.codexResetRows[<key>]. A provider's failure is recorded under
-// d.errs[<provider key>]. Fetches run concurrently; results are consumed
-// serially from a buffered channel, so the store maps are only ever touched by
-// this goroutine.
+func (d quotaData) hasWindows(prefix string) bool {
+	for k := range d.values {
+		if strings.HasPrefix(k, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (d quotaData) applyResult(provider string, claude bool, data map[string]any) {
+	d.applyWindows(provider, data)
+	if we, ok := data["windowErrors"].([]string); ok && len(we) > 0 {
+		d.warns[provider] = strings.Join(we, "; ")
+	}
+	if !claude {
+		if rc, ok := data["resetCredits"].(map[string]any); ok {
+			d.codexResetRows[provider] = resetCreditRows(rc)
+		}
+	}
+}
+
+func refreshAccepted(d quotaData, p string) bool {
+	if _, hardErr := d.errs[p]; hardErr {
+		return false
+	}
+	if _, warn := d.warns[p]; warn && !d.hasWindows(p+"_") {
+		return false
+	}
+	return true
+}
+
+func acceptFetch(data quotaData, lastOK *quotaData, lastSuccessAt map[string]time.Time, providers, allKeys, codexKeys []string, now time.Time) {
+	carryProvider := func(prefix string) {
+		for _, k := range allKeys {
+			if !strings.HasPrefix(k, prefix) {
+				continue
+			}
+			if v, ok := lastOK.values[k]; ok {
+				if _, exists := data.values[k]; !exists {
+					data.values[k] = v
+				}
+			}
+			if v, ok := lastOK.resets[k]; ok {
+				if _, exists := data.resets[k]; !exists {
+					data.resets[k] = v
+				}
+			}
+			if v, ok := lastOK.resetsAbs[k]; ok {
+				if _, exists := data.resetsAbs[k]; !exists {
+					data.resetsAbs[k] = v
+				}
+			}
+			if v, ok := lastOK.labels[k]; ok {
+				if _, exists := data.labels[k]; !exists {
+					data.labels[k] = v
+				}
+			}
+		}
+	}
+	snapshotProvider := func(prefix string) {
+		for _, k := range allKeys {
+			if !strings.HasPrefix(k, prefix) {
+				continue
+			}
+			delete(lastOK.values, k)
+			delete(lastOK.resets, k)
+			delete(lastOK.resetsAbs, k)
+			delete(lastOK.labels, k)
+			if v, ok := data.values[k]; ok {
+				lastOK.values[k] = v
+			}
+			if v, ok := data.resets[k]; ok {
+				lastOK.resets[k] = v
+			}
+			if v, ok := data.resetsAbs[k]; ok {
+				lastOK.resetsAbs[k] = v
+			}
+			if v, ok := data.labels[k]; ok {
+				lastOK.labels[k] = v
+			}
+		}
+	}
+	accepted := map[string]bool{}
+	for _, p := range providers {
+		accepted[p] = refreshAccepted(data, p)
+	}
+	if lastOK.values != nil {
+		for _, p := range providers {
+			if !accepted[p] {
+				carryProvider(p + "_")
+			}
+		}
+	}
+	for _, p := range providers {
+		if accepted[p] {
+			lastSuccessAt[p] = now
+			if lastOK.values == nil {
+				*lastOK = newQuotaData()
+			}
+			snapshotProvider(p + "_")
+		}
+	}
+	for _, k := range codexKeys {
+		if !accepted[k] {
+			if lastOK.codexResetRows != nil {
+				data.codexResetRows[k] = lastOK.codexResetRows[k]
+			}
+		} else {
+			if lastOK.values == nil {
+				*lastOK = newQuotaData()
+			}
+			lastOK.codexResetRows[k] = data.codexResetRows[k]
+		}
+	}
+}
+
 func fetchQuota(accounts []config.ResolvedAccount, codexAccounts []config.ResolvedCodexAccount, cacheMaxAge time.Duration) quotaData {
 	timeout := 90 * time.Second
 	d := newQuotaData()
@@ -371,14 +481,7 @@ func fetchQuota(accounts []config.ResolvedAccount, codexAccounts []config.Resolv
 			d.errs[r.provider] = r.err.Error()
 			continue
 		}
-		// Same shape for every provider: apply its self-describing windows list.
-		d.applyWindows(r.provider, r.data)
-		// Codex-only extra surface.
-		if !r.claude {
-			if rc, ok := r.data["resetCredits"].(map[string]any); ok {
-				d.codexResetRows[r.provider] = resetCreditRows(rc)
-			}
-		}
+		d.applyResult(r.provider, r.claude, r.data)
 	}
 
 	return d
@@ -843,6 +946,7 @@ func onReady() {
 		miKeepaliveStatus.SetTitle("Keepalive: on (" + keepaliveConfig.Time + ")")
 	}
 	keepaliveContext, cancelKeepalive := context.WithCancel(context.Background())
+	kaTicks := newKeepaliveTicks(keepaliveContext)
 	miAutoStart := systray.AddMenuItemCheckbox("Start at Login", "Applies at the next login", isAutoStartEnabled())
 	miVersion := systray.AddMenuItem("quota-bar "+versionString(), "")
 	miVersion.Disable()
@@ -931,13 +1035,18 @@ func onReady() {
 
 		renderRows(data, stale, showResetTime)
 
-		// One error row per provider (each Claude account + each Codex account).
 		for prov, item := range errItems {
+			label, msg := "", ""
 			if e, ok := data.errs[prov]; ok {
-				if len(e) > 120 {
-					e = e[:120] + "…"
+				label, msg = "Error", e
+			} else if w, ok := data.warns[prov]; ok {
+				label, msg = "Warning", w
+			}
+			if msg != "" {
+				if len(msg) > 120 {
+					msg = msg[:120] + "…"
 				}
-				item.SetTitle("  Error: " + e)
+				item.SetTitle("  " + label + ": " + msg)
 				item.Show()
 			} else {
 				item.Hide()
@@ -982,104 +1091,11 @@ func onReady() {
 		return true
 	}
 	acceptRefresh := func(data quotaData) {
-		// carryProvider fills a failed provider's missing keys from the last
-		// successful snapshot. prefix is exactly "<provider>_"; since account
-		// keys never contain "_", "claude_" cannot match "claude-2_" rows.
-		carryProvider := func(prefix string) {
-			for _, k := range allKeys {
-				if !strings.HasPrefix(k, prefix) {
-					continue
-				}
-				if v, ok := lastOK.values[k]; ok {
-					if _, exists := data.values[k]; !exists {
-						data.values[k] = v
-					}
-				}
-				if v, ok := lastOK.resets[k]; ok {
-					if _, exists := data.resets[k]; !exists {
-						data.resets[k] = v
-					}
-				}
-				if v, ok := lastOK.resetsAbs[k]; ok {
-					if _, exists := data.resetsAbs[k]; !exists {
-						data.resetsAbs[k] = v
-					}
-				}
-				if v, ok := lastOK.labels[k]; ok {
-					if _, exists := data.labels[k]; !exists {
-						data.labels[k] = v
-					}
-				}
-			}
-		}
-		// snapshotProvider replaces the provider's keys in lastOK with the
-		// fresh result. Delete first so keys that vanished from the screen
-		// (e.g. a retired extras row) don't linger and resurrect on a later
-		// failed refresh.
-		snapshotProvider := func(prefix string) {
-			for _, k := range allKeys {
-				if !strings.HasPrefix(k, prefix) {
-					continue
-				}
-				delete(lastOK.values, k)
-				delete(lastOK.resets, k)
-				delete(lastOK.resetsAbs, k)
-				delete(lastOK.labels, k)
-				if v, ok := data.values[k]; ok {
-					lastOK.values[k] = v
-				}
-				if v, ok := data.resets[k]; ok {
-					lastOK.resets[k] = v
-				}
-				if v, ok := data.resetsAbs[k]; ok {
-					lastOK.resetsAbs[k] = v
-				}
-				if v, ok := data.labels[k]; ok {
-					lastOK.labels[k] = v
-				}
-			}
-		}
-		// Keep last successful values for providers that failed this round.
-		if lastOK.values != nil {
-			for _, p := range providers {
-				if _, hasErr := data.errs[p]; hasErr {
-					carryProvider(p + "_")
-				}
-			}
-		}
-		// Update lastOK and lastSuccessAt for providers that succeeded. Success is
-		// "no fetch error", NOT "has ≥1 value": a provider can legitimately return
-		// zero rows (e.g. Codex temporarily exposing no classifiable window), and we
-		// must still snapshot it — so windows that vanished are cleared from lastOK
-		// rather than resurrected by a later carry or toggle repaint — and mark it
-		// fresh so a real success is never flagged stale. Claude always yields data
-		// on success, so its behavior is unchanged.
-		now := time.Now()
-		for _, p := range providers {
-			if _, hasErr := data.errs[p]; !hasErr {
-				lastSuccessAt[p] = now
-				if lastOK.values == nil {
-					lastOK = newQuotaData()
-				}
-				snapshotProvider(p + "_")
-			}
-		}
-		// Codex reset credits ride outside the keyed carry machinery. Per Codex
-		// account: on success take the fresh value (even empty = credits all
-		// gone/expired); on failure keep whatever we last showed for that account.
+		codexKeys := make([]string, 0, len(codexAccounts))
 		for _, a := range codexAccounts {
-			if _, failed := data.errs[a.Key]; failed {
-				if lastOK.codexResetRows != nil {
-					data.codexResetRows[a.Key] = lastOK.codexResetRows[a.Key]
-				}
-			} else {
-				if lastOK.values == nil {
-					lastOK = newQuotaData()
-				}
-				lastOK.codexResetRows[a.Key] = data.codexResetRows[a.Key]
-			}
+			codexKeys = append(codexKeys, a.Key)
 		}
-
+		acceptFetch(data, &lastOK, lastSuccessAt, providers, allKeys, codexKeys, time.Now())
 		lastDisplayed = data
 		renderMenu(data)
 	}
@@ -1184,12 +1200,13 @@ func onReady() {
 			return
 		}
 		release := func() { operations.end(barOperationHandover) }
-		// os.Exit (not systray.Quit) on both handover paths: Quit is itself a
-		// Cocoa main-thread dispatch (rule 1), and the restart must not
-		// depend on a blocking-prone run loop to complete — a blocked Quit
-		// would leave old and new processes running side by side. There is
-		// nothing to tear down gracefully: the gate is held, so no probe is
-		// mid-capture, and the kernel drops the flock when the process dies.
+		log.Printf("update: quiescing keepalive before handover")
+		if !kaTicks.quiesce(keepaliveQuiesceTimeout) {
+			kaTicks.resume(keepaliveContext)
+			release()
+			fail("Busy — try again later", fmt.Errorf("keepalive did not quiesce within %s", keepaliveQuiesceTimeout))
+			return
+		}
 		if program, isJob := launchdJob(); isJob {
 			if sameExecutable(program, bin) {
 				// We are the LaunchAgent's process and its program is the
@@ -1231,6 +1248,7 @@ func onReady() {
 				}
 				log.Printf("update: could not re-acquire pid lock after failed spawn")
 			}
+			kaTicks.resume(keepaliveContext)
 			release()
 			fail("Restart failed — see log", err)
 			return
@@ -1421,9 +1439,17 @@ func onReady() {
 				if keepaliveRunning || settingsBlocked {
 					continue
 				}
+				tickCtx, tickDone, ok := kaTicks.begin()
+				if !ok {
+					continue
+				}
 				service, gen := keepaliveService, keepaliveGeneration
 				keepaliveRunning = true
-				go func() { keepaliveResults <- keepaliveResult{gen, service.Tick(keepaliveContext, time.Now())} }()
+				go func() {
+					r := service.Tick(tickCtx, time.Now())
+					tickDone()
+					keepaliveResults <- keepaliveResult{gen, r}
+				}()
 			case 5:
 				snap, err := snapshotLiveSettings(generation, lastDisplayed, keepaliveStoppedWithoutSave)
 				if err == nil {

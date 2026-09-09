@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sky1core/quota/internal/agenthooks"
@@ -12,6 +14,69 @@ import (
 	"github.com/sky1core/quota/internal/idle"
 	"github.com/sky1core/quota/internal/keepalive"
 )
+
+const keepaliveQuiesceTimeout = 30 * time.Second
+
+type keepaliveTicks struct {
+	mu      sync.Mutex
+	active  int
+	drained chan struct{}
+	blocked bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+}
+
+func newKeepaliveTicks(parent context.Context) *keepaliveTicks {
+	ctx, cancel := context.WithCancel(parent)
+	return &keepaliveTicks{ctx: ctx, cancel: cancel}
+}
+
+func (k *keepaliveTicks) begin() (ctx context.Context, done func(), ok bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.blocked {
+		return nil, nil, false
+	}
+	if k.active == 0 {
+		k.drained = make(chan struct{})
+	}
+	k.active++
+	return k.ctx, func() {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		k.active--
+		if k.active == 0 {
+			close(k.drained)
+		}
+	}, true
+}
+
+func (k *keepaliveTicks) quiesce(timeout time.Duration) bool {
+	k.mu.Lock()
+	k.blocked = true
+	k.cancel()
+	if k.active == 0 {
+		k.mu.Unlock()
+		return true
+	}
+	done := k.drained
+	k.mu.Unlock()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func (k *keepaliveTicks) resume(parent context.Context) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.ctx, k.cancel = context.WithCancel(parent)
+	k.blocked = false
+}
 
 func changeKeepalive(service *keepalive.Service, current settings, next keepalive.Config, now time.Time) (settings, error) {
 	if err := next.Validate(); err != nil {

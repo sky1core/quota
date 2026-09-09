@@ -14,6 +14,138 @@ import (
 	"github.com/sky1core/quota/internal/keepalive"
 )
 
+func TestKeepaliveTicks_QuiesceAwaitsCleanup(t *testing.T) {
+	kt := newKeepaliveTicks(context.Background())
+	ctx, done, ok := kt.begin()
+	if !ok {
+		t.Fatal("begin refused with no handover in progress")
+	}
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer done()
+		<-ctx.Done() // cancelled by quiesce
+		time.Sleep(20 * time.Millisecond)
+		close(cleanupDone)
+	}()
+
+	if !kt.quiesce(2 * time.Second) {
+		t.Fatal("quiesce timed out while cleanup was quick")
+	}
+	select {
+	case <-cleanupDone:
+	default:
+		t.Fatal("quiesce released the caller before the tick finished its cleanup")
+	}
+	if _, _, ok := kt.begin(); ok {
+		t.Fatal("a new tick started while the handover holds keepalive blocked")
+	}
+}
+
+func TestKeepaliveTicks_TimeoutAbortsAndResumes(t *testing.T) {
+	kt := newKeepaliveTicks(context.Background())
+	_, done, ok := kt.begin()
+	if !ok {
+		t.Fatal("begin refused with no handover in progress")
+	}
+	release := make(chan struct{})
+	go func() {
+		defer done()
+		<-release // stuck: ignores cancellation until the test lets it go
+	}()
+
+	if kt.quiesce(100 * time.Millisecond) {
+		t.Fatal("quiesce must time out on a tick that never unwinds")
+	}
+	if _, _, ok := kt.begin(); ok {
+		t.Fatal("new starts must stay blocked after a timed-out quiesce until resume")
+	}
+
+	kt.resume(context.Background())
+	ctx2, done2, ok := kt.begin()
+	if !ok {
+		t.Fatal("resume must unblock new ticks for the retry")
+	}
+	if ctx2.Err() != nil {
+		t.Fatalf("resumed context must be live, got %v", ctx2.Err())
+	}
+	done2()
+	close(release) // let the stuck tick finish so its goroutine and done() unwind
+}
+
+func TestKeepaliveTicks_ParentCancelPropagates(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	kt := newKeepaliveTicks(parent)
+	ctx, done, ok := kt.begin()
+	if !ok {
+		t.Fatal("begin refused")
+	}
+	defer done()
+	cancel()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("parent cancel did not reach the tick context")
+	}
+}
+
+func TestKeepaliveTicksRetryStillWaitsForPreviousRun(t *testing.T) {
+	k := newKeepaliveTicks(context.Background())
+	_, oldDone, _ := k.begin()
+	if k.quiesce(0) {
+		t.Fatal("unfinished run allowed handover")
+	}
+	k.resume(context.Background())
+	_, newDone, _ := k.begin()
+	newDone()
+	if k.quiesce(0) {
+		t.Fatal("previous run was lost after resume")
+	}
+	oldDone()
+	if !k.quiesce(time.Second) {
+		t.Fatal("completed runs blocked handover")
+	}
+	k.resume(context.Background())
+	_, done, ok := k.begin()
+	if !ok {
+		t.Fatal("new generation could not start")
+	}
+	if k.quiesce(0) {
+		t.Fatal("previous completion released a new run")
+	}
+	done()
+	if !k.quiesce(time.Second) {
+		t.Fatal("new generation did not drain")
+	}
+}
+
+func TestKeepaliveTicksConcurrentStartAndQuiesce(t *testing.T) {
+	for range 100 {
+		k := newKeepaliveTicks(context.Background())
+		start := make(chan struct{})
+		finished := make(chan struct{})
+		go func() {
+			defer close(finished)
+			<-start
+			ctx, done, ok := k.begin()
+			if ok {
+				<-ctx.Done()
+				done()
+			}
+		}()
+		close(start)
+		if !k.quiesce(time.Second) {
+			t.Fatal("concurrent start escaped cancellation")
+		}
+		<-finished
+		k.mu.Lock()
+		active := k.active
+		k.mu.Unlock()
+		if active != 0 {
+			t.Fatal("handover released before all runs finished")
+		}
+	}
+}
+
 func TestKeepaliveDisableSurvivesFailedSave(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if err := os.MkdirAll(settingsPath(), 0700); err != nil {

@@ -457,3 +457,46 @@ func TestCodexYieldedCommandCompletesAfterTurn(t *testing.T) {
 		t.Fatalf("post-turn completion not recognized: %v", err)
 	}
 }
+
+func TestAccountPathFailurePreservesIndependentAccounts(t *testing.T) {
+	home := t.TempDir()
+	home, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop := filepath.Join(t.TempDir(), "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	good := Account{Provider: "claude", Key: "healthy", Home: home}
+	bad := Account{Provider: "claude", Key: "broken", Home: loop}
+	for _, accounts := range [][]Account{{good, bad}, {bad, good}} {
+		r := Runtime{Accounts: accounts}
+		got, err := r.runtimeAccounts()
+		if err == nil || len(got) != 1 || got[0] != good {
+			t.Fatalf("lost independent account: %v %v", got, err)
+		}
+		if err := os.WriteFile(filepath.Join(home, "sessions"), []byte("invalid directory"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err = r.Scan(context.Background(), time.Now(), time.Minute, nil)
+		if err == nil || !strings.Contains(err.Error(), "broken") || !strings.Contains(err.Error(), "healthy") || !strings.Contains(err.Error(), "claude runtime registry unavailable") {
+			t.Fatalf("independent scanner was skipped or account errors lost: %v", err)
+		}
+		candidate := Candidate{Provider: "claude", Account: "healthy", Home: home, SessionID: runtimeTestSession, PID: 123, ActivityID: runtimeTestUser}
+		_, err = r.Deliver(context.Background(), candidate, "OK", time.Minute, runtimeTestAuto, func() bool { return true })
+		if err == nil || strings.Contains(err.Error(), "broken") || strings.Contains(err.Error(), "does not match") {
+			t.Fatalf("unrelated account prevented target inspection: %v", err)
+		}
+		candidate.Account, candidate.Home = "broken", loop
+		if _, err = r.Deliver(context.Background(), candidate, "OK", time.Minute, runtimeTestAuto, func() bool { return true }); err == nil {
+			t.Fatal("broken target accepted")
+		}
+	}
+	bad.Key = good.Key
+	for _, accounts := range [][]Account{{good, bad}, {bad, good}} {
+		if got, err := (&Runtime{Accounts: accounts}).runtimeAccounts(); err == nil || len(got) != 0 {
+			t.Fatalf("duplicate key escaped through path error: %v %v", got, err)
+		}
+	}
+}

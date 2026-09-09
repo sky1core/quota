@@ -56,33 +56,34 @@ var runtimeUUID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 var runtimeDeliveries sync.Map
 
 func (r *Runtime) Scan(ctx context.Context, now time.Time, maxAge time.Duration, ignored map[string]string) ([]Candidate, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if now.IsZero() || maxAge <= 0 {
 		return nil, errors.New("keepalive requires an explicit time and positive activity window")
 	}
-	accounts, err := r.runtimeAccounts()
-	if err != nil {
-		return nil, err
-	}
+	accounts, accountErr := r.runtimeAccounts()
 	var candidates []Candidate
 	var failures []error
+	if accountErr != nil {
+		failures = append(failures, accountErr)
+	}
 	for _, account := range accounts {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		accountCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		var found []Candidate
 		var err error
 		if account.Provider == "codex" {
-			found, err = scanCodexRuntime(ctx, account, now, maxAge)
+			found, err = scanCodexRuntime(accountCtx, account, now, maxAge)
 		} else {
-			found, err = scanClaudeRuntime(ctx, account, now, maxAge)
+			found, err = scanClaudeRuntime(accountCtx, account, now, maxAge)
 		}
+		err = errors.Join(err, accountCtx.Err())
+		cancel()
 		if err != nil {
-			failures = append(failures, err)
+			failures = append(failures, fmt.Errorf("keepalive account %s: %w", account.Key, err))
 		}
 		for _, candidate := range found {
 			if candidate.ActivityID != ignored[candidate.Key()] {
@@ -106,10 +107,7 @@ func (r *Runtime) Deliver(ctx context.Context, c Candidate, message string, maxA
 	if maxAge <= 0 || strings.TrimSpace(message) == "" || len(message) > 8192 || strings.IndexByte(message, 0) >= 0 || !runtimeUUID.MatchString(messageID) || ready == nil {
 		return Receipt{}, errors.New("invalid keepalive delivery input")
 	}
-	accounts, err := r.runtimeAccounts()
-	if err != nil {
-		return Receipt{}, err
-	}
+	accounts, accountErr := r.runtimeAccounts()
 	var account Account
 	for _, a := range accounts {
 		if a.Provider == c.Provider && a.Key == c.Account && a.Home == c.Home {
@@ -117,7 +115,7 @@ func (r *Runtime) Deliver(ctx context.Context, c Candidate, message string, maxA
 		}
 	}
 	if account.Home == "" || !runtimeUUID.MatchString(c.SessionID) || c.PID <= 1 || c.ActivityID == "" {
-		return Receipt{}, errors.New("keepalive candidate does not match a configured account and live session")
+		return Receipt{}, errors.Join(accountErr, errors.New("keepalive candidate does not match a configured account and live session"))
 	}
 	key := c.Key()
 	if _, loaded := runtimeDeliveries.LoadOrStore(key, struct{}{}); loaded {
@@ -136,27 +134,33 @@ func (r *Runtime) runtimeAccounts() ([]Account, error) {
 	}
 	accounts := make([]Account, 0, len(r.Accounts))
 	keys, homes := map[string]bool{}, map[string]bool{}
+	var failures []error
 	for _, a := range r.Accounts {
 		if (a.Provider != "claude" && a.Provider != "codex") || a.Key == "" || !filepath.IsAbs(a.Home) {
 			return nil, errors.New("keepalive account requires a supported provider, key, and explicit absolute home")
 		}
+		key := (Candidate{Provider: a.Provider, Account: a.Key}).Key()
+		if keys[key] {
+			return nil, errors.New("keepalive account ownership is ambiguous")
+		}
+		keys[key] = true
 		home, err := filepath.EvalSymlinks(a.Home)
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
-			return nil, errors.New("keepalive account home is unavailable")
+			failures = append(failures, fmt.Errorf("keepalive account %s home is unavailable: %w", a.Key, err))
+			continue
 		}
 		a.Home = filepath.Clean(home)
-		key := (Candidate{Provider: a.Provider, Account: a.Key}).Key()
 		homeKey := a.Provider + "\x00" + a.Home
-		if keys[key] || homes[homeKey] {
+		if homes[homeKey] {
 			return nil, errors.New("keepalive account ownership is ambiguous")
 		}
-		keys[key], homes[homeKey] = true, true
+		homes[homeKey] = true
 		accounts = append(accounts, a)
 	}
-	return accounts, nil
+	return accounts, errors.Join(failures...)
 }
 
 func runtimeRecent(activity, now time.Time, maxAge time.Duration) bool {

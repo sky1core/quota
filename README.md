@@ -107,7 +107,21 @@ quota-cli exec-prompt --agent=claude --model fable "프롬프트"
 
 # 선택된 Codex 계정으로 `codex exec` 실행
 quota-cli exec-prompt --agent=codex --json "프롬프트"
+
+# provider 생략: 모델·effort 두 후보 중 quota에 따라 하나 실행
+quota-cli exec-prompt \
+  --model claude-opus-4-8:high \
+  --model gpt-6-astra:high \
+  -- "프롬프트"
 ```
+
+자동 실행은 `--model 모델명:effort`를 정확히 두 번 받으며 두 후보의 순서는 무관하다.
+등록된 Codex 계정들의 모델 목록에 정확히 일치하면 Codex, 없으면 Claude로 분류한다.
+두 후보는 각 provider 하나씩이어야 한다. 목록 조회 실패는 Claude로 분류하지 않고 오류로 처리한다.
+effort는 `low`, `medium`, `high`, `xhigh`, `max`를 받으며 `ultra`는 허용하지 않는다.
+Codex 계정은 해당 모델·effort를 목록에 제공할 때만 후보가 된다. Claude는 지정값을 그대로 전달한다.
+분류는 모델 지원이나 effort의 실제 적용을 보장하지 않으며, CLI 실행 실패 후 다른 모델로 재시도하지 않는다.
+자동 실행은 `--` 뒤 프롬프트 하나와 stdin을 전달한다. provider 전용 옵션이 필요하면 `--agent`를 명시한다.
 
 등록된 같은 provider 계정들의 60초 공유 캐시를 우선 사용하고, 필요한 계정만 quota를 실측한다.
 신규 작업은 **5시간 quota 창이 있으면 잔여량이 25% 이상**이어야 배정한다. Claude의 `session`, Codex의
@@ -117,11 +131,12 @@ quota-cli exec-prompt --agent=codex --json "프롬프트"
 적용되는 quota 창이 계정별 `minLeftPct` 미만인 계정은 후보에서 제외한다. 기본값은 5%이며,
 이 보존분은 25% 진입 기준과 별개다. 선택 점수는 남은 quota에서 `minLeftPct`를 뺀 여유분이다. 장기 quota를 짧은 quota보다 우선하며,
 여유분이 리셋까지 남은 시간에 비해 많은 계정을 먼저 쓴다.
-Claude에 `--model`을 지정해도 요청 모델값과 실제 추가 quota row label이 맞을 때만 그 row를 본다. 현재 Opus처럼 전용 row가
+provider를 명시한 Claude 호출은 요청 모델값과 실제 추가 quota row label이 맞을 때만 그 row를 본다. 현재 Opus처럼 전용 row가
 없는 모델은 별도 quota를 가정하지 않고 `weekly_all`/`session`으로 비교한다. Fable처럼 해당 모델
 quota의 남은 비율을 읽을 수 있으면 그 계정에는 하한선을 적용한다. 살아남은 모든 후보가 남은 비율을
 읽을 수 있는 해당 모델 quota를 갖고 있을 때만 그 quota를 우선 비교하고, 일부 후보에만 있으면
 `weekly_all`/`session`으로 비교한다. 선택이 끝나면 나머지 인자와 stdin/stdout/stderr, 종료 상태는 각각 `claude -p`와 `codex exec`에 그대로 전달된다.
+자동 실행에서도 Claude 모델별 하한선은 적용하지만, 순위는 모든 자격 충족 계정에 공통인 기간의 집계 quota를 긴 순서로 비교한다. 공통 기간이 없으면 오류로 종료한다.
 대화형 실행은 지원하지 않는다.
 
 #### quota 기반 agent 선택
@@ -148,10 +163,12 @@ quota-cli models refresh --account=codex
 
 등록된 계정별 CLI 메타데이터에서 모델 ID, alias 해석값, effort 지원 정보를 조회한다.
 `~/.config/quota/model-cache/`에 조회 성공 시각과 CLI 버전을 함께 저장한다.
-`exec-prompt`와 `select-agent`는 선택된 계정의 캐시가 없거나 2시간이 지났거나 CLI 버전이 바뀌면
+provider를 명시한 `exec-prompt`와 `select-agent`는 선택된 계정의 캐시가 없거나 2시간이 지났거나 CLI 버전이 바뀌면
 갱신한다. `models refresh`는 즉시 다시 조회한다. 갱신 실패 시 오래된 목록으로 진행하지 않고 오류를 반환한다.
+자동 라우팅은 분류 전에 Codex 계정들의 캐시만 확인한다. 조회 시각은 CLI 응답을 받은 시각이며,
+CLI 자체 캐시가 사용될 수 있으므로 서버 갱신 시각을 뜻하지 않는다. 수동 갱신도 CLI 재조회다.
 목록에 없는 모델이나 누락된 effort 정보는 미확인이다. 이 목록은 모든 실행 가능한 모델을 보장하지 않으며,
-현재 `exec-prompt`의 모델·effort 인자를 차단하거나 수정하지 않는다.
+provider를 명시한 `exec-prompt`의 모델·effort 인자를 차단하거나 수정하지 않는다.
 
 #### 세션 로그 검색
 

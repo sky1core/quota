@@ -181,6 +181,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 |------|-----------|
 | `quota-cli exec-prompt --agent=claude [args...]` | 선택된 Claude 계정으로 `claude -p [args...]` |
 | `quota-cli exec-prompt --agent=codex [args...]` | 선택된 Codex 계정으로 `codex exec [args...]` |
+| `quota-cli exec-prompt --model <model:effort> --model <model:effort> -- <prompt>` | 모델명으로 provider를 분류하고 quota로 실행할 모델·계정을 선택 |
 | `quota-cli select-agent [--agent=all\|claude\|codex] [--json]` | 선택된 provider/account와 실행 prefix 출력 |
 | `quota-cli select-agent --agent=claude --model=<model>` | Claude 모델 row를 반영한 Claude 계정 선택 |
 
@@ -205,7 +206,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 | `quota-cli agent overlay verify [--spec <file>]` | 엔트리 검사 + 런타임별 verify 명령 실행. 모든 configured 런타임이 enforced일 때만 exit 0 |
 
 **`exec-prompt` 동작**:
-- `--agent`는 필수이며 `claude`/`codex`만 허용한다. 그 뒤 `args`는 순서와 값을 바꾸지 않고 고정 접두(`claude -p`/`codex exec`) 뒤에 전달한다. stdin/stdout/stderr와 최종 종료 상태도 원본 CLI가 직접 담당하며, quota-cli는 선택 결과나 중간 데이터를 출력 스트림에 섞지 않는다.
+- `--agent=claude` 또는 `--agent=codex`를 첫 옵션으로 지정하면 그 뒤 `args`는 순서와 값을 바꾸지 않고 고정 접두(`claude -p`/`codex exec`) 뒤에 전달한다. `--agent`를 생략하면 아래 모델명 기반 자동 라우팅을 사용한다. stdin/stdout/stderr와 최종 종료 상태는 원본 CLI가 직접 담당하며, quota-cli는 선택 결과나 중간 데이터를 출력 스트림에 섞지 않는다.
 - 선택할 provider의 등록 계정만 60초 캐시 기준으로 병렬 조회한다. 조회 실패 계정과 현재 적용되는 quota 창이 계정별 `minLeftPct` 미만인 계정은 후보에서 제외하며, 후보가 없으면 원본 CLI를 실행하지 않고 실패한다.
 - 신규 작업은 응답에 5시간 quota 창이 있을 때 그 잔여량이 25% 이상이어야 배정한다. Claude는 `session`, Codex는 실제 `windowMins == 300`인 창으로 판정한다. 정상 응답에 주간 창만 있으면 그 창의 `minLeftPct` 기준으로 판단한다. 조회·파싱 오류나 `windowErrors`가 있거나, 적용할 창의 잔여량을 유효한 0~100% 수치로 읽을 수 없거나, 적용할 창이 하나도 없으면 제외한다. 응답에 없는 제한을 계정 종류로 추정하거나 추가하지 않는다. 이 진입 기준은 계정별 보존분 `minLeftPct`(기본 5%)와 별개로 적용하며 선택 점수에서 차감하지 않는다.
 - 장기 창을 최우선, 짧은 창을 다음 순서로 비교한다. 비교값은 `남은 % - minLeftPct`이며, 양쪽 모두 리셋 시각을 알면 `비교값 / 리셋까지 남은 분`이 큰 쪽을 우선해, 같은 비교값이면 먼저 리셋되는 계정을 먼저 소비한다. 리셋 시각을 모르는 쪽이 있으면 비교값으로 비교한다. 모든 비교값이 같으면 config 순서가 빠른 계정을 선택한다.
@@ -221,10 +222,26 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 - 통합 모드에서는 provider 공통 장기/단기 창만 비교하고 Claude 모델별 extra row는 보지 않는다. `--model`은 `--agent=claude`에서만 허용한다.
 - 후보가 없으면 후보별 실패/제외 이유를 출력한 뒤 non-zero로 종료한다. JSON 모드는 같은 정보를 `selected`, `candidates`, `error`, `generated`로 출력하며 후보별 실행 정보는 `command`, `setEnv`, `unsetEnv`에 둔다.
 
+**모델명 기반 자동 라우팅**:
+- `exec-prompt`에서 provider를 생략하면 `--model <model:effort>` 또는 `--model=<model:effort>`를 정확히 두 번 지정하고 `--` 뒤에 프롬프트 하나를 전달한다. 모델과 effort는 각 값 안에서 결합하며, 후보 옵션 순서는 분류·선택 결과에 영향을 주지 않는다. 빈 값, 중복 모델, 별도 `--effort`나 알 수 없는 옵션은 입력 오류다.
+- 자동 라우팅의 provider 분류는 Codex CLI 모델 목록만 사용한다. 요청 모델명이 목록의 모델 ID와 정확히 일치하면 Codex, 일치하는 항목이 없으면 Claude로 분류한다. 모델명의 접두나 부분 문자열로 판정하지 않는다.
+- 등록된 Codex 계정들의 목록 합집합으로 분류하며, 한 계정이라도 목록 조회가 실패하면 분류를 중단한다. 두 후보는 각각 Claude와 Codex로 분류되어야 한다. 같은 provider의 두 모델은 입력 오류다.
+- Codex 목록은 숨김 모델을 포함하며 아래 캐시 유효기간·CLI 버전·수동 갱신 계약을 적용한다. 조회 실패나 사용할 수 있는 목록이 없는 상태를 모델 불일치로 취급하지 않고 오류로 종료한다.
+- Claude 전체 모델 목록 조회, 외부 모델 DB, 인증값 직접 읽기는 분류에 사용하지 않는다. 인증은 각 CLI가 담당한다.
+- 분류 결과는 모델 지원 여부 검증이 아니다. 모델명은 선택한 CLI에 그대로 전달하고, CLI가 거부하면 그 실패를 전달한다. 실패 후 다른 provider로 재시도하거나 모델명을 자동 교체하지 않는다.
+- 자동 라우팅에서 `ultra`는 effort 선택 대상에서 제외하며 명시 요청도 거부한다. provider 분류만으로 요청 effort의 실제 적용을 보장하지 않는다.
+- 자동 라우팅의 effort 입력은 `low`, `medium`, `high`, `xhigh`, `max`를 허용한다. Codex 계정은 자기 목록에 요청 모델과 effort가 명시되어 있을 때만 실행 후보가 된다. Claude effort는 지정값을 전달하며 실제 적용 검증으로 표시하지 않는다.
+- quota 진입 기준과 계정별 하한선은 기존 실행과 동일하다. Claude 모델별 quota는 진입 하한선에 반영하되 provider 간 순위는 집계 장기·단기 창으로 비교한다. 완전 동률이면 Claude 계정을 먼저, 같은 provider에서는 설정 순서를 적용한다. 모델 입력 순서로 우선순위를 정하지 않는다.
+- 순위 비교에는 자격을 충족한 모든 계정에 공통으로 존재하는 기간의 집계 창만 사용하고 긴 기간부터 비교한다. Claude `weekly_all`은 7일, `session`은 5시간으로 Codex의 실제 기간과 맞춘다. 공통 기간이 없으면 비교 불가 오류로 종료하며, 5시간 창을 주간 창과 비교하지 않는다.
+- 선택한 계정과 모델·effort로 한 번만 실행한다. Claude에는 `--model`과 `--effort`, Codex에는 `--model`과 `model_reasoning_effort` 설정으로 전달한다. 자동 라우팅은 임의의 provider 전용 CLI 옵션을 받지 않는다.
+- 자동 Claude 실행은 상속된 `CLAUDE_CODE_EFFORT_LEVEL`을 자식 환경에서 제거해 지정 effort를 덮어쓰지 않게 한다. 사용자 전역 설정은 수정하지 않는다.
+- 이 규칙은 모델명 기반 자동 라우팅에 적용한다. provider를 명시하는 기존 `exec-prompt --agent=claude|codex`의 인자 전달 계약과 구분한다.
+
 **모델·effort 메타데이터 캐시**:
 - `quota-cli models [refresh] [--agent=all|claude|codex] [--account=<key>] [--json]`은 등록 계정의 모델·effort 메타데이터를 조회한다. 기본 provider 범위는 `all`이며 `refresh`는 유효기간과 무관하게 다시 조회한다.
 - 캐시는 `~/.config/quota/model-cache/`에서 provider·CLI 절대 경로·계정 설정 디렉터리별로 분리한다. 조회 성공 시각, 조회한 CLI 버전, 모델 ID와 CLI가 제공한 alias 해석값·effort 정보를 저장한다. capability 누락은 미확인으로 보존하고 지원 불가로 추론하지 않는다.
-- `exec-prompt` 실행 전과 `select-agent` 선택 결과 반환 전에 선택된 계정의 캐시를 확인한다. 캐시 부재, 성공 시각으로부터 2시간 이상 경과, CLI 버전 변경이면 새로 조회한다. 일반 quota 조회와 quota-bar는 이 조회를 수행하지 않는다.
+- provider를 명시한 `exec-prompt` 실행 전과 `select-agent` 선택 결과 반환 전에 선택된 계정의 캐시를 확인한다. 자동 라우팅은 분류 전에 등록된 Codex 계정들의 캐시만 확인한다. 캐시 부재, 성공 시각으로부터 2시간 이상 경과, CLI 버전 변경이면 새로 조회한다. 일반 quota 조회와 quota-bar는 이 조회를 수행하지 않는다.
+- 성공 시각은 quota가 CLI 목록 응답을 받은 시각이다. CLI 내부 캐시 사용 여부나 서버에서 직접 갱신한 시각을 보장하지 않는다. 수동 갱신도 quota 캐시를 건너뛰고 CLI에 재조회하는 동작이다.
 - 같은 캐시의 조회·교체를 프로세스 간 직렬화하고 원자적으로 저장한다. 조회 실패, 빈 목록, 조회 중 CLI 버전 변경은 기존 내용·성공 시각을 갱신하지 않고 호출을 실패시킨다. 손상된 캐시는 오류로 보고하며 `models refresh`로 복구한다. 실패 시 이전 캐시나 다른 provider로 자동 대체하지 않는다.
 - 목록은 CLI가 보고한 메타데이터이며 실제 프롬프트 실행이나 요청 effort 적용을 증명하지 않는다. 목록 밖 모델은 미확인이고, `exec-prompt`의 원본 CLI 인자 전달 계약은 유지한다.
 

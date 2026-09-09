@@ -62,6 +62,10 @@ func TestRunExecPromptWith(t *testing.T) {
 	}{
 		{name: "claude", args: []string{"--agent=claude", "--model", "fable", "prompt"}, agent: "claude", wantArgs: []string{"--model", "fable", "prompt"}, wantCode: 11},
 		{name: "codex", args: []string{"--agent=codex", "--json", "prompt"}, agent: "codex", wantArgs: []string{"--json", "prompt"}, wantCode: 12},
+		{name: "claude native args untouched", args: []string{"--agent=claude", "--model=fable", "--effort=ultra", "--unknown", "--", "one", "two"}, agent: "claude", wantArgs: []string{"--model=fable", "--effort=ultra", "--unknown", "--", "one", "two"}, wantCode: 11},
+		{name: "codex native args untouched", args: []string{"--agent=codex", "--model", "code-model", "-c", `model_reasoning_effort="ultra"`, "--agent=other", "--", "prompt"}, agent: "codex", wantArgs: []string{"--model", "code-model", "-c", `model_reasoning_effort="ultra"`, "--agent=other", "--", "prompt"}, wantCode: 12},
+		{name: "claude no native args", args: []string{"--agent=claude"}, agent: "claude", wantArgs: []string{}, wantCode: 11},
+		{name: "codex no native args", args: []string{"--agent=codex"}, agent: "codex", wantArgs: []string{}, wantCode: 12},
 		{name: "missing agent", wantCode: 2},
 		{name: "unknown agent", args: []string{"--agent=other", "prompt"}, wantCode: 2},
 		{name: "positional claude agent", args: []string{"claude", "prompt"}, wantCode: 2},

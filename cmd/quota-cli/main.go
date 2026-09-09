@@ -50,6 +50,7 @@ func main() {
 
 func printExecPromptUsage() {
 	fmt.Fprint(os.Stderr, `usage:
+  quota-cli exec-prompt --model MODEL:EFFORT --model MODEL:EFFORT -- PROMPT
   quota-cli exec-prompt --agent=claude [args...]
   quota-cli exec-prompt --agent=codex  [args...]
 `)
@@ -71,9 +72,13 @@ func runExecPromptWith(args []string, claudeRunner, codexRunner func([]string) i
 	case "--agent=codex":
 		return codexRunner(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "invalid exec-prompt agent selector: %q\n\n", args[0])
-		printExecPromptUsage()
-		return 2
+		opts, err := parseAutoPromptArgs(args)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			printExecPromptUsage()
+			return 2
+		}
+		return runAutoPrompt(opts)
 	}
 }
 

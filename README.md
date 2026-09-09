@@ -139,6 +139,20 @@ quota-cli select-agent --json
 기본 통합 모드는 모델별 Claude row를 보지 않으며, 모델별 row는 `--agent=claude --model=...`에서만
 적용한다.
 
+#### 모델·effort 목록 캐시
+
+```bash
+quota-cli models --agent=all --json
+quota-cli models refresh --account=codex
+```
+
+등록된 계정별 CLI 메타데이터에서 모델 ID, alias 해석값, effort 지원 정보를 조회한다.
+`~/.config/quota/model-cache/`에 조회 성공 시각과 CLI 버전을 함께 저장한다.
+`exec-prompt`와 `select-agent`는 선택된 계정의 캐시가 없거나 2시간이 지났거나 CLI 버전이 바뀌면
+갱신한다. `models refresh`는 즉시 다시 조회한다. 갱신 실패 시 오래된 목록으로 진행하지 않고 오류를 반환한다.
+목록에 없는 모델이나 누락된 effort 정보는 미확인이다. 이 목록은 모든 실행 가능한 모델을 보장하지 않으며,
+현재 `exec-prompt`의 모델·effort 인자를 차단하거나 수정하지 않는다.
+
 #### 세션 로그 검색
 
 ```bash

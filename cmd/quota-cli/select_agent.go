@@ -95,6 +95,23 @@ func runSelectAgentWithIO(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	result, err := buildSelectAgentResult(cfg, opts, now)
+	if err == nil && result.Selected != nil {
+		selected := result.Selected
+		dirKey := "CODEX_HOME"
+		if selected.Provider == "claude" {
+			dirKey = "CLAUDE_CONFIG_DIR"
+		}
+		if catalogErr := refreshDelegationModels(selected.Provider, selected.SetEnv[dirKey]); catalogErr != nil {
+			err = fmt.Errorf("%s model catalog: %w", selected.Key, catalogErr)
+			for i := range result.Candidates {
+				if result.Candidates[i].Key == selected.Key {
+					result.Candidates[i].Status = selectAgentStatusError
+					result.Candidates[i].Error = err.Error()
+				}
+			}
+			result.Selected = nil
+		}
+	}
 	if opts.jsonOut {
 		if err != nil {
 			result.Error = err.Error()

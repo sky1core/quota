@@ -30,6 +30,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "account" {
 		os.Exit(runAccount(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "models" {
+		os.Exit(runModels(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "exec-prompt" {
 		os.Exit(runExecPrompt(os.Args[2:]))
 	}

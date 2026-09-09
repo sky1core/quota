@@ -221,6 +221,13 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 - 통합 모드에서는 provider 공통 장기/단기 창만 비교하고 Claude 모델별 extra row는 보지 않는다. `--model`은 `--agent=claude`에서만 허용한다.
 - 후보가 없으면 후보별 실패/제외 이유를 출력한 뒤 non-zero로 종료한다. JSON 모드는 같은 정보를 `selected`, `candidates`, `error`, `generated`로 출력하며 후보별 실행 정보는 `command`, `setEnv`, `unsetEnv`에 둔다.
 
+**모델·effort 메타데이터 캐시**:
+- `quota-cli models [refresh] [--agent=all|claude|codex] [--account=<key>] [--json]`은 등록 계정의 모델·effort 메타데이터를 조회한다. 기본 provider 범위는 `all`이며 `refresh`는 유효기간과 무관하게 다시 조회한다.
+- 캐시는 `~/.config/quota/model-cache/`에서 provider·CLI 절대 경로·계정 설정 디렉터리별로 분리한다. 조회 성공 시각, 조회한 CLI 버전, 모델 ID와 CLI가 제공한 alias 해석값·effort 정보를 저장한다. capability 누락은 미확인으로 보존하고 지원 불가로 추론하지 않는다.
+- `exec-prompt` 실행 전과 `select-agent` 선택 결과 반환 전에 선택된 계정의 캐시를 확인한다. 캐시 부재, 성공 시각으로부터 2시간 이상 경과, CLI 버전 변경이면 새로 조회한다. 일반 quota 조회와 quota-bar는 이 조회를 수행하지 않는다.
+- 같은 캐시의 조회·교체를 프로세스 간 직렬화하고 원자적으로 저장한다. 조회 실패, 빈 목록, 조회 중 CLI 버전 변경은 기존 내용·성공 시각을 갱신하지 않고 호출을 실패시킨다. 손상된 캐시는 오류로 보고하며 `models refresh`로 복구한다. 실패 시 이전 캐시나 다른 provider로 자동 대체하지 않는다.
+- 목록은 CLI가 보고한 메타데이터이며 실제 프롬프트 실행이나 요청 effort 적용을 증명하지 않는다. 목록 밖 모델은 미확인이고, `exec-prompt`의 원본 CLI 인자 전달 계약은 유지한다.
+
 **`agent hooks` 동작**:
 - 정책 파일은 기본적으로 `~/.config/quota/agent-hooks.d/*.json`에서 읽는다. 모든 `agent hooks` 하위 명령은 `--policy-dir <dir>`로 다른 정책 디렉터리를 지정할 수 있다.
 - `init --preset=github-history-guard`는 PR/Issue 생성·수정 같은 GitHub 협업 메타데이터 작업은 허용하면서 `git push`, `git send-pack`, `git pull`, `git merge`, `git rebase`, `git commit --amend`, `git reset --hard`, `git filter-branch`, `git hook run`, `git for-each-repo`, `git update-ref`, `git replace`, `git reflog expire`, 강제 branch reset, branch delete/move/copy, tag force/delete, `git config alias.*`/`include.*`, shell `alias`/`source`/`.`/`trap`/`xargs`, `gh pr merge`, `gh pr update-branch`, `gh pr checkout/co --force`, `gh repo edit --visibility`, `gh repo sync`, `gh release create/delete`, raw `gh api`, `gh alias set/import/delete`, `gh extension exec`, 알 수 없는 `git`/`gh` alias·extension dispatch, 허용 형식 밖의 `gh stack ...`를 차단하는 기본 정책을 생성한다. 기존 정책 파일이 있으면 `--force` 없이는 덮어쓰지 않는다.
@@ -261,7 +268,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 - 토큰 소모를 제한하기 위해 `search` 기본값은 `limit=20`, `max-chars=220`이고, `show` 기본값은 `tail=40`, `max-chars=880`이다. `max-chars=0`은 해당 truncation을 끈다.
 - `show`의 `session-ref`는 configured 로그 root 아래 파일의 정확한 path, basename, 또는 path 부분 문자열로 해석한다. 여러 파일이 맞으면 후보를 출력하고 실패한다.
 
-- 첫 인자가 `account`/`update`/`exec-prompt`/`select-agent`/`session-log`이면 해당 서브커맨드로 동작한다. 그 외 조회 모드는 `quota-cli [-json] [-timeout N]` 형태만 허용하며, 알 수 없는 positional 인자가 남으면 실행하지 않고 usage와 함께 실패한다.
+- 첫 인자가 `account`/`update`/`models`/`exec-prompt`/`select-agent`/`session-log`이면 해당 서브커맨드로 동작한다. 그 외 조회 모드는 `quota-cli [-json] [-timeout N]` 형태만 허용하며, 알 수 없는 positional 인자가 남으면 실행하지 않고 usage와 함께 실패한다.
 - 검증 규칙은 조회 시 `config.json`을 읽는 규칙과 동일하다(같은 형식/중복 규칙). Claude는 `^claude-\d+$`, Codex는 `^codex-\d+$`.
 
 **동작**:

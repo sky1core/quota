@@ -42,6 +42,14 @@ func decodeJSONObject(b []byte) (map[string]any, error) {
 }
 
 func UpdateJSONObjectWithBackup(path string, update func(map[string]any) error) (map[string]any, error) {
+	return updateJSONObjectWithBackup(path, update, syscall.LOCK_EX)
+}
+
+func TryUpdateJSONObjectWithBackup(path string, update func(map[string]any) error) (map[string]any, error) {
+	return updateJSONObjectWithBackup(path, update, syscall.LOCK_EX|syscall.LOCK_NB)
+}
+
+func updateJSONObjectWithBackup(path string, update func(map[string]any) error, lockFlags int) (map[string]any, error) {
 	target, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -68,12 +76,15 @@ func UpdateJSONObjectWithBackup(path string, update func(map[string]any) error) 
 	}
 	defer lock.Close()
 	for {
-		err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX)
+		err = syscall.Flock(int(lock.Fd()), lockFlags)
 		if err != syscall.EINTR {
 			break
 		}
 	}
 	if err != nil {
+		if err == syscall.EWOULDBLOCK {
+			return nil, fmt.Errorf("configuration is being edited; try saving again: %w", err)
+		}
 		return nil, err
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)

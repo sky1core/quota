@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sky1core/quota/internal/agenthooks"
 	"github.com/sky1core/quota/internal/config"
 	"github.com/sky1core/quota/internal/idle"
 	"github.com/sky1core/quota/internal/keepalive"
@@ -66,4 +67,32 @@ func keepaliveResultText(result keepalive.Result) (string, string) {
 		title += " — see log"
 	}
 	return title, strings.Join(result.CacheDetails, "\n")
+}
+
+func stopKeepalive(service *keepalive.Service, current settings) settings {
+	service.Stop()
+	next := keepalive.DefaultConfig()
+	if current.Keepalive != nil {
+		next = *current.Keepalive
+	}
+	next.Enabled = false
+	current.Keepalive = &next
+	return current
+}
+
+func persistKeepaliveOff() error {
+	_, err := agenthooks.TryUpdateJSONObjectWithBackup(settingsPath(), func(root map[string]any) error {
+		value, ok := root["keepalive"]
+		if !ok {
+			root["keepalive"] = map[string]any{"enabled": false}
+			return nil
+		}
+		fields, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("keepalive must be an object; runtime is stopped but settings were not saved")
+		}
+		fields["enabled"] = false
+		return nil
+	})
+	return err
 }

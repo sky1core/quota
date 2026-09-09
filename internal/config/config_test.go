@@ -1,10 +1,14 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/sky1core/quota/internal/agenthooks"
 )
 
 func writeConfig(t *testing.T, body string) string {
@@ -396,4 +400,98 @@ func TestResolveAccounts_InvalidDoesNotBlockValid(t *testing.T) {
 
 func testFloatPtr(v float64) *float64 {
 	return &v
+}
+
+func TestUpdatePreservesJSONAndAborts(t *testing.T) {
+	writeConfig(t, `{"unknown":{"id":9007199254740993,"decimal":1.234567890123456789,"exponent":1e+80}}`)
+	if err := Update(func(root map[string]any) error {
+		root["claudeAccounts"] = []ClaudeAccount{{Key: "claude-2", ConfigDir: "~/account"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, number := range []string{"9007199254740993", "1.234567890123456789", "1e+80"} {
+		if !strings.Contains(string(before), number) {
+			t.Fatalf("number %s changed: %s", number, before)
+		}
+	}
+	failure := errors.New("rejected")
+	if err := Update(func(root map[string]any) error {
+		delete(root, "unknown")
+		return failure
+	}); !errors.Is(err, failure) {
+		t.Fatalf("update error = %v", err)
+	}
+	after, err := os.ReadFile(Path())
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("rejected update changed file: %s, %v", after, err)
+	}
+}
+
+func TestSaveSharesSettingsLock(t *testing.T) {
+	writeConfig(t, `{"claudeAccounts":[]}`)
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	settingsDone := make(chan error, 1)
+	go func() {
+		_, err := agenthooks.UpdateJSONObjectWithBackup(Path(), func(root map[string]any) error {
+			close(locked)
+			<-release
+			root["settingsChange"] = true
+			return nil
+		})
+		settingsDone <- err
+	}()
+	<-locked
+	saved := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		saved <- Save(Config{CodexAccounts: []CodexAccount{{Key: "codex-2", Home: "~/account"}}})
+	}()
+	<-started
+	select {
+	case err := <-saved:
+		close(release)
+		<-settingsDone
+		t.Fatalf("Save completed while settings held lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-settingsDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-saved; err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load()
+	if err != nil || len(cfg.CodexAccounts) != 1 {
+		t.Fatalf("replacement not saved: %+v, %v", cfg, err)
+	}
+}
+
+func TestConfigWritersRejectMalformedJSON(t *testing.T) {
+	for _, body := range []string{`{broken`, `null`, `[]`, `{} {}`} {
+		t.Run(body, func(t *testing.T) {
+			writeConfig(t, body)
+			called := false
+			if err := Update(func(root map[string]any) error {
+				called = true
+				return nil
+			}); err == nil || called {
+				t.Fatalf("invalid config accepted: called=%v err=%v", called, err)
+			}
+			if err := Save(Config{}); err == nil {
+				t.Fatal("Save replaced malformed config")
+			}
+			got, err := os.ReadFile(Path())
+			if err != nil || string(got) != body {
+				t.Fatalf("malformed config changed: %s, %v", got, err)
+			}
+		})
+	}
 }

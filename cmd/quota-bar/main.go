@@ -3,15 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime/debug"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"text/template"
@@ -58,8 +59,7 @@ const (
 )
 
 // resetCreditSlots is the number of pre-allocated submenu rows under the Codex
-// "Reset credits" item, one per usable reset credit (초기화권). systray cannot add items
-// at runtime, so we allocate a fixed pool and hide the unused ones. The parent's
+// "Reset credits" item, one per usable reset credit (초기화권). The parent's
 // count reflects the true number even if it exceeds the visible detail rows.
 const resetCreditSlots = 8
 
@@ -89,8 +89,7 @@ type settings struct {
 	// menu; default false keeps the historical relative display.
 	ShowResetTime bool `json:"showResetTime"`
 	// RefreshActiveMinutes / RefreshIdleMinutes override the built-in refresh
-	// cadences (defaultRefreshActive / defaultRefreshIdle). They are only read
-	// from the config file — there is no menu control. Absent or <= 0 means
+	// cadences (defaultRefreshActive / defaultRefreshIdle). Absent or <= 0 means
 	// "use the built-in default" (explicit default, never an implicit fallback).
 	RefreshActiveMinutes int `json:"refreshActiveMinutes,omitempty"`
 	RefreshIdleMinutes   int `json:"refreshIdleMinutes,omitempty"`
@@ -620,47 +619,6 @@ func isAutoStartEnabled() bool {
 	return err == nil
 }
 
-func enableAutoStart() error {
-	exePath, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	// Resolve symlinks to get the real path
-	exePath, err = filepath.EvalSymlinks(exePath)
-	if err != nil {
-		return err
-	}
-	p := launchAgentPath()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	f, err := os.Create(p)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	pathEnv := os.Getenv("PATH")
-	if pathEnv == "" {
-		pathEnv = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-	}
-	home, _ := os.UserHomeDir()
-	if err := plistTmpl.Execute(f, struct{ Label, ExePath, Path, Home string }{launchLabel, exePath, pathEnv, home}); err != nil {
-		os.Remove(p)
-		return err
-	}
-	if err := exec.Command("launchctl", "load", p).Run(); err != nil {
-		os.Remove(p)
-		return err
-	}
-	return nil
-}
-
-func disableAutoStart() error {
-	p := launchAgentPath()
-	_ = exec.Command("launchctl", "unload", p).Run()
-	return os.Remove(p)
-}
-
 // launchdJob asks launchd whether this process is the running process of the
 // quota-bar LaunchAgent job. It returns the job's program path (what a
 // KeepAlive respawn would launch — launchctl prints it even for
@@ -688,7 +646,7 @@ func launchdJob() (program string, isJob bool) {
 
 // sameExecutable reports whether two paths name the same file, tolerating
 // symlink/normalization differences: the plist program is symlink-resolved
-// at enableAutoStart time while the install path is a raw GOBIN join, so an
+// when registration is saved while the install path is a raw GOBIN join, so an
 // exact string compare would misjudge a healthy setup whenever either path
 // crosses a symlink.
 func sameExecutable(a, b string) bool {
@@ -765,21 +723,7 @@ func onReady() {
 
 	cfg := loadSettings()
 
-	// Effective refresh cadences (config override or built-in default), fixed at
-	// startup like the account layout. Editing quota-bar.json requires a restart.
-	// The stale threshold trails the *slower* of the two configured cadences by
-	// staleMargin, so no normally-refreshed provider is ever marked stale — even
-	// if the active interval is configured longer than the idle one.
-	refreshActiveDur := cfg.activeInterval()
-	refreshIdleDur := cfg.idleInterval()
 	cacheMaxAge := barCacheMaxAge
-	staleThresholdDur := cfg.staleThreshold()
-	log.Printf("refresh cadence: active=%s idle=%s cache<=%s (stale>%s)", refreshActiveDur, refreshIdleDur, cacheMaxAge, staleThresholdDur)
-
-	// Resolve the Claude accounts to show. systray cannot add or remove menu
-	// items at runtime, so the account set (and therefore the menu layout) is
-	// fixed here at onReady from the config as it exists now. Editing
-	// ~/.config/quota/config.json requires restarting quota-bar to take effect.
 	appCfg, cfgErr := config.Load()
 	if cfgErr != nil {
 		log.Printf("config load: %v (default account only)", cfgErr)
@@ -793,98 +737,100 @@ func onReady() {
 		log.Printf("config: %s", s)
 	}
 
-	// providers lists every provider key in refresh/stale order: each Claude
-	// account key followed by each Codex account key.
-	providers := make([]string, 0, len(accounts)+len(codexAccounts))
-	for _, a := range accounts {
-		providers = append(providers, a.Key)
-	}
-	for _, a := range codexAccounts {
-		providers = append(providers, a.Key)
-	}
-
 	var (
-		allItems []menuItem                       // every checkbox row, in display order
-		allKeys  []string                         // every menu key, in display order
-		errItems = map[string]*systray.MenuItem{} // provider key -> hidden error row
+		providers          []string
+		allItems           []menuItem
+		allKeys            []string
+		errItems           = map[string]*systray.MenuItem{}
+		miResetsByKey      = map[string]*systray.MenuItem{}
+		resetChildrenByKey = map[string][]*systray.MenuItem{}
 	)
-
-	// addWindowSlots pre-allocates one hidden checkbox per window key of a
-	// provider's vocabulary (systray cannot add rows at runtime). Every row is
-	// dynamic: renderRows shows it only when a refresh supplied that window, and
-	// its text is that window's own label — quota-bar never names a window.
-	addWindowSlots := func(account string, windowKeys []string) {
-		for _, wk := range windowKeys {
-			key := itemKey(account, wk)
-			mi := systray.AddMenuItemCheckbox("-", "", cfg.isSelected(key))
-			mi.Hide()
-			allItems = append(allItems, menuItem{key, mi})
-			allKeys = append(allKeys, key)
+	type accountMenuBlock struct {
+		header, errorRow, resets *systray.MenuItem
+		rows                     []*systray.MenuItem
+		resetChildren            []*systray.MenuItem
+	}
+	accountParents := map[string]*systray.MenuItem{
+		"claude": systray.AddMenuItem("Claude", ""),
+		"codex":  systray.AddMenuItem("Codex", ""),
+	}
+	pools := map[string][]*accountMenuBlock{}
+	reconcileMenus := func() {
+		providers, allItems, allKeys = nil, nil, nil
+		clear(errItems)
+		clear(miResetsByKey)
+		clear(resetChildrenByKey)
+		for _, blocks := range pools {
+			for _, b := range blocks {
+				b.header.Hide()
+				b.errorRow.Hide()
+				for _, row := range b.rows {
+					row.Hide()
+				}
+				if b.resets != nil {
+					b.resets.Hide()
+				}
+			}
+		}
+		add := func(provider string, index int, key, label string, keys []string) {
+			if index == len(pools[provider]) {
+				parent := accountParents[provider]
+				b := &accountMenuBlock{header: parent.AddSubMenuItem("", ""), errorRow: parent.AddSubMenuItem("", "")}
+				b.header.Disable()
+				b.errorRow.Disable()
+				b.errorRow.Hide()
+				for range keys {
+					b.rows = append(b.rows, parent.AddSubMenuItemCheckbox("-", "", false))
+				}
+				if provider == "codex" {
+					b.resets = parent.AddSubMenuItem("Reset credits", "")
+					b.resets.Hide()
+					for range resetCreditSlots {
+						b.resetChildren = append(b.resetChildren, b.resets.AddSubMenuItem("", ""))
+					}
+				}
+				pools[provider] = append(pools[provider], b)
+			}
+			b := pools[provider][index]
+			b.header.SetTitle("── " + label + " ──")
+			b.header.Show()
+			providers = append(providers, key)
+			errItems[key] = b.errorRow
+			for i, wk := range keys {
+				item := menuItem{itemKey(key, wk), b.rows[i]}
+				if cfg.isSelected(item.key) {
+					item.item.Check()
+				} else {
+					item.item.Uncheck()
+				}
+				item.item.Hide()
+				allItems = append(allItems, item)
+				allKeys = append(allKeys, item.key)
+			}
+			if b.resets != nil {
+				miResetsByKey[key], resetChildrenByKey[key] = b.resets, b.resetChildren
+			}
+		}
+		for i, a := range accounts {
+			add("claude", i, a.Key, a.Label, claude.WindowKeys())
+		}
+		for i, a := range codexAccounts {
+			add("codex", i, a.Key, a.Label, codex.WindowKeys())
 		}
 	}
-
-	// -- Per-account Claude sections --
-	for _, a := range accounts {
-		header := systray.AddMenuItem("── "+a.Label+" ──", "")
-		header.Disable()
-
-		errItem := systray.AddMenuItem("", "")
-		errItem.Hide()
-		errItem.Disable()
-		errItems[a.Key] = errItem
-
-		addWindowSlots(a.Key, claude.WindowKeys())
-	}
-
-	// -- Per-account Codex sections --
-	// Each Codex account (default "codex" plus any "codex-N") gets its own header,
-	// error row, its window slots (same mechanism as Claude), and a Reset credits
-	// parent+submenu — the only provider-specific surface here.
-	// miResetsByKey/resetChildrenByKey let renderRows paint each account's reset
-	// credits independently.
-	miResetsByKey := map[string]*systray.MenuItem{}
-	resetChildrenByKey := map[string][]*systray.MenuItem{}
-	for _, a := range codexAccounts {
-		header := systray.AddMenuItem("── "+a.Label+" ──", "")
-		header.Disable()
-
-		errItem := systray.AddMenuItem("", "")
-		errItem.Hide()
-		errItem.Disable()
-		errItems[a.Key] = errItem
-
-		addWindowSlots(a.Key, codex.WindowKeys())
-
-		// Codex reset credits (초기화권): a parent row whose submenu lists each usable
-		// credit's expiry. Display-only — not a checkbox, never shown in the top bar.
-		// The parent opens the submenu; children are info rows. Both are left enabled
-		// (not disabled) so the text renders at full contrast instead of the greyed,
-		// hard-to-read disabled style; their clicks simply go unhandled (harmless —
-		// systray drops sends on an unread channel). Both start hidden until a
-		// refresh brings data. A fixed slot pool (resetCreditSlots) is pre-allocated
-		// because systray cannot add items at runtime.
-		miResets := systray.AddMenuItem("Reset credits: -", "")
-		miResets.Hide()
-		children := make([]*systray.MenuItem, resetCreditSlots)
-		for i := 0; i < resetCreditSlots; i++ {
-			ch := miResets.AddSubMenuItem("", "")
-			ch.Hide()
-			children[i] = ch
-		}
-		miResetsByKey[a.Key] = miResets
-		resetChildrenByKey[a.Key] = children
-	}
+	reconcileMenus()
 
 	systray.AddSeparator()
 	miUpdated := systray.AddMenuItem("Not yet updated", "")
 	miUpdated.Disable()
 	miResetMode := systray.AddMenuItemCheckbox("Reset as clock time", "리셋을 남은시간 대신 절대 시각으로 표시", cfg.ShowResetTime)
 	miRefresh := systray.AddMenuItem("Refresh", "Refresh now")
+	miSettings := systray.AddMenuItem("Settings…", "General, accounts and keepalive")
 	keepaliveConfig := keepalive.DefaultConfig()
 	if cfg.Keepalive != nil {
 		keepaliveConfig = *cfg.Keepalive
 	}
-	miKeepalive := systray.AddMenuItemCheckbox("Keep session caches warm", "기본: 평일 12:30 · PC 무입력 5분 · 최근 50분 활동한 대기 세션 (일정은 설정 파일에서 변경)", keepaliveConfig.Enabled)
+	miKeepalive := systray.AddMenuItemCheckbox("Keep session caches warm", "기본: 평일 12:30 · PC 무입력 5분 · 최근 50분 활동한 대기 세션 (Settings에서 일정 변경)", keepaliveConfig.Enabled)
 	miKeepaliveStatus := systray.AddMenuItem("Keepalive: off", "잠자기·앱 종료로 놓친 일정은 건너뜁니다. 캐시 유지 효과는 모델에 따라 다릅니다.")
 	miKeepaliveStatus.Disable()
 	keepaliveService := newKeepaliveService(accounts, codexAccounts)
@@ -897,7 +843,7 @@ func onReady() {
 		miKeepaliveStatus.SetTitle("Keepalive: on (" + keepaliveConfig.Time + ")")
 	}
 	keepaliveContext, cancelKeepalive := context.WithCancel(context.Background())
-	miAutoStart := systray.AddMenuItemCheckbox("Start at Login", "", isAutoStartEnabled())
+	miAutoStart := systray.AddMenuItemCheckbox("Start at Login", "Applies at the next login", isAutoStartEnabled())
 	miVersion := systray.AddMenuItem("quota-bar "+versionString(), "")
 	miVersion.Disable()
 	miUpdate := systray.AddMenuItem("Check for Updates…", "최신 릴리스 확인 후 설치하고 재시작")
@@ -907,17 +853,21 @@ func onReady() {
 	miQuit := systray.AddMenuItem("Quit", "Quit")
 
 	var (
-		mu            sync.Mutex
-		running       bool
-		lastOK        quotaData
-		lastSuccessAt = map[string]time.Time{}
+		operations          barOperationGate
+		settingsBlocked     bool
+		generation          uint64
+		refreshGeneration   uint64
+		keepaliveGeneration uint64
+		lastDisplayed       quotaData
+		lastOK              quotaData
+		lastSuccessAt       = map[string]time.Time{}
 	)
 
 	getStaleProviders := func() map[string]bool {
 		now := time.Now()
 		sp := map[string]bool{}
 		for _, p := range providers {
-			if t, ok := lastSuccessAt[p]; ok && now.Sub(t) > staleThresholdDur {
+			if t, ok := lastSuccessAt[p]; ok && now.Sub(t) > cfg.staleThreshold() {
 				sp[p] = true
 			}
 		}
@@ -976,10 +926,8 @@ func onReady() {
 	}
 
 	renderMenu := func(data quotaData) {
-		mu.Lock()
 		stale := getStaleProviders()
 		showResetTime := cfg.ShowResetTime
-		mu.Unlock()
 
 		renderRows(data, stale, showResetTime)
 
@@ -996,9 +944,7 @@ func onReady() {
 			}
 		}
 
-		mu.Lock()
 		cfgSnap := cfg
-		mu.Unlock()
 		systray.SetTitle(barTitle(cfgSnap, data, stale, allKeys))
 		iconData := ui.GenIcon(iconPct(cfgSnap, data, allKeys))
 		systray.SetTemplateIcon(iconData, iconData)
@@ -1007,9 +953,7 @@ func onReady() {
 		if len(stale) > 0 {
 			var staleNames []string
 			for p := range stale {
-				mu.Lock()
 				ago := time.Since(lastSuccessAt[p]).Truncate(time.Minute)
-				mu.Unlock()
 				staleNames = append(staleNames, fmt.Sprintf("%s %s ago", p, ago))
 			}
 			updatedText += " (" + strings.Join(staleNames, ", ") + "!)"
@@ -1017,26 +961,27 @@ func onReady() {
 		miUpdated.SetTitle(updatedText)
 	}
 
+	type refreshResult struct {
+		generation uint64
+		data       quotaData
+	}
+	refreshResults := make(chan refreshResult, 1)
 	refresh := func() bool {
-		mu.Lock()
-		if running {
-			mu.Unlock()
+		if settingsBlocked || !operations.begin(barOperationRefresh) {
 			return false
 		}
-		running = true
-		mu.Unlock()
-
-		defer func() {
-			mu.Lock()
-			running = false
-			mu.Unlock()
+		gen := refreshGeneration
+		claudeSnapshot := append([]config.ResolvedAccount(nil), accounts...)
+		codexSnapshot := append([]config.ResolvedCodexAccount(nil), codexAccounts...)
+		go func() {
+			log.Printf("refresh start")
+			data := fetchQuota(claudeSnapshot, codexSnapshot, cacheMaxAge)
+			log.Printf("refresh done")
+			refreshResults <- refreshResult{gen, data}
 		}()
-
-		log.Printf("refresh start")
-		data := fetchQuota(accounts, codexAccounts, cacheMaxAge)
-		log.Printf("refresh done")
-
-		mu.Lock()
+		return true
+	}
+	acceptRefresh := func(data quotaData) {
 		// carryProvider fills a failed provider's missing keys from the last
 		// successful snapshot. prefix is exactly "<provider>_"; since account
 		// keys never contain "_", "claude_" cannot match "claude-2_" rows.
@@ -1134,65 +1079,9 @@ func onReady() {
 				lastOK.codexResetRows[a.Key] = data.codexResetRows[a.Key]
 			}
 		}
-		mu.Unlock()
 
+		lastDisplayed = data
 		renderMenu(data)
-		return true
-	}
-
-	copyData := func(d quotaData) quotaData {
-		c := quotaData{
-			values:         make(map[string]string, len(d.values)),
-			resets:         make(map[string]string, len(d.resets)),
-			resetsAbs:      make(map[string]string, len(d.resetsAbs)),
-			labels:         make(map[string]string, len(d.labels)),
-			errs:           make(map[string]string, len(d.errs)),
-			codexResetRows: make(map[string][]resetRow, len(d.codexResetRows)),
-		}
-		for k, v := range d.values {
-			c.values[k] = v
-		}
-		for k, v := range d.resets {
-			c.resets[k] = v
-		}
-		for k, v := range d.resetsAbs {
-			c.resetsAbs[k] = v
-		}
-		for k, v := range d.labels {
-			c.labels[k] = v
-		}
-		for k, v := range d.errs {
-			c.errs[k] = v
-		}
-		for k, rows := range d.codexResetRows {
-			c.codexResetRows[k] = append([]resetRow(nil), rows...)
-		}
-		return c
-	}
-
-	handleToggle := func(mi menuItem) {
-		mu.Lock()
-		cfg.toggle(mi.key)
-		saveSettings(cfg)
-		selected := cfg.isSelected(mi.key)
-		cfgSnap := cfg
-		data := copyData(lastOK)
-		stale := getStaleProviders()
-		mu.Unlock()
-		if selected {
-			mi.item.Check()
-		} else {
-			mi.item.Uncheck()
-		}
-		if data.values != nil {
-			systray.SetTitle(barTitle(cfgSnap, data, stale, allKeys))
-			iconData := ui.GenIcon(iconPct(cfgSnap, data, allKeys))
-			systray.SetTemplateIcon(iconData, iconData)
-		} else {
-			systray.SetTitle("")
-			iconData := ui.GenIcon(50)
-			systray.SetTemplateIcon(iconData, iconData)
-		}
 	}
 
 	// menuUpdate installs the latest release and restarts by handing over to
@@ -1285,12 +1174,7 @@ func onReady() {
 		log.Printf("update: waiting for refresh gate")
 		acquired := false
 		for i := 0; i < 360 && !acquired; i++ { // ≤3min: outlasts one 90s fetch round
-			mu.Lock()
-			if !running {
-				running = true
-				acquired = true
-			}
-			mu.Unlock()
+			acquired = operations.begin(barOperationHandover)
 			if !acquired {
 				time.Sleep(500 * time.Millisecond)
 			}
@@ -1299,11 +1183,7 @@ func onReady() {
 			fail("Busy — try again later", fmt.Errorf("refresh gate not released within 3m"))
 			return
 		}
-		release := func() {
-			mu.Lock()
-			running = false
-			mu.Unlock()
-		}
+		release := func() { operations.end(barOperationHandover) }
 		// os.Exit (not systray.Quit) on both handover paths: Quit is itself a
 		// Cocoa main-thread dispatch (rule 1), and the restart must not
 		// depend on a blocking-prone run loop to complete — a blocked Quit
@@ -1358,136 +1238,266 @@ func onReady() {
 		os.Exit(0)
 	}
 
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-keepaliveContext.Done():
-				return
-			case <-ticker.C:
-				result := keepaliveService.Tick(keepaliveContext, time.Now())
-				if result.Status != "" {
-					mu.Lock()
-					if !keepaliveConfig.Enabled {
-						mu.Unlock()
-						continue
-					}
-					title, detail := keepaliveResultText(result)
-					if result.Error != nil {
-						log.Printf("keepalive: %v", result.Error)
-					}
-					miKeepaliveStatus.SetTitle(title)
-					miKeepaliveStatus.SetTooltip(detail)
-					mu.Unlock()
-				}
-			}
-		}
-	}()
-	go refresh()
-	go func() {
-		lastRefresh := time.Now()
-		for {
-			time.Sleep(30 * time.Second)
-			idleSec := idle.Seconds()
-			var interval time.Duration
-			switch {
-			case idleSec > pauseThreshold.Seconds():
-				continue // paused, just re-check idle
-			case idleSec > idleThreshold.Seconds():
-				interval = refreshIdleDur
-			default:
-				interval = refreshActiveDur
-			}
-			if time.Since(lastRefresh) >= interval {
-				if refresh() {
-					lastRefresh = time.Now()
-				}
-			}
-		}
-	}()
-
-	// Funnel all checkbox clicks into one channel so toggles are handled
-	// serially, alongside the other menu actions.
-	toggleCh := make(chan menuItem)
-	for _, mi := range allItems {
-		go func(mi menuItem) {
-			for range mi.item.ClickedCh {
-				toggleCh <- mi
-			}
-		}(mi)
+	type applyRequest struct {
+		snapshot liveSettingsSnapshot
+		draft    liveSettingsDraft
+		result   chan error
 	}
+	applyRequests := make(chan applyRequest)
+	type keepaliveResult struct {
+		generation uint64
+		result     keepalive.Result
+	}
+	keepaliveResults := make(chan keepaliveResult, 1)
+	keepaliveRunning := false
+	repaint := func() {
+		for _, mi := range allItems {
+			if cfg.isSelected(mi.key) {
+				mi.item.Check()
+			} else {
+				mi.item.Uncheck()
+			}
+		}
+		if cfg.ShowResetTime {
+			miResetMode.Check()
+		} else {
+			miResetMode.Uncheck()
+		}
+		if isAutoStartEnabled() {
+			miAutoStart.Check()
+		} else {
+			miAutoStart.Uncheck()
+		}
+		miKeepalive.Enable()
+		if keepaliveConfig.Enabled {
+			miKeepalive.Check()
+			miKeepaliveStatus.SetTitle("Keepalive: on (" + keepaliveConfig.Time + ")")
+		} else {
+			miKeepalive.Uncheck()
+			miKeepaliveStatus.SetTitle("Keepalive: off")
+		}
+		miKeepaliveStatus.SetTooltip("")
+		stale := getStaleProviders()
+		renderRows(lastDisplayed, stale, cfg.ShowResetTime)
+		systray.SetTitle(barTitle(cfg, lastDisplayed, stale, allKeys))
+		icon := ui.GenIcon(iconPct(cfg, lastDisplayed, allKeys))
+		systray.SetTemplateIcon(icon, icon)
+	}
+	keepaliveStoppedWithoutSave := false
+	apply := func(snap liveSettingsSnapshot, draft liveSettingsDraft) (applyErr error) {
+		stopping := keepaliveConfig.Enabled && !draft.Keepalive.Enabled
+		if stopping {
+			cfg = stopKeepalive(keepaliveService, cfg)
+			keepaliveConfig = *cfg.Keepalive
+			keepaliveGeneration++
+			miKeepalive.Uncheck()
+			miKeepaliveStatus.SetTitle("Keepalive: off")
+		}
+		defer func() {
+			if stopping && applyErr != nil {
+				keepaliveStoppedWithoutSave = true
+				generation++
+				miKeepaliveStatus.SetTitle("Keepalive: off — settings not saved")
+				applyErr = fmt.Errorf("Keepalive is stopped for this run; settings were not saved: %w", applyErr)
+			}
+		}()
 
+		if settingsBlocked {
+			return errors.New("a previous rollback failed; inspect the settings files before restarting the app")
+		}
+		if !operations.begin(barOperationSettings) {
+			return errors.New("app update is handing over; settings were not saved")
+		}
+		defer operations.end(barOperationSettings)
+		next, shared, err := persistLiveSettings(snap, draft, generation)
+		if err != nil {
+			var rollback *settingsRollbackError
+			if errors.As(err, &rollback) {
+				settingsBlocked = true
+				refreshGeneration++
+				keepaliveGeneration++
+				keepaliveService.Stop()
+				miUpdated.SetTitle("Settings recovery required — refresh paused")
+				miKeepalive.Uncheck()
+				miKeepaliveStatus.SetTitle("Keepalive: stopped — settings recovery required")
+			}
+			return err
+		}
+		nextAccounts, _ := shared.ResolveAccounts()
+		nextCodexAccounts, _ := shared.ResolveCodexAccounts()
+		accountsChanged := !reflect.DeepEqual(accounts, nextAccounts) || !reflect.DeepEqual(codexAccounts, nextCodexAccounts)
+		keepaliveStoppedWithoutSave = false
+		cfg = next
+		accounts, codexAccounts = nextAccounts, nextCodexAccounts
+		generation++
+		if accountsChanged || !reflect.DeepEqual(keepaliveConfig, *cfg.Keepalive) {
+			keepaliveGeneration++
+			keepaliveService.Stop()
+			keepaliveService = newKeepaliveService(accounts, codexAccounts)
+			keepaliveConfig = *cfg.Keepalive
+			if err := keepaliveService.Configure(keepaliveConfig, time.Now()); err != nil {
+				return err
+			}
+		}
+		if accountsChanged {
+			refreshGeneration++
+			lastOK, lastDisplayed = newQuotaData(), newQuotaData()
+			clear(lastSuccessAt)
+			reconcileMenus()
+			miUpdated.SetTitle("Accounts changed — awaiting refresh")
+		}
+		repaint()
+		if accountsChanged {
+			refresh()
+		}
+		return nil
+	}
+	editCurrent := func(edit func(*liveSettingsDraft)) {
+		snap, err := snapshotLiveSettings(generation, lastDisplayed, keepaliveStoppedWithoutSave)
+		if err == nil {
+			edit(&snap.draft)
+			err = apply(snap, snap.draft)
+		}
+		if err != nil {
+			log.Printf("settings: %v", err)
+			miUpdated.SetTitle("Settings not saved — see log")
+		}
+	}
 	go func() {
+		refreshTicker := time.NewTicker(30 * time.Second)
+		keepaliveTicker := time.NewTicker(10 * time.Second)
+		defer refreshTicker.Stop()
+		defer keepaliveTicker.Stop()
+		lastRefresh := time.Now()
+		refresh()
 		for {
-			select {
-			case mi := <-toggleCh:
-				handleToggle(mi)
-			case <-miKeepalive.ClickedCh:
-				mu.Lock()
-				next := keepaliveConfig
-				next.Enabled = !next.Enabled
-				updated, err := changeKeepalive(keepaliveService, cfg, next, time.Now())
-				cfg = updated
-				if cfg.Keepalive != nil {
-					keepaliveConfig = *cfg.Keepalive
+			channels := []reflect.SelectCase{}
+			for _, channel := range []any{applyRequests, refreshResults, keepaliveResults, refreshTicker.C, keepaliveTicker.C,
+				miSettings.ClickedCh, miKeepalive.ClickedCh, miResetMode.ClickedCh, miRefresh.ClickedCh, miUpdate.ClickedCh, miAutoStart.ClickedCh, miQuit.ClickedCh} {
+				channels = append(channels, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(channel)})
+			}
+			for _, mi := range allItems {
+				channels = append(channels, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(mi.item.ClickedCh)})
+			}
+			chosen, value, _ := reflect.Select(channels)
+			switch chosen {
+			case 0:
+				request := value.Interface().(applyRequest)
+				request.result <- apply(request.snapshot, request.draft)
+			case 1:
+				result := value.Interface().(refreshResult)
+				operations.end(barOperationRefresh)
+				if result.generation != refreshGeneration {
+					refresh()
+					continue
+				}
+				acceptRefresh(result.data)
+				lastRefresh = time.Now()
+			case 2:
+				result := value.Interface().(keepaliveResult)
+				keepaliveRunning = false
+				if result.generation != keepaliveGeneration || !keepaliveConfig.Enabled || result.result.Status == "" {
+					continue
+				}
+				title, detail := keepaliveResultText(result.result)
+				miKeepaliveStatus.SetTitle(title)
+				miKeepaliveStatus.SetTooltip(detail)
+				if result.result.Error != nil {
+					log.Printf("keepalive: %v", result.result.Error)
+				}
+			case 3:
+				seconds := idle.Seconds()
+				if seconds > pauseThreshold.Seconds() {
+					continue
+				}
+				interval := cfg.activeInterval()
+				if seconds > idleThreshold.Seconds() {
+					interval = cfg.idleInterval()
+				}
+				if time.Since(lastRefresh) >= interval {
+					refresh()
+				}
+			case 4:
+				if keepaliveRunning || settingsBlocked {
+					continue
+				}
+				service, gen := keepaliveService, keepaliveGeneration
+				keepaliveRunning = true
+				go func() { keepaliveResults <- keepaliveResult{gen, service.Tick(keepaliveContext, time.Now())} }()
+			case 5:
+				snap, err := snapshotLiveSettings(generation, lastDisplayed, keepaliveStoppedWithoutSave)
+				if err == nil {
+					var encoded []byte
+					encoded, err = json.Marshal(snap.draft)
+					if err == nil {
+						err = openSettingsWindow(string(encoded), func(raw string) error {
+							draft, err := decodeLiveSettings(raw)
+							if err != nil {
+								return err
+							}
+							result := make(chan error, 1)
+							select {
+							case applyRequests <- applyRequest{snap, draft, result}:
+							case <-keepaliveContext.Done():
+								return errors.New("app is closing")
+							}
+							select {
+							case err := <-result:
+								return err
+							case <-keepaliveContext.Done():
+								return errors.New("app is closing")
+							}
+						})
+					}
 				}
 				if err != nil {
-					if !keepaliveConfig.Enabled {
-						miKeepalive.Uncheck()
-						miKeepaliveStatus.SetTitle("Keepalive: off — settings not saved; see log")
-					}
-					log.Printf("keepalive: %v", err)
-				} else if keepaliveConfig.Enabled {
-					miKeepalive.Check()
-					miKeepaliveStatus.SetTitle("Keepalive: on (" + next.Time + ")")
-				} else {
+					log.Printf("settings: %v", err)
+					miUpdated.SetTitle("Cannot open Settings — see log")
+				}
+			case 6:
+				if keepaliveConfig.Enabled {
+					cfg = stopKeepalive(keepaliveService, cfg)
+					keepaliveConfig = *cfg.Keepalive
+					keepaliveGeneration++
+					generation++
 					miKeepalive.Uncheck()
 					miKeepaliveStatus.SetTitle("Keepalive: off")
-				}
-				mu.Unlock()
-			case <-miResetMode.ClickedCh:
-				mu.Lock()
-				cfg.ShowResetTime = !cfg.ShowResetTime
-				saveSettings(cfg)
-				on := cfg.ShowResetTime
-				stale := getStaleProviders()
-				data := copyData(lastOK)
-				mu.Unlock()
-				if on {
-					miResetMode.Check()
+					keepaliveStoppedWithoutSave = true
+					saveErr := errors.New("app update is handing over; settings were not saved")
+					if operations.begin(barOperationSettings) {
+						saveErr = persistKeepaliveOff()
+						operations.end(barOperationSettings)
+					}
+					if err := saveErr; err != nil {
+						log.Printf("keepalive stopped; settings not saved: %v", err)
+						miKeepaliveStatus.SetTitle("Keepalive: off — settings not saved")
+					} else {
+						keepaliveStoppedWithoutSave = false
+					}
 				} else {
-					miResetMode.Uncheck()
+					editCurrent(func(d *liveSettingsDraft) { d.Keepalive.Enabled = true })
 				}
-				// Repaint row titles only — leave error rows, the "Updated"
-				// line, bar title and icon (all mode-independent) untouched.
-				renderRows(data, stale, on)
-			case <-miRefresh.ClickedCh:
-				go refresh()
-			case <-miUpdate.ClickedCh:
+			case 7:
+				editCurrent(func(d *liveSettingsDraft) { d.ShowResetTime = !d.ShowResetTime })
+			case 8:
+				refresh()
+			case 9:
 				go menuUpdate()
-			case <-miAutoStart.ClickedCh:
-				if isAutoStartEnabled() {
-					if err := disableAutoStart(); err != nil {
-						log.Printf("disableAutoStart: %v", err)
-					}
-				} else {
-					if err := enableAutoStart(); err != nil {
-						log.Printf("enableAutoStart: %v", err)
-					}
-				}
-				// Reflect actual state regardless of error
-				if isAutoStartEnabled() {
-					miAutoStart.Check()
-				} else {
-					miAutoStart.Uncheck()
-				}
-			case <-miQuit.ClickedCh:
+			case 10:
+				editCurrent(func(d *liveSettingsDraft) { d.StartAtLogin = !d.StartAtLogin })
+			case 11:
 				cancelKeepalive()
 				keepaliveService.Stop()
 				intentionalQuit = true
 				systray.Quit()
 				return
+			default:
+				mi := allItems[chosen-12]
+				editCurrent(func(d *liveSettingsDraft) {
+					selected := settings{Selected: d.Selected}
+					selected.toggle(mi.key)
+					d.Selected = selected.Selected
+				})
 			}
 		}
 	}()

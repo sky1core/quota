@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,5 +90,53 @@ func TestKeepaliveDisplaySeparatesRepliesAndCache(t *testing.T) {
 	title, _ = keepaliveResultText(r)
 	if !strings.Contains(title, "see log") {
 		t.Fatal("failure hidden")
+	}
+}
+
+func TestKeepaliveQuickOffIgnoresUnrelatedSettings(t *testing.T) {
+	for _, broken := range []bool{false, true} {
+		t.Run(fmt.Sprint(broken), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			now := time.Date(2026, 9, 9, 12, 29, 59, 0, time.UTC)
+			next := keepalive.DefaultConfig()
+			next.Enabled = true
+			service := keepalive.NewService(nil, filepath.Join(t.TempDir(), "state.json"), func() float64 { t.Fatal("stopped service queried idle state"); return 0 })
+			if err := service.Configure(next, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(settingsPath()), 0700); err != nil {
+				t.Fatal(err)
+			}
+			original := `{"selected":["obsolete_item"],"futureNumber":9007199254740993,"keepalive":{"enabled":true,"time":"invalid","future":true}}`
+			if broken {
+				original = "invalid JSON"
+			}
+			if err := os.WriteFile(settingsPath(), []byte(original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			current := stopKeepalive(service, settings{Keepalive: &next})
+			err := persistKeepaliveOff()
+			if (err != nil) != broken {
+				t.Fatalf("save: %v", err)
+			}
+			if current.Keepalive.Enabled {
+				t.Fatal("runtime remained enabled")
+			}
+			if got := service.Tick(context.Background(), now.Add(time.Second)); got.Status != "" || got.Error != nil {
+				t.Fatalf("stopped service ran: %+v", got)
+			}
+			saved, _ := os.ReadFile(settingsPath())
+			if broken {
+				if string(saved) != original {
+					t.Fatal("corrupt source overwritten")
+				}
+			} else {
+				for _, want := range []string{`9007199254740993`, `"obsolete_item"`, `"invalid"`, `"enabled": false`, `"future": true`} {
+					if !strings.Contains(string(saved), want) {
+						t.Fatalf("lost field %s: %s", want, saved)
+					}
+				}
+			}
+		})
 	}
 }

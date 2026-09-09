@@ -316,26 +316,28 @@ func accountAdd(args []string) int {
 	}
 	key, dir := args[0], args[1]
 
-	cfg, err := config.Load()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "config load error:", err)
-		return 1
-	}
-
 	switch {
 	case config.ClaudeExtraKeyRe.MatchString(key):
-		return claudeAccountAdd(cfg, key, dir)
+		return claudeAccountAdd(key, dir)
 	case config.CodexExtraKeyRe.MatchString(key):
-		return codexAccountAdd(cfg, key, dir)
+		return codexAccountAdd(key, dir)
 	default:
 		fmt.Fprintf(os.Stderr, "거부: key %q는 claude-<N> 또는 codex-<N> 형식이어야 함 (예: claude-2, codex-2)\n", key)
 		return 1
 	}
 }
 
-func claudeAccountAdd(cfg config.Config, key, dir string) int {
-	if err := validateNewAccount(cfg.ClaudeAccounts, key, dir); err != nil {
-		fmt.Fprintln(os.Stderr, "거부:", err)
+func claudeAccountAdd(key, dir string) int {
+	err := updateAccountConfig(func(cfg config.Config, root map[string]any) error {
+		if err := validateNewAccount(cfg.ClaudeAccounts, key, dir); err != nil {
+			return err
+		}
+		rows, _ := root["claudeAccounts"].([]any)
+		root["claudeAccounts"] = append(rows, map[string]any{"key": key, "configDir": dir})
+		return nil
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config update error:", err)
 		return 1
 	}
 	// Warn (do not fail) if the config dir doesn't exist yet.
@@ -343,30 +345,28 @@ func claudeAccountAdd(cfg config.Config, key, dir string) int {
 	if fi, statErr := os.Stat(exp); statErr != nil || !fi.IsDir() {
 		fmt.Fprintf(os.Stderr, "경고: %s 가 없거나 디렉터리가 아님 — 해당 계정이 로그인돼 있는지 확인하세요\n", exp)
 	}
-	cfg.ClaudeAccounts = append(cfg.ClaudeAccounts, config.ClaudeAccount{Key: key, ConfigDir: dir})
-	if err := config.Save(cfg); err != nil {
-		fmt.Fprintln(os.Stderr, "config save error:", err)
-		return 1
-	}
 	fmt.Printf("등록됨: %s → %s\n", key, dir)
 	fmt.Println("확인: quota-cli   (계정이 로그인 안 돼 있으면 해당 계정만 errors로 표시됨)")
 	return 0
 }
 
-func codexAccountAdd(cfg config.Config, key, dir string) int {
-	if err := validateNewCodexAccount(cfg.CodexAccounts, key, dir); err != nil {
-		fmt.Fprintln(os.Stderr, "거부:", err)
+func codexAccountAdd(key, dir string) int {
+	err := updateAccountConfig(func(cfg config.Config, root map[string]any) error {
+		if err := validateNewCodexAccount(cfg.CodexAccounts, key, dir); err != nil {
+			return err
+		}
+		rows, _ := root["codexAccounts"].([]any)
+		root["codexAccounts"] = append(rows, map[string]any{"key": key, "home": dir})
+		return nil
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config update error:", err)
 		return 1
 	}
 	// Warn (do not fail) if the CODEX_HOME doesn't exist yet.
 	exp := config.ExpandTilde(dir)
 	if fi, statErr := os.Stat(exp); statErr != nil || !fi.IsDir() {
 		fmt.Fprintf(os.Stderr, "경고: %s 가 없거나 디렉터리가 아님 — 해당 CODEX_HOME에 로그인돼 있는지 확인하세요\n", exp)
-	}
-	cfg.CodexAccounts = append(cfg.CodexAccounts, config.CodexAccount{Key: key, Home: dir})
-	if err := config.Save(cfg); err != nil {
-		fmt.Fprintln(os.Stderr, "config save error:", err)
-		return 1
 	}
 	fmt.Printf("등록됨: %s → %s\n", key, dir)
 	fmt.Println("확인: quota-cli   (해당 CODEX_HOME에 로그인 안 돼 있으면 그 계정만 errors로 표시됨)")
@@ -383,54 +383,64 @@ func accountRemove(args []string) int {
 	}
 	key := args[0]
 
-	cfg, err := config.Load()
+	err := updateAccountConfig(func(_ config.Config, root map[string]any) error {
+		field := "claudeAccounts"
+		if config.CodexExtraKeyRe.MatchString(key) {
+			field = "codexAccounts"
+		}
+		rows, _ := root[field].([]any)
+		kept := make([]any, 0, len(rows))
+		found := false
+		for _, row := range rows {
+			account, _ := row.(map[string]any)
+			rowKey, _ := account["key"].(string)
+			if rowKey == key {
+				found = true
+				continue
+			}
+			kept = append(kept, row)
+		}
+		if !found {
+			return fmt.Errorf("계정 %q 없음", key)
+		}
+		root[field] = kept
+		removeExecPromptAccountSetting(root, key)
+		return nil
+	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "config load error:", err)
-		return 1
-	}
-
-	found := false
-	if config.CodexExtraKeyRe.MatchString(key) {
-		kept := make([]config.CodexAccount, 0, len(cfg.CodexAccounts))
-		for _, a := range cfg.CodexAccounts {
-			if a.Key == key {
-				found = true
-				continue
-			}
-			kept = append(kept, a)
-		}
-		cfg.CodexAccounts = kept
-	} else {
-		kept := make([]config.ClaudeAccount, 0, len(cfg.ClaudeAccounts))
-		for _, a := range cfg.ClaudeAccounts {
-			if a.Key == key {
-				found = true
-				continue
-			}
-			kept = append(kept, a)
-		}
-		cfg.ClaudeAccounts = kept
-	}
-	if !found {
-		fmt.Fprintf(os.Stderr, "계정 %q 없음\n", key)
-		return 1
-	}
-	removeExecPromptAccountSetting(&cfg, key)
-	if err := config.Save(cfg); err != nil {
-		fmt.Fprintln(os.Stderr, "config save error:", err)
+		fmt.Fprintln(os.Stderr, "config update error:", err)
 		return 1
 	}
 	fmt.Printf("제거됨: %s\n", key)
 	return 0
 }
 
-func removeExecPromptAccountSetting(cfg *config.Config, key string) {
-	if cfg.ExecPrompt == nil || len(cfg.ExecPrompt.AccountSettings) == 0 {
+func updateAccountConfig(update func(config.Config, map[string]any) error) error {
+	return config.Update(func(root map[string]any) error {
+		b, err := json.Marshal(root)
+		if err != nil {
+			return err
+		}
+		var cfg config.Config
+		if err := json.Unmarshal(b, &cfg); err != nil {
+			return err
+		}
+		return update(cfg, root)
+	})
+}
+
+func removeExecPromptAccountSetting(root map[string]any, key string) {
+	execPrompt, _ := root["execPrompt"].(map[string]any)
+	settings, _ := execPrompt["accountSettings"].(map[string]any)
+	if len(settings) == 0 {
 		return
 	}
-	delete(cfg.ExecPrompt.AccountSettings, key)
-	if len(cfg.ExecPrompt.AccountSettings) == 0 {
-		cfg.ExecPrompt = nil
+	delete(settings, key)
+	if len(settings) == 0 {
+		delete(execPrompt, "accountSettings")
+	}
+	if len(execPrompt) == 0 {
+		delete(root, "execPrompt")
 	}
 }
 

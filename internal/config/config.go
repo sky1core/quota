@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/sky1core/quota/internal/agenthooks"
 )
 
 // ClaudeAccount is an additional Claude account to query, beyond the default
@@ -73,23 +75,27 @@ func Load() (Config, error) {
 	return c, nil
 }
 
-// Save writes the config atomically (temp file + rename). configDir values are
-// stored verbatim as the user provided them (e.g. "~/.claude-2").
 func Save(c Config) error {
-	p := Path()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(c, "", "  ")
+	b, err := json.Marshal(c)
 	if err != nil {
 		return err
 	}
-	b = append(b, '\n')
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	var replacement map[string]json.RawMessage
+	if err := json.Unmarshal(b, &replacement); err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	return Update(func(root map[string]any) error {
+		clear(root)
+		for key, value := range replacement {
+			root[key] = value
+		}
+		return nil
+	})
+}
+
+func Update(update func(map[string]any) error) error {
+	_, err := agenthooks.UpdateJSONObjectWithBackup(Path(), update)
+	return err
 }
 
 // ResolvedAccount is a validated Claude account to query.

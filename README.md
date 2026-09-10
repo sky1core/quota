@@ -122,8 +122,7 @@ effort는 `low`, `medium`, `high`, `xhigh`, `max`를 받으며 `ultra`는 허용
 Codex 계정은 해당 모델·effort를 목록에 제공할 때만 후보가 된다. Claude는 지정값을 그대로 전달한다.
 분류는 모델 지원이나 effort의 실제 적용을 보장하지 않으며, CLI 실행 실패 후 다른 모델로 재시도하지 않는다.
 자동 실행은 `--` 뒤 프롬프트 하나와 stdin을 전달한다. provider 전용 옵션이 필요하면 `--agent`를 명시한다.
-읽기 중심 리뷰에는 `--` 앞에 `--read-only`를 추가한다. Claude는 `Read·Glob·Grep`만 제공하고 MCP 도구를 차단하므로 셸·테스트 실행은 불가능하다. Codex는 `--sandbox read-only`로 실행한다. 이 옵션은 provider별 실행 제한을 지정하며, 양쪽의 동일한 OS 격리나 기존 hook·외부 연동 전체의 부작용 차단을 보장하지 않는다. 옵션을 생략하면 기존 동작을 유지한다.
-
+읽기 중심 리뷰에는 `--` 앞에 `--read-only`를 추가한다. Claude는 `Read·Glob·Grep`만 제공하고 MCP 도구를 차단하므로 셸·테스트 실행은 불가능하다. Codex는 `--sandbox read-only`로 실행하며 기존 허용·금지 규칙을 유지한다. [Codex의 `allow` 규칙](https://learn.chatgpt.com/docs/agent-configuration/rules)으로 사전 허용된 명령은 샌드박스 밖에서 실행될 수 있으므로, 모든 명령의 쓰기를 금지하는 옵션은 아니다. 이 옵션은 provider별 실행 제한을 지정하며, 양쪽의 동일한 OS 격리나 기존 hook·외부 연동 전체의 부작용 차단을 보장하지 않는다. 옵션을 생략하면 기존 동작을 유지한다.
 
 등록된 같은 provider 계정들의 75초 공유 캐시를 우선 사용하고, 필요한 계정만 quota를 실측한다.
 신규 작업은 **5시간 quota 창이 있으면 잔여량이 25% 이상**이어야 배정한다. Claude의 `session`, Codex의

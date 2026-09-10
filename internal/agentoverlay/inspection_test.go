@@ -198,20 +198,47 @@ func TestCodexNestedSettingReplacementRoundTrip(t *testing.T) {
 	}
 }
 
-func TestCodexFeatureAliasConflictIsUnsupported(t *testing.T) {
-	t.Setenv("CODEX_HOME", t.TempDir())
+func TestCodexFeatureHookActivationMatrix(t *testing.T) {
+	cases := []struct {
+		name     string
+		features string
+		blocked  bool
+	}{
+		{"no flags", "", false},
+		{"alias enabled alone", "codex_hooks=true", false},
+		{"alias wrong type alone", "codex_hooks=1", true},
+		{"both invalid", "hooks=1\ncodex_hooks=2", true},
+		{"canonical disabled", "hooks=false", true},
+		{"alias disabled without canonical", "codex_hooks=false", true},
+		{"canonical enabled wins over alias false", "hooks=true\ncodex_hooks=false", false},
+		{"inactive alias must be boolean", "hooks=true\ncodex_hooks=\"bad\"", true},
+		{"canonical disabled wins over alias true", "hooks=false\ncodex_hooks=true", true},
+		{"canonical wrong type", "hooks=\"yes\"", true},
+		{"canonical enabled", "hooks=true", false},
+	}
 	spec := codexSpec()
 	snippet, err := codexSnippet(spec.Codex.Settings, spec.Codex.Hooks)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, features := range []string{"hooks=true\ncodex_hooks=false", "codex_hooks=false"} {
-		if err := os.WriteFile(CodexConfigPath(), []byte(snippet+"\n[features]\n"+features+"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if doc := DoctorCodex(spec); doc.State != StateDegraded || !strings.Contains(doc.Reason, "features.codex_hooks") {
-			t.Fatalf("%+v", doc)
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CODEX_HOME", t.TempDir())
+			if err := os.WriteFile(CodexConfigPath(), []byte(snippet+"\n[features]\n"+tc.features+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			plan, doc := PlanCodex(spec), DoctorCodex(spec)
+			if tc.blocked {
+				if doc.State != StateDegraded || len(plan.Reasons) == 0 || !strings.Contains(doc.Reason, plan.Reasons[0]) {
+					t.Fatalf("want blocked: plan=%+v doctor=%+v", plan, doc)
+				}
+				if !strings.HasPrefix(plan.Reasons[0], "features.") {
+					t.Fatalf("reason must name the features key: %v", plan.Reasons)
+				}
+			} else if doc.State != StateInstalled || len(plan.Reasons) != 0 {
+				t.Fatalf("want installed: plan=%+v doctor=%+v", plan, doc)
+			}
+		})
 	}
 }
 

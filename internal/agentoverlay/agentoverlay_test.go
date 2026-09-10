@@ -383,6 +383,39 @@ func TestDoctorClaudeDisableAllHooksDegraded(t *testing.T) {
 	}
 }
 
+func TestClaudeIgnoresManagedOnlyKeyButDisableAllHooksBlocks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	path := ClaudeSettingsPath()
+	spec := claudeOnlySpec(t)
+
+	writeSettings(t, path, map[string]any{"allowManagedHooksOnly": true, "keep": "value"})
+	if plan := PlanClaude(spec); containsSubstr(plan.Reasons, "allowManagedHooksOnly") {
+		t.Fatalf("managed-only key flagged before apply: %+v", plan.Reasons)
+	}
+	if plan, err := ApplyClaude(spec); err != nil || len(plan.Reasons) != 0 {
+		t.Fatalf("apply blocked by managed-only key: plan=%+v err=%v", plan, err)
+	}
+	root := readSettings(t, path)
+	if root["allowManagedHooksOnly"] != true || root["keep"] != "value" {
+		t.Fatalf("apply did not preserve managed-only key or unrelated setting: %+v", root)
+	}
+	if got := DoctorClaude(spec).State; got != StateInstalled {
+		t.Fatalf("state = %q, want installed with managed-only key present", got)
+	}
+
+	root["disableAllHooks"] = true
+	writeSettings(t, path, root)
+	doc := DoctorClaude(spec)
+	if doc.State != StateDegraded || !strings.Contains(doc.Reason, "disableAllHooks") {
+		t.Fatalf("disableAllHooks must block: %+v", doc)
+	}
+	if strings.Contains(doc.Reason, "allowManagedHooksOnly") {
+		t.Fatalf("managed-only key must not be a blocker: %q", doc.Reason)
+	}
+}
+
 func TestDoctorClaudeUnconfigured(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

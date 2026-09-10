@@ -282,7 +282,8 @@ spec JSON은 알 수 없는 필드를 허용하지 않아 오타 키는 조용�
   보고한다. Claude settings 루트의 `disableAllHooks: true`는 엔트리가 있어도 `degraded`다. Codex는
   `CODEX_HOME/config.toml`(없으면 `~/.codex/config.toml`)을 **읽기 전용**으로 파싱하며, hook 엔트리는
   `type=="command"`일 때만 존재로 인정한다. 누락 키/hook은 add 스니펫으로, 값 불일치 키는
-  교체용 별도 안내로 출력한다. degraded/error가 있으면 exit 1.
+  교체용 별도 안내로 출력한다. Codex 기능 키는 `features.hooks`가 구형 별칭보다 우선하며, 지정된 키는 모두 boolean이어야 한다.
+  관리자 전용 키를 사용자 파일에 둔 것은 비활성화로 판정하지 않으며 관리자 정책 자체는 검사하지 않는다. degraded/error가 있으면 exit 1.
 - `verify [--spec <file>]`: doctor 엔트리 검사에 더해 엔트리가 설치된 configured 런타임의
   `verify.<runtime>.command`를 현재 작업 디렉터리에서 실행한다. exit 0이면 그 런타임을 `enforced`로
   올리고, 명령이 없으면 "live verification not configured", 명령이 실패하면 exit code를 원인으로 한

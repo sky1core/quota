@@ -47,13 +47,14 @@ func inspectCodex(spec *Spec, root map[string]any) RuntimePlan {
 	if hasCodexHookEntries(expected) {
 		if features, exists := root["features"]; exists {
 			if obj, ok := features.(map[string]any); ok {
-				canonical, hasCanonical := obj["hooks"]
-				alias, hasAlias := obj["codex_hooks"]
-				if hasCanonical && hasAlias && !settingsValueEqual(canonical, alias) {
-					plan.Reasons = append(plan.Reasons, "conflicting features.hooks and features.codex_hooks are unsupported")
+				_, hasCanonical := obj["hooks"]
+				if alias, exists := obj["codex_hooks"]; hasCanonical && exists {
+					if _, ok := alias.(bool); !ok {
+						plan.Reasons = append(plan.Reasons, "features.codex_hooks must be a boolean")
+					}
 				}
 				keys := []string{"hooks"}
-				if _, exists := obj["hooks"]; !exists {
+				if !hasCanonical {
 					keys = []string{"codex_hooks"}
 				}
 				for _, key := range keys {
@@ -65,7 +66,6 @@ func inspectCodex(spec *Spec, root map[string]any) RuntimePlan {
 				plan.Reasons = append(plan.Reasons, "features must be a table")
 			}
 		}
-		plan.Reasons = append(plan.Reasons, blockingBool(root, "allow_managed_hooks_only", true)...)
 	}
 	for _, key := range sortedKeys(spec.Codex.Settings) {
 		plan.Settings = append(plan.Settings, SettingStatus{Key: key, Status: codexSettingStatus(root, key, expected[key])})

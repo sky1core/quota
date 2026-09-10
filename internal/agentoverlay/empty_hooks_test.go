@@ -167,7 +167,7 @@ func TestCodexSettingsOnlyIgnoresUnrequestedHookBlockers(t *testing.T) {
 	}
 }
 
-func TestCodexRawHookSettingsStillReportBlockers(t *testing.T) {
+func TestCodexRawHookSettingsActivateFeatureBlockers(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir())
 	path := filepath.Join(t.TempDir(), "spec.json")
 	if err := os.WriteFile(path, []byte(`{"version":1,"codex":{"settings":{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"example-hook"}]}]}}}}`), 0o600); err != nil {
@@ -181,20 +181,28 @@ func TestCodexRawHookSettingsStillReportBlockers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, config := range []string{"", "allow_managed_hooks_only=true\n", "[features]\nhooks=false\n"} {
-		if err := os.WriteFile(CodexConfigPath(), []byte(config+snippet), 0o600); err != nil {
+	cases := []struct {
+		config  string
+		blocked bool
+	}{
+		{"", false},
+		{"allow_managed_hooks_only=true\n", false},
+		{"[features]\nhooks=false\n", true},
+	}
+	for _, tc := range cases {
+		if err := os.WriteFile(CodexConfigPath(), []byte(tc.config+snippet), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		plan, doc := PlanCodex(spec), DoctorCodex(spec)
 		if len(plan.Settings) != 1 || plan.Settings[0].Status != StatusPresent {
 			t.Fatalf("raw hooks differ: %+v", plan)
 		}
-		if config == "" {
-			if doc.State != StateInstalled {
-				t.Fatalf("no blocker: %+v", doc)
+		if tc.blocked {
+			if doc.State != StateDegraded || len(plan.Reasons) == 0 || !strings.Contains(doc.Reason, plan.Reasons[0]) {
+				t.Fatalf("blocker ignored: config=%q plan=%+v doctor=%+v", tc.config, plan, doc)
 			}
-		} else if doc.State != StateDegraded || len(plan.Reasons) == 0 || !strings.Contains(doc.Reason, plan.Reasons[0]) {
-			t.Fatalf("blocker ignored: plan=%+v doctor=%+v", plan, doc)
+		} else if doc.State != StateInstalled || len(plan.Reasons) != 0 {
+			t.Fatalf("unexpected blocker: config=%q plan=%+v doctor=%+v", tc.config, plan, doc)
 		}
 	}
 }

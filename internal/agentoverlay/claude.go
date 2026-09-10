@@ -71,7 +71,6 @@ func inspectClaude(spec *Spec, root map[string]any) RuntimePlan {
 	}
 	if hasHookEntries(spec.Claude.Hooks) {
 		plan.Reasons = append(plan.Reasons, blockingBool(root, "disableAllHooks", true)...)
-		plan.Reasons = append(plan.Reasons, blockingBool(root, "allowManagedHooksOnly", true)...)
 	}
 	hooks, _ := root["hooks"].(map[string]any)
 	if v, exists := root["hooks"]; exists && hooks == nil {

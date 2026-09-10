@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -382,5 +383,119 @@ func TestAgentHooksDoctorMissingHookFails(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "missing claude hook") || !strings.Contains(stdout.String(), "missing codex hook") {
 		t.Fatalf("doctor stdout = %q", stdout.String())
+	}
+}
+
+func TestAgentHooksDiagnosticOutputContract(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", home)
+	policyDir := filepath.Join(home, "policies")
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	run := func(command string, extra ...string) int {
+		stdout.Reset()
+		stderr.Reset()
+		args := []string{command, "--policy-dir", policyDir, "--runtime", "claude", "--binary", binary}
+		return runAgentHooks(append(args, extra...), &stdout, &stderr)
+	}
+	policy, err := agenthooks.Preset(agenthooks.PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agenthooks.SavePolicy(policyDir, policy, false); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, "settings.json")
+	if err := os.WriteFile(path, []byte(`{"disableAllHooks":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if code := run("apply"); code != 1 || !strings.Contains(stderr.String(), "saved") {
+		t.Fatalf("apply code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+	}
+	if code := run("doctor"); code != 1 || !strings.Contains(stdout.String(), "blocked claude") {
+		t.Fatalf("doctor code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+	}
+	for _, command := range []string{"doctor", "plan"} {
+		want := 1
+		if command == "plan" {
+			want = 0
+		}
+		if code := run(command, "--json"); code != want {
+			t.Fatalf("%s code=%d stderr=%s", command, code, &stderr)
+		}
+		var report struct {
+			Hooks []agenthooks.HookPlan `json:"hooks"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if len(report.Hooks) != 1 || !report.Hooks[0].Present || len(report.Hooks[0].Reasons) == 0 {
+			t.Fatalf("%s report=%s", command, &stdout)
+		}
+	}
+	if err := os.WriteFile(path, []byte(`{`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if code := run("doctor"); code != 1 || !strings.Contains(stdout.String(), "error claude") || strings.Contains(stdout.String(), "missing claude") {
+		t.Fatalf("parse error misreported: code=%d stdout=%s", code, &stdout)
+	}
+	if code := run("doctor", "--json"); code != 1 {
+		t.Fatalf("code=%d", code)
+	}
+	var report struct {
+		Hooks []agenthooks.HookPlan `json:"hooks"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Hooks) != 1 || report.Hooks[0].Error == "" {
+		t.Fatalf("report=%s", &stdout)
+	}
+}
+
+func TestAgentHooksApplyAllPreservesPartialDiagnostics(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(home, "codex"))
+	policyDir := filepath.Join(home, "policies")
+	policy, err := agenthooks.Preset(agenthooks.PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agenthooks.SavePolicy(policyDir, policy, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(agenthooks.ClaudeSettingsPath()), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(agenthooks.ClaudeSettingsPath(), []byte(`{"disableAllHooks":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runAgentHooks([]string{"apply", "--runtime", "all", "--binary", binary, "--policy-dir", policyDir, "--json"}, &stdout, &stderr)
+	var report struct {
+		Hooks  []agenthooks.HookPlan `json:"hooks"`
+		Errors []string              `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if code != 1 || len(report.Errors) != 1 || len(report.Hooks) != 2 {
+		t.Fatalf("code=%d report=%s stderr=%s", code, &stdout, &stderr)
+	}
+	for _, hook := range report.Hooks {
+		if !hook.Present {
+			t.Fatalf("installation skipped: %+v", hook)
+		}
+	}
+	if !agenthooks.Detect("codex", binary, policyDir).Present {
+		t.Fatal("Codex was not installed")
 	}
 }

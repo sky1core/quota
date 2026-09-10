@@ -208,10 +208,23 @@ func agentHooksPlan(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout, "Hooks")
 	for _, plan := range plans {
 		status := "missing"
-		if plan.Present {
+		switch {
+		case plan.Error != "":
+			status = "error"
+		case !plan.Present:
+			status = "missing"
+		case len(plan.Reasons) > 0:
+			status = "blocked"
+		default:
 			status = "present"
 		}
 		fmt.Fprintf(stdout, "  %s %s\n    path: %s\n    command: %s\n", plan.Runtime, status, plan.Path, plan.Command)
+		if plan.Error != "" {
+			fmt.Fprintf(stdout, "    error: %s\n", plan.Error)
+		}
+		for _, reason := range plan.Reasons {
+			fmt.Fprintf(stdout, "    reason: %s\n", reason)
+		}
 	}
 	for _, err := range res.Errors {
 		fmt.Fprintln(stderr, err)
@@ -264,19 +277,33 @@ func agentHooksApply(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	var plans []agenthooks.HookPlan
+	var applyErrors []string
 	for _, rt := range runtimes {
 		plan, err := agenthooks.Apply(rt, *binary, policyDir)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
-			return 1
+			applyErrors = append(applyErrors, err.Error())
+			if !plan.Present && plan.Error == "" {
+				plan.Error = err.Error()
+			}
 		}
 		plans = append(plans, plan)
 	}
+	failed := len(applyErrors) > 0
 	if opts.jsonOut {
-		return writeJSON(stdout, map[string]any{"hooks": plans}, stderr)
+		report := map[string]any{"hooks": plans}
+		if failed {
+			report["errors"] = applyErrors
+		}
+		return writeJSONWithCode(stdout, stderr, report, failed)
 	}
 	for _, plan := range plans {
-		fmt.Fprintf(stdout, "installed %s hook: %s\n", plan.Runtime, plan.Path)
+		if plan.Present {
+			fmt.Fprintf(stdout, "installed %s hook: %s\n", plan.Runtime, plan.Path)
+		}
+	}
+	if failed {
+		return 1
 	}
 	return 0
 }
@@ -366,10 +393,23 @@ func agentHooksDoctor(args []string, stdout, stderr io.Writer) int {
 	sort.Slice(hooks, func(i, j int) bool { return hooks[i].Runtime < hooks[j].Runtime })
 	policyErrs := policyLoadErrors(res, policyDir, true)
 	failed := len(policyErrs) > 0
+	statuses := make([]string, len(hooks))
 	for i := range hooks {
-		if !hooks[i].Present {
+		switch {
+		case hooks[i].Error != "":
+			statuses[i] = "error"
 			failed = true
 			continue
+		case !hooks[i].Present:
+			statuses[i] = "missing"
+			failed = true
+			continue
+		}
+		if len(hooks[i].Reasons) > 0 {
+			statuses[i] = "blocked"
+			failed = true
+		} else {
+			statuses[i] = "ok"
 		}
 		binaryToCheck := *binary
 		if strings.TrimSpace(binaryToCheck) == "" && strings.TrimSpace(hooks[i].Binary) != "" {
@@ -377,22 +417,20 @@ func agentHooksDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 		if err := agenthooks.CheckHookBinary(binaryToCheck); err != nil {
 			hooks[i].Error = err.Error()
+			statuses[i] = "broken"
 			failed = true
 		}
 	}
 	if opts.jsonOut {
 		return writeJSONWithCode(stdout, stderr, map[string]any{"errors": errorsAsStrings(policyErrs), "hooks": hooks}, failed)
 	}
-	for _, hook := range hooks {
-		status := "ok"
-		if !hook.Present {
-			status = "missing"
-		} else if hook.Error != "" {
-			status = "broken"
-		}
-		fmt.Fprintf(stdout, "%s %s hook path=%s\n", status, hook.Runtime, hook.Path)
+	for i, hook := range hooks {
+		fmt.Fprintf(stdout, "%s %s hook path=%s\n", statuses[i], hook.Runtime, hook.Path)
 		if hook.Error != "" {
 			fmt.Fprintf(stdout, "  %s\n", hook.Error)
+		}
+		for _, reason := range hook.Reasons {
+			fmt.Fprintf(stdout, "  reason: %s\n", reason)
 		}
 	}
 	for _, err := range policyErrs {

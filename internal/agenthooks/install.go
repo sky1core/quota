@@ -12,13 +12,14 @@ import (
 const hookStatusMessage = "Checking agent command policy"
 
 type HookPlan struct {
-	Runtime   string `json:"runtime"`
-	Path      string `json:"path"`
-	Command   string `json:"command"`
-	Binary    string `json:"binary,omitempty"`
-	PolicyDir string `json:"policyDir,omitempty"`
-	Present   bool   `json:"present"`
-	Error     string `json:"error,omitempty"`
+	Runtime   string   `json:"runtime"`
+	Path      string   `json:"path"`
+	Command   string   `json:"command"`
+	Binary    string   `json:"binary,omitempty"`
+	PolicyDir string   `json:"policyDir,omitempty"`
+	Present   bool     `json:"present"`
+	Reasons   []string `json:"reasons,omitempty"`
+	Error     string   `json:"error,omitempty"`
 }
 
 func HookCommand(runtime, binary, policyDir string) string {
@@ -139,9 +140,15 @@ func applyHook(runtime, path, binary, policyDir string) (HookPlan, error) {
 	if err != nil {
 		return plan, err
 	}
-	plan.Present = containsManagedHook(root, runtime, binary, policyDir)
+	inspectHookPlan(&plan, root, runtime, binary, policyDir)
+	if plan.Error != "" {
+		return plan, fmt.Errorf("saved %s hook at %s, but its configuration could not be read: %s", runtime, plan.Path, plan.Error)
+	}
 	if !plan.Present {
 		return plan, fmt.Errorf("saved hook did not pass installation inspection")
+	}
+	if len(plan.Reasons) > 0 {
+		return plan, fmt.Errorf("saved %s hook at %s, but diagnostics found blockers: %s", runtime, plan.Path, strings.Join(plan.Reasons, "; "))
 	}
 	return plan, nil
 }
@@ -158,13 +165,32 @@ func Detect(runtime, binary, policyDir string) HookPlan {
 	}
 	root, err := ReadJSONObject(plan.Path)
 	if err != nil {
+		plan.Error = err.Error()
 		return plan
 	}
-	if foundBinary, ok := findManagedHook(root, runtime, binary, policyDir); ok {
+	inspectHookPlan(&plan, root, runtime, binary, policyDir)
+	return plan
+}
+
+func inspectHookPlan(plan *HookPlan, root map[string]any, runtime, binary, policyDir string) {
+	if hookMaps, foundBinary, ok := findManagedHook(root, runtime, binary, policyDir); ok {
 		plan.Present = true
 		plan.Binary = foundBinary
+		for _, hookMap := range hookMaps {
+			plan.Reasons = append(plan.Reasons, unsupportedHookVariants(hookMap)...)
+		}
 	}
-	return plan
+	if runtime == "claude" {
+		plan.Reasons = append(plan.Reasons, claudeDisableReasons(root)...)
+	}
+	if runtime == "codex" {
+		config, err := readCodexConfig(codexConfigPath())
+		if err != nil {
+			plan.Error = err.Error()
+			return
+		}
+		plan.Reasons = append(plan.Reasons, codexConfigReasons(config)...)
+	}
 }
 
 // writeUniqueBackup writes content to a fresh path.bak.<nanosecond-timestamp>,
@@ -285,23 +311,25 @@ func isReplacedEvaluatorCommand(command, replacement string) bool {
 }
 
 func containsManagedHook(v any, runtime, binary, policyDir string) bool {
-	_, ok := findManagedHook(v, runtime, binary, policyDir)
+	_, _, ok := findManagedHook(v, runtime, binary, policyDir)
 	return ok
 }
 
-func findManagedHook(v any, runtime, binary, policyDir string) (string, bool) {
+func findManagedHook(v any, runtime, binary, policyDir string) ([]map[string]any, string, bool) {
 	root, ok := v.(map[string]any)
 	if !ok {
-		return "", false
+		return nil, "", false
 	}
 	hooks, ok := root["hooks"].(map[string]any)
 	if !ok {
-		return "", false
+		return nil, "", false
 	}
 	return findManagedPreToolUseBashHook(hooks["PreToolUse"], runtime, binary, policyDir)
 }
 
-func findManagedPreToolUseBashHook(v any, runtime, binary, policyDir string) (string, bool) {
+func findManagedPreToolUseBashHook(v any, runtime, binary, policyDir string) ([]map[string]any, string, bool) {
+	var entries []map[string]any
+	var firstBinary string
 	for _, group := range hookGroups(v) {
 		groupMap, ok := group.(map[string]any)
 		if !ok || groupMap["matcher"] != "Bash" {
@@ -321,11 +349,14 @@ func findManagedPreToolUseBashHook(v any, runtime, binary, policyDir string) (st
 				continue
 			}
 			if foundBinary, ok := managedHookCommandBinaryStrict(command, runtime, binary, policyDir, true); ok {
-				return foundBinary, true
+				entries = append(entries, hookMap)
+				if firstBinary == "" {
+					firstBinary = foundBinary
+				}
 			}
 		}
 	}
-	return "", false
+	return entries, firstBinary, len(entries) > 0
 }
 
 func containsCommandString(v any, command string) bool {

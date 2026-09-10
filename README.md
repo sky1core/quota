@@ -212,8 +212,10 @@ delete/move/copy, tag force/delete, `gh pr merge`, `gh pr update-branch`, `gh pr
 Claude/Codex hook 설정 파일을 백업한 뒤 managed hook을 설치한다. 적용 전에 enabled 정책이 최소 1개 있어야
 하며, `--policy-dir`를 지정하면 hook 명령도 같은 정책 디렉터리를 사용한다. `--binary`와 `--policy-dir`의
 상대 경로는 설치 시 절대 경로로 고정된다. `verify`는 정책에 내장된
-positive/negative 케이스를 evaluator로 검사하고, `doctor`는 Claude/Codex 양쪽 hook 설정에 evaluator가
-설치되어 있는지 확인한다. 정적으로 볼 수 없는 shell interpreter stdin/script/startup 파일 실행과
+positive/negative 케이스를 evaluator로 검사한다. `doctor`는 evaluator 설치 여부와 실행 파일, 사용자 설정에 드러난 hook 비활성화·조건부·비동기 등의 방해 조건을 검사한다.
+JSON의 `present`는 설치 여부이고, 방해 조건은 `reasons`, 읽기·파싱 오류는 `error`로 보고하며 진단 실패 시 exit 1을 반환한다.
+`plan`에도 같은 진단이 표시된다. `apply`는 사용자 비활성화 설정을 변경하지 않으며, 저장 후 진단에 실패하면 저장 사실과 원인을 알린다. 여러 런타임 적용은 각각 처리하고 결과를 함께 보고한다.
+프로젝트·관리자 설정 전체나 실제 hook 실행을 검증하는 것은 아니다. 정적으로 볼 수 없는 shell interpreter stdin/script/startup 파일 실행과
 interactive/login shell startup 실행은 차단한다. 각 agent가 새 hook 설정을 신뢰·재로드해야 실제 실행 전 차단이 적용된다.
 
 hook이 호출하는 내부 명령은 다음 형태다:

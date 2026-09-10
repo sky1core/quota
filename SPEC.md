@@ -234,6 +234,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 - quota 진입 기준과 계정별 하한선은 기존 실행과 동일하다. Claude 모델별 quota는 진입 하한선에 반영하되 provider 간 순위는 집계 장기·단기 창으로 비교한다. 완전 동률이면 Claude 계정을 먼저, 같은 provider에서는 설정 순서를 적용한다. 모델 입력 순서로 우선순위를 정하지 않는다.
 - 순위 비교에는 자격을 충족한 모든 계정에 공통으로 존재하는 기간의 집계 창만 사용하고 긴 기간부터 비교한다. Claude `weekly_all`은 7일, `session`은 5시간으로 Codex의 실제 기간과 맞춘다. 공통 기간이 없으면 비교 불가 오류로 종료하며, 5시간 창을 주간 창과 비교하지 않는다.
 - 선택한 계정과 모델·effort로 한 번만 실행한다. Claude에는 `--model`과 `--effort`, Codex에는 `--model`과 `model_reasoning_effort` 설정으로 전달한다. 자동 라우팅은 임의의 provider 전용 CLI 옵션을 받지 않는다.
+- 자동 라우팅은 선택적으로 `--read-only`를 한 번 받으며 `--` 앞의 위치는 무관하다. 생략하면 기존 CLI 실행 설정을 유지한다. 지정하면 Claude에 `--tools Read,Glob,Grep --disallowedTools mcp__*`, Codex에 `--sandbox read-only`를 전달한다. 모델 분류·계정 선택·쿼터 순위는 바꾸지 않는다. Claude는 파일 읽기·검색만 가능하며 셸·테스트 실행은 제공하지 않는다. Codex는 CLI의 로컬 샌드박스 정책을 적용한다. 두 방식은 동일한 OS 격리 보장이 아니며, 이 옵션은 기존 hook이나 외부 연동 전체의 부작용 차단을 보장하지 않는다. CLI가 옵션을 거부하면 실패를 전달하고 제한 없이 재실행하지 않는다.
 - 자동 Claude 실행은 상속된 `CLAUDE_CODE_EFFORT_LEVEL`을 자식 환경에서 제거해 지정 effort를 덮어쓰지 않게 한다. 사용자 전역 설정은 수정하지 않는다.
 - 이 규칙은 모델명 기반 자동 라우팅에 적용한다. provider를 명시하는 기존 `exec-prompt --agent=claude|codex`의 인자 전달 계약과 구분한다.
 

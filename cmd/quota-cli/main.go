@@ -50,7 +50,7 @@ func main() {
 
 func printExecPromptUsage() {
 	fmt.Fprint(os.Stderr, `usage:
-  quota-cli exec-prompt --model MODEL:EFFORT --model MODEL:EFFORT -- PROMPT
+  quota-cli exec-prompt [--read-only] --model MODEL:EFFORT --model MODEL:EFFORT -- PROMPT
   quota-cli exec-prompt --agent=claude [args...]
   quota-cli exec-prompt --agent=codex  [args...]
 `)

@@ -25,8 +25,9 @@ type promptModel struct {
 }
 
 type autoPromptOptions struct {
-	models [2]promptModel
-	prompt string
+	models   [2]promptModel
+	prompt   string
+	readOnly bool
 }
 
 type autoPromptAccount struct {
@@ -51,6 +52,12 @@ func parseAutoPromptArgs(args []string) (autoPromptOptions, error) {
 		}
 		var value string
 		switch {
+		case arg == "--read-only":
+			if opts.readOnly {
+				return opts, fmt.Errorf("duplicate --read-only")
+			}
+			opts.readOnly = true
+			continue
 		case arg == "--model":
 			if i+1 == len(args) {
 				return opts, fmt.Errorf("--model requires MODEL:EFFORT")
@@ -292,11 +299,20 @@ func autoPromptQuotaWindows(provider string, quota map[string]any) map[int]map[s
 	return windows
 }
 
-func autoPromptArgs(account autoPromptAccount, prompt string) []string {
+func autoPromptArgs(account autoPromptAccount, opts autoPromptOptions) []string {
+	var args []string
 	if account.provider == "claude" {
-		return []string{"-p", "--model", account.model.model, "--effort", account.model.effort, "--", prompt}
+		args = []string{"-p", "--model", account.model.model, "--effort", account.model.effort}
+		if opts.readOnly {
+			args = append(args, "--tools", "Read,Glob,Grep", "--disallowedTools", "mcp__*")
+		}
+	} else {
+		args = []string{"exec", "--model", account.model.model, "-c", `model_reasoning_effort="` + account.model.effort + `"`}
+		if opts.readOnly {
+			args = append(args, "--sandbox", "read-only")
+		}
 	}
-	return []string{"exec", "--model", account.model.model, "-c", `model_reasoning_effort="` + account.model.effort + `"`, "--", prompt}
+	return append(args, "--", opts.prompt)
 }
 
 func runAutoPrompt(opts autoPromptOptions) int {
@@ -328,7 +344,7 @@ func runAutoPrompt(opts autoPromptOptions) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if err := execDelegated(bin, nil, autoPromptArgs(account, opts.prompt), autoPromptEnv(account, os.Environ())); err != nil {
+	if err := execDelegated(bin, nil, autoPromptArgs(account, opts), autoPromptEnv(account, os.Environ())); err != nil {
 		fmt.Fprintln(os.Stderr, account.provider+" exec error:", err)
 		return 1
 	}

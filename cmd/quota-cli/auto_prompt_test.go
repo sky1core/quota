@@ -27,6 +27,37 @@ func TestParseAutoPromptArgs(t *testing.T) {
 	}
 }
 
+func TestAutoPromptReadOnly(t *testing.T) {
+	models := []string{"--model=fable:high", "--model=code-model:high"}
+	for position := 0; position <= len(models); position++ {
+		args := append([]string{}, models[:position]...)
+		args = append(args, "--read-only")
+		args = append(args, models[position:]...)
+		args = append(args, "--", "--read-only stays literal in the prompt")
+		opts, err := parseAutoPromptArgs(args)
+		if err != nil || !opts.readOnly {
+			t.Fatalf("parse: %+v %v", opts, err)
+		}
+		for _, provider := range []string{"claude", "codex"} {
+			account := autoPromptAccount{provider: provider, model: promptModel{"example-model", "high"}}
+			got := autoPromptArgs(account, opts)
+			var want []string
+			if provider == "claude" {
+				want = []string{"-p", "--model", "example-model", "--effort", "high", "--tools", "Read,Glob,Grep", "--disallowedTools", "mcp__*", "--", opts.prompt}
+			} else {
+				want = []string{"exec", "--model", "example-model", "-c", `model_reasoning_effort="high"`, "--sandbox", "read-only", "--", opts.prompt}
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s: %q, want %q", provider, got, want)
+			}
+		}
+	}
+	opts, err := parseAutoPromptArgs(append(models, "--", "--read-only"))
+	if err != nil || opts.readOnly || opts.prompt != "--read-only" {
+		t.Fatalf("prompt interpreted as option: %+v %v", opts, err)
+	}
+}
+
 func TestAutoPromptRejectsInvalidArgsBeforeIO(t *testing.T) {
 	home := autoPromptTestHome(t)
 	if err := os.MkdirAll(filepath.Dir(config.Path()), 0o700); err != nil {
@@ -36,6 +67,8 @@ func TestAutoPromptRejectsInvalidArgsBeforeIO(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{
+		{"--model=fable:high", "--model=code-model:high", "--read-only", "--read-only", "--", "prompt"},
+		{"--model=fable:high", "--model=code-model:high", "--read-only=false", "--", "prompt"},
 		nil,
 		{"--model"},
 		{"--model=fable:high", "--", "prompt"},
@@ -271,7 +304,7 @@ func TestAutoPromptArgs(t *testing.T) {
 		{"claude", promptModel{"fable", "max"}, []string{"-p", "--model", "fable", "--effort", "max", "--", prompt}},
 		{"codex", promptModel{"code-model", "high"}, []string{"exec", "--model", "code-model", "-c", `model_reasoning_effort="high"`, "--", prompt}},
 	} {
-		args := autoPromptArgs(autoPromptAccount{provider: tc.provider, model: tc.model}, prompt)
+		args := autoPromptArgs(autoPromptAccount{provider: tc.provider, model: tc.model}, autoPromptOptions{prompt: prompt})
 		if !reflect.DeepEqual(args, tc.want) {
 			t.Fatalf("%s argv = %q; want %q", tc.provider, args, tc.want)
 		}

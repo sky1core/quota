@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sky1core/quota/internal/claude"
@@ -446,28 +448,31 @@ func removeExecPromptAccountSetting(root map[string]any, key string) {
 
 // --- update subcommand ----------------------------------------------------
 
-// runUpdate installs the latest release tag of quota-cli over this binary.
-// Manual only: quota-cli never updates itself as a side effect of anything
-// else, and it never touches quota-bar (and vice versa).
 func runUpdate() int {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(signalCtx, 5*time.Minute)
 	defer cancel()
-	cur := update.CurrentVersion()
-	latest, err := update.Latest(ctx)
+	result, err := update.Coordinated(ctx, "quota-cli")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "최신 버전 확인 실패: %v\n", err)
+		fmt.Fprintf(os.Stderr, "업데이트 실패: %v\n", err)
 		return 1
 	}
-	if cur == latest {
-		fmt.Printf("이미 최신 버전입니다 (%s)\n", cur)
-		return 0
-	}
-	fmt.Printf("업데이트: %s → %s\n", cur, latest)
-	path, err := update.Install(ctx, "quota-cli", latest)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "설치 실패: %v\n", err)
-		return 1
-	}
-	fmt.Printf("설치 완료: %s (%s)\n", path, latest)
+	printUpdateResult(os.Stdout, result)
 	return 0
+}
+
+func printUpdateResult(w io.Writer, result update.Result) {
+	for _, target := range result.Targets {
+		if target.Updated && target.PreviousVersion == "" {
+			fmt.Fprintf(w, "설치 완료: %s (%s)\n", target.Path, result.Version)
+		} else if target.Updated {
+			fmt.Fprintf(w, "설치 완료: %s (%s → %s)\n", target.Path, target.PreviousVersion, result.Version)
+		} else {
+			fmt.Fprintf(w, "이미 최신 버전입니다: %s (%s)\n", target.Path, result.Version)
+		}
+		if target.Name == "quota-bar" {
+			fmt.Fprintf(w, "실행 중인 quota-bar에 설치 버전(%s)을 적용하려면 quota-bar를 재시작하세요.\n", result.Version)
+		}
+	}
 }

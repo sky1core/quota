@@ -1166,23 +1166,29 @@ func onReady() {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		status("Checking for updates…")
-		latest, err := update.Latest(ctx)
-		if err != nil {
-			fail("Update check failed — see log", err)
-			return
-		}
-		if cur := versionString(); cur == latest {
-			finish("Up to date (" + latest + ")")
-			return
-		}
-		status("Installing " + latest + "…")
-		bin, err := update.Install(ctx, "quota-bar", latest)
+		status("Checking and updating installed binaries…")
+		result, err := update.Coordinated(ctx, "quota-bar")
 		if err != nil {
 			fail("Update failed — see log", err)
 			return
 		}
-		log.Printf("update: installed %s at %s", latest, bin)
+		var bin string
+		changed := false
+		for _, target := range result.Targets {
+			log.Printf("update: %s at %s: %s → %s (replaced: %t)", target.Name, target.Path, target.PreviousVersion, result.Version, target.Updated)
+			changed = changed || target.Updated
+			if target.Name == "quota-bar" {
+				bin = target.Path
+			}
+		}
+		if !result.RestartRequired("quota-bar", versionString()) {
+			if changed {
+				finish("Updated installed binaries (" + result.Version + ")")
+			} else {
+				finish("Up to date (" + result.Version + ")")
+			}
+			return
+		}
 		// Take the refresh gate only now (rule 2): install is just a file
 		// write, only the process handover below must not cut a probe
 		// mid-capture.

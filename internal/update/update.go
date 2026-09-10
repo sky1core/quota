@@ -1,8 +1,3 @@
-// Package update implements the manual self-update flow shared by quota-cli
-// (the `update` subcommand) and quota-bar (the update menu item): resolve the
-// latest release tag through the Go module proxy, install it with
-// `go install`, and report where it landed. There is no automatic update —
-// each binary only updates itself, and only when the user asks.
 package update
 
 import (
@@ -51,8 +46,7 @@ func ResolveVersion(ldflag string, bi *debug.BuildInfo, ok bool) string {
 // CurrentVersion resolves the running binary's version from its embedded
 // build info. A release install reports its clean tag ("v0.9.0"); a local
 // build reports a form that never equals a release tag ("v0.9.0+dirty", a
-// short commit hash, or "dev"), so `update` on a dev build always reinstalls
-// the latest release.
+// short commit hash, or "dev").
 func CurrentVersion() string {
 	bi, ok := debug.ReadBuildInfo()
 	return ResolveVersion("", bi, ok)
@@ -92,21 +86,6 @@ func Latest(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("unexpected version %q from go list", v)
 	}
 	return v, nil
-}
-
-// Install runs `go install Module/cmd/<name>@<version>` and returns the path
-// the binary landed at. It installs exactly the requested version — deciding
-// WHETHER to update (and what to do with the running process) is the caller's
-// job.
-func Install(ctx context.Context, name, version string) (string, error) {
-	cmd, err := goCmd(ctx, "install", fmt.Sprintf("%s/cmd/%s@%s", Module, name, version))
-	if err != nil {
-		return "", err
-	}
-	if out, cerr := cmd.CombinedOutput(); cerr != nil {
-		return "", fmt.Errorf("go install %s@%s: %w\n%s", name, version, cerr, strings.TrimSpace(string(out)))
-	}
-	return BinPath(ctx, name)
 }
 
 // BinPath returns where `go install` puts a binary named name: GOBIN if set,

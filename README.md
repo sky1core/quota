@@ -16,10 +16,12 @@ go install github.com/sky1core/quota/cmd/quota-cli@latest
 go install github.com/sky1core/quota/cmd/quota-bar@latest
 ```
 
-이후 업데이트는 각자 수동으로:
+이후에는 한쪽에서 수동 업데이트하면 표준 Go 설치 디렉터리에 설치된 두 실행 파일을 같은 릴리스로 맞춘다. CLI만 설치돼 있으면 메뉴바를 새로 설치하지 않는다.
 
-- `quota-cli update` — 최신 릴리스로 quota-cli 재설치
-- quota-bar 메뉴의 **Check for Updates…** — 최신 릴리스 설치 후 자동 재시작
+- `quota-cli update` — CLI와 이미 설치된 메뉴바를 함께 갱신. 실행 중인 메뉴바의 재시작은 별도로 안내한다.
+- quota-bar 메뉴의 **Check for Updates…** — 메뉴바와 이미 설치된 CLI를 함께 갱신하고, 실행 중인 메뉴바 버전이 바뀌면 자동 재시작한다.
+
+대상 바이너리를 모두 준비한 뒤 교체하므로 빌드 실패 시 기존 설치본은 유지된다. CLI의 Ctrl-C(SIGINT)·SIGTERM도 취소·복구 절차를 거쳐 처리한다. 교체 중 실패하면 복구를 시도하고 복구 실패도 보고한다. 여러 파일의 교체가 한 순간에 이루어지는 것은 아니다. 설치 디렉터리에는 읽기·쓰기·탐색 권한이 필요하고, 기존 실행 파일의 하드링크 백업을 운영체제가 허용해야 한다. 설치 경로는 절대경로여야 하며 심볼릭 링크·다른 OS/아키텍처의 설치본은 교체를 거부한다.
 
 ### 시스템 요구사항
 

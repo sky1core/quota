@@ -908,3 +908,46 @@ func defaultPromptFloors(n int) []float64 {
 func floatPtr(v float64) *float64 {
 	return &v
 }
+
+func TestResolvedDefaultAccountsPreserveProviderEnvironment(t *testing.T) {
+	for _, provider := range []string{"claude", "codex"} {
+		for _, inherited := range []bool{false, true} {
+			t.Run(provider+"/"+map[bool]string{false: "unset", true: "inherited"}[inherited], func(t *testing.T) {
+				home := autoPromptTestHome(t)
+				envKey := "CLAUDE_CONFIG_DIR"
+				if provider == "codex" {
+					envKey = "CODEX_HOME"
+				}
+				base := []string{"PATH=/usr/bin"}
+				if inherited {
+					path := filepath.Join(home, "custom")
+					t.Setenv(envKey, path)
+					base = append(base, envKey+"="+path)
+				}
+				var got []string
+				if provider == "claude" {
+					accounts, errs := (config.Config{}).ResolveAccounts()
+					if len(errs) != 0 || len(accounts) != 1 {
+						t.Fatalf("resolution %v %v", accounts, errs)
+					}
+					got = claude.EnvForConfigDir(base, accounts[0].ConfigDir)
+					if len(selectAgentClaudeSetEnv(accounts[0].ConfigDir)) != 0 {
+						t.Fatal("default recommendation added an override")
+					}
+				} else {
+					accounts, errs := (config.Config{}).ResolveCodexAccounts()
+					if len(errs) != 0 || len(accounts) != 1 {
+						t.Fatalf("resolution %v %v", accounts, errs)
+					}
+					got = codex.EnvForHome(base, accounts[0].Home)
+					if len(selectAgentCodexSetEnv(accounts[0].Home)) != 0 {
+						t.Fatal("default recommendation added an override")
+					}
+				}
+				if !reflect.DeepEqual(got, base) {
+					t.Fatalf("default account changed environment: %v, want %v", got, base)
+				}
+			})
+		}
+	}
+}

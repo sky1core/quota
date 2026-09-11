@@ -155,8 +155,8 @@ func TestResolveAccounts_DefaultOnly(t *testing.T) {
 		t.Fatalf("expected only the default account, got %v", resolvedKeys(accts))
 	}
 	got := accts[0]
-	if got.Key != "claude" || got.ConfigDir != filepath.Join(home, ".claude") || got.Label != "Claude" {
-		t.Errorf("default account = %+v, want absolute directory %q", got, filepath.Join(home, ".claude"))
+	if got.Key != "claude" || got.ConfigDir != "" || got.Label != "Claude" {
+		t.Errorf("default account = %+v, want inherited CLI environment", got)
 	}
 }
 
@@ -264,8 +264,8 @@ func TestResolveCodexAccounts_DefaultOnly(t *testing.T) {
 		t.Fatalf("expected only the default account, got %v", resolvedCodexKeys(accts))
 	}
 	got := accts[0]
-	if got.Key != "codex" || got.Home != filepath.Join(home, ".codex") || got.Label != "Codex" {
-		t.Errorf("default account = %+v, want absolute directory %q", got, filepath.Join(home, ".codex"))
+	if got.Key != "codex" || got.Home != "" || got.Label != "Codex" {
+		t.Errorf("default account = %+v, want inherited CLI environment", got)
 	}
 }
 

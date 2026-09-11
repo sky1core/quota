@@ -144,7 +144,7 @@ func TestResolveAccountDirectoryConflicts(t *testing.T) {
 					skipped = diagnostics
 					for _, a := range accounts {
 						keys = append(keys, a.Key)
-						if !filepath.IsAbs(a.ConfigDir) {
+						if a.Key != provider && !filepath.IsAbs(a.ConfigDir) {
 							t.Fatal(a)
 						}
 					}
@@ -157,7 +157,7 @@ func TestResolveAccountDirectoryConflicts(t *testing.T) {
 					skipped = diagnostics
 					for _, a := range accounts {
 						keys = append(keys, a.Key)
-						if !filepath.IsAbs(a.Home) {
+						if a.Key != provider && !filepath.IsAbs(a.Home) {
 							t.Fatal(a)
 						}
 					}

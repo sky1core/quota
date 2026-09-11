@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/sky1core/quota/internal/childprocess"
 	"github.com/sky1core/quota/internal/quotacache"
 )
 
@@ -38,7 +39,7 @@ func GetQuotaForConfigDir(timeout time.Duration, configDir string, maxAge time.D
 		}
 	}
 
-	claudeBin, err := findClaudeBin()
+	claudeBin, err := FindBinary()
 	if err != nil {
 		return nil, err
 	}
@@ -56,14 +57,14 @@ func GetQuotaForConfigDir(timeout time.Duration, configDir string, maxAge time.D
 	// /usage is a local slash command: it reports the logged-in account's limits
 	// without spending a turn (num_turns 0, total_cost_usd 0), so this probe can
 	// run on a refresh timer without consuming quota to measure quota.
-	cmd := exec.CommandContext(ctx, claudeBin, "-p", "/usage", "--output-format", "json")
+	cmd := childprocess.CommandContext(ctx, claudeBin, "-p", "/usage", "--output-format", "json")
 	cmd.Dir = safeDir
 	cmd.Env = fetchEnv(configDir)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	if runErr := cmd.Run(); runErr != nil {
+	if runErr := childprocess.Run(cmd); runErr != nil {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("claude /usage timed out after %s", timeout)
 		}
@@ -141,18 +142,16 @@ func claudeCacheKey(configDir string) string {
 	return "claude:" + filepath.Clean(resolved)
 }
 
-// findClaudeBin locates the Claude CLI, preferring PATH and falling back to the
-// native installer's fixed location.
-func findClaudeBin() (string, error) {
+func FindBinary() (string, error) {
 	if p, err := exec.LookPath("claude"); err == nil {
 		return p, nil
 	}
 	home, _ := os.UserHomeDir()
 	p := filepath.Join(home, ".local", "bin", "claude")
-	if _, err := os.Stat(p); err != nil {
-		return "", errors.New("claude CLI not found")
+	if executable, err := exec.LookPath(p); err == nil {
+		return executable, nil
 	}
-	return p, nil
+	return "", errors.New("claude CLI not found in PATH or native installation")
 }
 
 func fetchEnv(configDir string) []string {

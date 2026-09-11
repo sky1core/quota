@@ -19,7 +19,11 @@ import (
 
 func liveSettingsTestHome(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("CODEX_HOME", "")
 }
@@ -533,5 +537,62 @@ func TestSettingsSaveDoesNotWaitForAnotherWriter(t *testing.T) {
 				t.Fatal("settings blocked on another writer")
 			}
 		})
+	}
+}
+
+func TestLiveSettingsPersistsCanonicalDirectoriesAndReturnsAppliedConfig(t *testing.T) {
+	liveSettingsTestHome(t)
+	home, _ := os.UserHomeDir()
+	real := filepath.Join(home, "real")
+	if err := os.Mkdir(real, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(home, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(home)
+	writeSettingsTestFile(t, settingsPath(), `{"future":{"keep":true}}`)
+	writeSettingsTestFile(t, config.Path(), `{"future":{"keep":true},"claudeAccounts":[{"key":"claude-2","configDir":"previous","future":true}],"codexAccounts":[{"key":"codex-2","home":"previous","future":true}],"execPrompt":{"future":true}}`)
+	s := liveSettingsTestSnapshot(t)
+	d := s.draft
+	for i := range d.Accounts {
+		if d.Accounts[i].Key == "claude-2" {
+			d.Accounts[i].ConfigDir = "alias/claude"
+		}
+		if d.Accounts[i].Key == "codex-2" {
+			d.Accounts[i].ConfigDir = "alias/codex"
+		}
+	}
+	_, applied, err := persistLiveSettings(s, d, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.ClaudeAccounts[0].ConfigDir != filepath.Join(real, "claude") || applied.CodexAccounts[0].Home != filepath.Join(real, "codex") {
+		t.Fatalf("raw relative paths returned: %+v", applied)
+	}
+	t.Chdir(t.TempDir())
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ClaudeAccounts[0] != applied.ClaudeAccounts[0] || loaded.CodexAccounts[0] != applied.CodexAccounts[0] {
+		t.Fatalf("saved and applied accounts differ: %+v %+v", loaded, applied)
+	}
+	claudeAccounts, claudeErrs := loaded.ResolveAccounts()
+	codexAccounts, codexErrs := loaded.ResolveCodexAccounts()
+	if len(claudeErrs)+len(codexErrs) != 0 || claudeAccounts[1].ConfigDir != applied.ClaudeAccounts[0].ConfigDir || codexAccounts[1].Home != applied.CodexAccounts[0].Home {
+		t.Fatalf("runtime resolution changed after cwd change: %v %v %v %v", claudeAccounts, codexAccounts, claudeErrs, codexErrs)
+	}
+	root, err := agenthooks.ReadJSONObject(config.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root["future"].(map[string]any)["keep"] != true || root["execPrompt"].(map[string]any)["future"] != true {
+		t.Fatal("unrelated settings lost")
+	}
+	for _, provider := range []string{"claude", "codex"} {
+		if root[provider+"Accounts"].([]any)[0].(map[string]any)["future"] != true {
+			t.Fatal("unrelated account settings lost")
+		}
 	}
 }

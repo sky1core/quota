@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/sky1core/quota/internal/childprocess"
 )
 
 type Target struct {
@@ -169,8 +171,17 @@ func diskVersion(path, name string) (string, error) {
 }
 
 func stageRelease(ctx context.Context, dir string, targets []Target, version string) error {
-	args := []string{"install"}
+	var changed []Target
 	for _, target := range targets {
+		if target.Updated {
+			changed = append(changed, target)
+		}
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	args := []string{"install"}
+	for _, target := range changed {
 		args = append(args, Module+"/cmd/"+target.Name+"@"+version)
 	}
 	cmd, err := goCmd(ctx, args...)
@@ -184,10 +195,10 @@ func stageRelease(ctx context.Context, dir string, targets []Target, version str
 		}
 	}
 	cmd.Env = append(cmd.Env, "GOBIN="+dir, "GOOS="+runtime.GOOS, "GOARCH="+runtime.GOARCH)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := childprocess.CombinedOutput(cmd); err != nil {
 		return fmt.Errorf("staging release %s: %w\n%s", version, err, strings.TrimSpace(string(out)))
 	}
-	for _, target := range targets {
+	for _, target := range changed {
 		got, err := diskVersion(filepath.Join(dir, target.Name), target.Name)
 		if err != nil {
 			return err

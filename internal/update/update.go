@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+
+	"github.com/sky1core/quota/internal/childprocess"
 )
 
 // Module is this project's Go module path; binaries install as Module/cmd/<name>.
@@ -62,7 +64,7 @@ func goCmd(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	if err != nil {
 		return nil, fmt.Errorf("go toolchain not found in PATH (required for update): %w", err)
 	}
-	cmd := exec.CommandContext(ctx, goBin, args...)
+	cmd := childprocess.CommandContext(ctx, goBin, args...)
 	if home, herr := os.UserHomeDir(); herr == nil {
 		cmd.Dir = home
 	}
@@ -77,7 +79,7 @@ func Latest(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out, err := cmd.Output()
+	out, err := childprocess.Output(cmd)
 	if err != nil {
 		return "", fmt.Errorf("resolving %s@latest: %w%s", Module, err, stderrOf(err))
 	}
@@ -95,7 +97,7 @@ func BinPath(ctx context.Context, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out, err := cmd.Output()
+	out, err := childprocess.Output(cmd)
 	if err != nil {
 		return "", fmt.Errorf("go env: %w%s", err, stderrOf(err))
 	}

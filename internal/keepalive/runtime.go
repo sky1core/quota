@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sky1core/quota/internal/config"
 )
 
 type Account struct {
@@ -133,34 +135,44 @@ func (r *Runtime) runtimeAccounts() ([]Account, error) {
 		return nil, errors.New("keepalive runtime is missing")
 	}
 	accounts := make([]Account, 0, len(r.Accounts))
-	keys, homes := map[string]bool{}, map[string]bool{}
+	keys, homes := map[string]int{}, map[string]int{}
 	var failures []error
 	for _, a := range r.Accounts {
-		if (a.Provider != "claude" && a.Provider != "codex") || a.Key == "" || !filepath.IsAbs(a.Home) {
-			return nil, errors.New("keepalive account requires a supported provider, key, and explicit absolute home")
-		}
-		key := (Candidate{Provider: a.Provider, Account: a.Key}).Key()
-		if keys[key] {
-			return nil, errors.New("keepalive account ownership is ambiguous")
-		}
-		keys[key] = true
-		home, err := filepath.EvalSymlinks(a.Home)
-		if os.IsNotExist(err) {
+		if (a.Provider != "claude" && a.Provider != "codex") || a.Key == "" {
+			failures = append(failures, fmt.Errorf("keepalive account %q requires a supported provider and key", a.Key))
 			continue
 		}
+		key := (Candidate{Provider: a.Provider, Account: a.Key}).Key()
+		keys[key]++
+		if !filepath.IsAbs(a.Home) {
+			failures = append(failures, fmt.Errorf("keepalive account %s requires an explicit absolute home", a.Key))
+			continue
+		}
+		home, err := config.CanonicalAccountDirectory(a.Home)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("keepalive account %s home is unavailable: %w", a.Key, err))
 			continue
 		}
-		a.Home = filepath.Clean(home)
-		homeKey := a.Provider + "\x00" + a.Home
-		if homes[homeKey] {
-			return nil, errors.New("keepalive account ownership is ambiguous")
-		}
-		homes[homeKey] = true
+		a.Home = home
+		homes[a.Provider+"\x00"+a.Home]++
 		accounts = append(accounts, a)
 	}
-	return accounts, errors.Join(failures...)
+	valid := make([]Account, 0, len(accounts))
+	for _, a := range accounts {
+		key := (Candidate{Provider: a.Provider, Account: a.Key}).Key()
+		if keys[key] > 1 || homes[a.Provider+"\x00"+a.Home] > 1 {
+			failures = append(failures, fmt.Errorf("keepalive account %s ownership is ambiguous", a.Key))
+			continue
+		}
+		if _, err := os.Stat(a.Home); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			failures = append(failures, fmt.Errorf("keepalive account %s home is unavailable: %w", a.Key, err))
+			continue
+		}
+		valid = append(valid, a)
+	}
+	return valid, errors.Join(failures...)
 }
 
 func runtimeRecent(activity, now time.Time, maxAge time.Duration) bool {

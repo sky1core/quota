@@ -173,9 +173,9 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 
 **서브커맨드 (`update`) — 수동 업데이트**: `quota-cli update`는 Go module proxy의 `@latest`를 한 번 해석하고, CLI와 표준 Go 설치 디렉터리(`GOBIN`, 없으면 첫 `GOPATH/bin`)에 이미 설치된 지원 대상 companion을 같은 릴리스로 맞춘다. macOS에서 CLI와 bar가 함께 설치돼 있으면 둘 다 대상이며 CLI만 설치돼 있으면 bar를 새로 설치하지 않는다. 한쪽이 최신이어도 모든 대상의 디스크 빌드 정보를 검사한다.
 - **수동 전용**: 조회·캐시 갱신은 업데이트를 일으키지 않는다. 두 실행 파일은 계속 분리한다.
-- 대상 버전은 하나로 고정한다. 별도 임시 설치 디렉터리에 모든 대상 빌드를 준비한 후 설치본을 교체한다. 준비 실패 시 기존 설치본은 변경하지 않는다. 교체 실패 시 이전 설치본 복구를 시도하며 복구 실패와 남은 경로를 숨기지 않는다. 여러 파일의 rename은 하나의 원자적 트랜잭션이 아니다.
+- 대상 버전은 하나로 고정한다. 설치된 모든 대상의 버전을 검사하되, 변경이 필요한 대상만 임시 디렉터리에 빌드한 후 교체한다. 최신인 companion의 빌드는 요구하지 않는다. 준비 실패 시 기존 설치본은 변경하지 않는다. 교체 실패 시 이전 설치본 복구를 시도하며 복구 실패와 남은 경로를 숨기지 않는다. 여러 파일의 rename은 하나의 원자적 트랜잭션이 아니다.
 - 같은 설치 디렉터리에서 디렉터리 잠금을 사용하는 quota 업데이트끼리는 프로세스 간 잠금으로 직렬화하고 취소·시간 제한을 반영한다. 설치 디렉터리에 읽기·쓰기·탐색 권한이 필요하다. 잠금 때문에 다른 사용자 소유의 잠금 파일에 쓰기 권한을 요구하지 않는다. 기존 실행 파일의 소유자·그룹·권한 보존을 위해 하드링크로 복구본을 만들며, 운영체제가 이를 거부하면 교체 전에 실패한다. 외부 설치 도구와 이전 잠금 방식의 updater까지 통제하지 않는다.
-- CLI 업데이트 중 SIGINT·SIGTERM은 취소 요청으로 처리하고 진행 중인 교체의 복구·정리를 마친 뒤 종료한다. 강제 종료나 전원 손실까지 복구를 보장하지 않는다.
+- CLI 업데이트 중 SIGINT·SIGTERM은 취소 요청으로 처리하고 진행 중인 교체의 복구·정리를 마친 뒤 종료한다. 업데이트용 Go 명령과 Claude 쿼터 조회는 취소 시 자신이 생성한 프로세스 그룹을 종료하며, 자손이 유지하는 출력 파이프의 대기에도 상한을 둔다. 강제 종료나 전원 손실까지 복구를 보장하지 않는다.
 - 설치 경로와 결과를 대상별로 출력한다. CLI는 실행 중인 bar를 강제 종료하지 않으며, 메뉴바 재시작이 필요하면 명시한다.
 - 로컬 개발 빌드도 요청 시 선택된 릴리스로 교체할 수 있다. 현재·대상 버전을 표시하며 최신 태그보다 앞선 개발 빌드에서는 다운그레이드가 될 수 있다.
 - 요구사항: PATH에 `go` 필요. 설치 경로는 절대경로여야 하며 심볼릭 링크·다른 프로그램·실행 중인 updater와 OS/아키텍처가 다른 설치본은 오류로 보고한다. 방금 push한 태그는 proxy 캐시로 늦게 보일 수 있다.
@@ -220,10 +220,10 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 - 대화형 Claude/Codex 실행은 지원하지 않는다.
 
 **`select-agent` 동작**:
-- 사용자의 프롬프트를 실행하지 않는다. stdout에는 선택된 provider/account, 실행 prefix, 추가 계정에 필요한 환경 변수, 현재 셸에서 제거해야 할 override 환경 변수 이름, 후보별 quota 창 요약을 출력한다.
+- 사용자의 프롬프트를 실행하지 않는다. stdout에는 선택된 provider/account, 실제 실행 파일 경로를 포함한 실행 prefix, 추가 계정에 필요한 환경 변수, 현재 셸에서 제거해야 할 override 환경 변수 이름, 후보별 quota 창 요약을 출력한다.
 - 기본 `--agent=all`은 Claude/Codex configured 계정을 모두 비교한다. `--agent=claude` 또는 `--agent=codex`는 해당 provider 안에서만 선택한다.
 - quota 조회는 `exec-prompt`와 같이 75초 공유 캐시를 우선 사용한다. 5시간 잔여량 25% 진입 기준과 `execPrompt.accountSettings.<key>.minLeftPct`도 동일하게 적용한다.
-- 통합 모드에서는 provider 공통 장기/단기 창만 비교하고 Claude 모델별 extra row는 보지 않는다. `--model`은 `--agent=claude`에서만 허용한다.
+- 통합 모드에서는 자동 라우팅과 동일하게 모든 적격 후보에 공통인 기간만 긴 순서로 비교하고, 공통 기간이 없으면 비교 불가 오류를 반환한다. Claude 주간은 7일, 세션은 5시간으로 Codex의 실제 기간과 맞추며 Claude 모델별 extra row는 보지 않는다. `--model`은 `--agent=claude`에서만 허용한다.
 - 후보가 없으면 후보별 실패/제외 이유를 출력한 뒤 non-zero로 종료한다. JSON 모드는 같은 정보를 `selected`, `candidates`, `error`, `generated`로 출력하며 후보별 실행 정보는 `command`, `setEnv`, `unsetEnv`에 둔다.
 
 **모델명 기반 자동 라우팅**:
@@ -252,11 +252,11 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 
 **`agent hooks` 동작**:
 - 정책 파일은 기본적으로 `~/.config/quota/agent-hooks.d/*.json`에서 읽는다. 모든 `agent hooks` 하위 명령은 `--policy-dir <dir>`로 다른 정책 디렉터리를 지정할 수 있다.
-- `init --preset=github-history-guard`는 PR/Issue 생성·수정 같은 GitHub 협업 메타데이터 작업은 허용하면서 `git push`, `git send-pack`, `git pull`, `git merge`, `git rebase`, `git commit --amend`, `git reset --hard`, `git filter-branch`, `git hook run`, `git for-each-repo`, `git update-ref`, `git replace`, `git reflog expire`, 강제 branch reset, branch delete/move/copy, tag force/delete, `git config alias.*`/`include.*`, shell `alias`/`source`/`.`/`trap`/`xargs`, `gh pr merge`, `gh pr update-branch`, `gh pr checkout/co --force`, `gh repo edit --visibility`, `gh repo sync`, `gh release create/delete`, raw `gh api`, `gh alias set/import/delete`, `gh extension exec`, 알 수 없는 `git`/`gh` alias·extension dispatch, 허용 형식 밖의 `gh stack ...`를 차단하는 기본 정책을 생성한다. 기존 정책 파일이 있으면 `--force` 없이는 덮어쓰지 않는다.
+- `init --preset=github-history-guard`는 PR/Issue 생성·수정 같은 GitHub 협업 메타데이터 작업은 허용하면서 `git push`, `git send-pack`, `git pull`, `git merge`, `git rebase`, `git commit --amend`, `git reset --hard`, `git filter-branch`, `git hook run`, `git for-each-repo`, `git update-ref`, `git replace`, `git reflog expire`, 강제 branch reset, branch delete/move/copy, tag force/delete, `git config alias.*`/`include.*`, shell `alias`/`source`/`.`/`trap`/`xargs`, `gh pr merge`, `gh pr update-branch`, `gh pr checkout/co --force`, `gh repo edit --visibility`, `gh repo sync`, `gh release create/delete`, raw `gh api`, `gh alias set/import/delete`, `gh extension exec`, 알 수 없는 `git`/`gh` alias·extension dispatch, 허용 형식 밖의 `gh stack ...`를 차단하는 기본 정책을 생성한다. 기존 정책 파일이 있으면 `--force` 없이는 덮어쓰지 않는다. 정책과 overlay spec의 동시 비강제 생성은 하나만 성공하고, 강제 저장도 완성된 파일 단위로 교체한다. 대상 심볼릭 링크는 덮어쓰지 않는다.
 - `apply`는 enabled 정책이 최소 1개 없으면 hook 설정을 쓰지 않는다. 설정 파일이 이미 있으면 `<path>.bak.<timestamp>` 백업을 만든 뒤, 기존 managed evaluator hook만 교체하고 다른 hook은 보존한다. managed 여부는 evaluator 호출이 실제 실행 명령(command position)이고 apply가 설치하는 `--runtime=` 인자를 포함할 때만 인정하므로, 인자에 evaluator argv 문자열이 들어있을 뿐인 다른 hook은 교체하지 않는다. `--policy-dir`를 지정한 경우 설치되는 evaluator 명령도 같은 디렉터리를 인자로 받으며, `--binary`와 `--policy-dir`의 상대 경로는 적용 시점의 절대 경로로 고정한다.
 - Claude 쪽 설치 대상은 `CLAUDE_CONFIG_DIR/settings.json` 또는 기본 `~/.claude/settings.json`의 `hooks.PreToolUse`/`matcher=Bash`다. Codex 쪽 설치 대상은 `CODEX_HOME/hooks.json` 또는 기본 `~/.codex/hooks.json`의 `hooks.PreToolUse`/`matcher=Bash`다.
 - `eval`은 hook event의 `tool_input.command` 또는 `tool_input.cmd`를 읽고, `--command`가 있으면 그 문자열을 직접 평가한다. 허용이면 exit code 0, 차단이면 exit code 2와 차단 사유를 반환한다. 정책 파일 로드 오류나 enabled 정책 부재도 hook 경로에서는 차단 실패로 처리하지 않도록 exit code 2를 반환한다.
-- shell command 평가는 `mvdan.cc/sh/v3/syntax` parser로 수행한다. `git`/`gh`의 대표 global option, `env`/`sudo`/`command`/`builtin`/`exec` wrapper, `env -S`와 결합 short option 형태, `eval`, `sh -c` 계열 nested script는 정규화해 본다. shell interpreter에 정적으로 볼 수 있는 `-c` script가 없거나 startup env/file 또는 interactive/login startup으로 숨은 script가 실행될 수 있으면 stdin/script 파일 내용을 증명할 수 없으므로 차단한다. 동적 명령어 이름(`$cmd ...`)이나 동적 wrapper script(`sh -c "$cmd"`), 보호 대상 명령의 동적 인자(`git "$subcommand" ...`)는 정적으로 안전성을 증명할 수 없으므로 차단한다. quote·escape 없이 glob metacharacter(`*`, `?`, `[`)를 포함하거나 실제 brace expansion을 일으키는 `{...}`(최상위에 `,` 또는 `..` sequence가 있는 그룹)을 포함한 단어도 셸이 확장하므로 정적 리터럴로 보지 않고 같은 규칙으로 처리한다. 반면 `HEAD@{u}`·`stash@{0}`처럼 확장을 일으키지 않는 `{...}`와 backslash로 escape된 metacharacter는 리터럴로 취급한다. `&&`/`;`/`|` 등으로 이어진 복합 명령은 모든 statement를 평가해 하나라도 차단이면 전체를 차단하고, 모든 statement가 허용일 때만 허용한다.
+- shell command 평가는 `mvdan.cc/sh/v3/syntax` parser로 수행하며 명시적인 빈 인자와 옵션값의 경계를 보존한다. `git`/`gh`의 대표 global option, `env`/`sudo`/`command`/`builtin`/`exec` wrapper, `env -S`와 결합 short option 형태, `eval`, `sh -c` 계열 nested script는 정규화해 본다. shell interpreter에 정적으로 볼 수 있는 `-c` script가 없거나 startup env/file 또는 interactive/login startup으로 숨은 script가 실행될 수 있으면 stdin/script 파일 내용을 증명할 수 없으므로 차단한다. 동적 명령어 이름(`$cmd ...`)이나 동적 wrapper script(`sh -c "$cmd"`), 보호 대상 명령의 동적 인자(`git "$subcommand" ...`)는 정적으로 안전성을 증명할 수 없으므로 차단한다. quote·escape 없이 glob metacharacter(`*`, `?`, `[`)를 포함하거나 실제 brace expansion을 일으키는 `{...}`(최상위에 `,` 또는 `..` sequence가 있는 그룹)을 포함한 단어도 셸이 확장하므로 정적 리터럴로 보지 않고 같은 규칙으로 처리한다. 반면 `HEAD@{u}`·`stash@{0}`처럼 확장을 일으키지 않는 `{...}`와 backslash로 escape된 metacharacter는 리터럴로 취급한다. `&&`/`;`/`|` 등으로 이어진 복합 명령은 모든 statement를 평가해 하나라도 차단이면 전체를 차단하고, 모든 statement가 허용일 때만 허용한다.
 - `verify`는 정책 파일 스키마와 enabled 정책의 내장 테스트를 실행한다. glob 패턴은 `path.Match` 문법으로 로드/검증 시점에 확인하며, 잘못된 패턴은 정책/규칙을 명시한 오류로 load·verify를 실패시킨다. `doctor`는 enabled 정책 존재, managed hook 존재·실행 파일과 검사 대상 사용자 설정의 명시적 방해 조건을 확인한다. JSON의 `present`는 엔트리 존재 여부를 유지하며, 실행 방해 조건과 지원하지 않는 관리 엔트리 변형은 `reasons`, 파일 읽기·파싱 오류는 `error`로 구분한다. `doctor`는 정책 오류, 엔트리 부재, 실행 파일 오류, `reasons` 또는 `error`가 있으면 exit 1이다. Claude의 hook 비활성화 설정과 관리 엔트리의 조건부·비동기·직접 실행 변형, Codex 사용자 `config.toml`의 hook 비활성화 설정을 진단한다. `features.hooks`가 있으면 이를 사용하고, 없을 때만 기존 별칭 `features.codex_hooks`의 활성화 값을 사용한다. 두 키 모두 지정돼 있으면 둘 다 boolean이어야 한다. 관리자 전용 키를 사용자 설정에 둔 것은 방해 조건으로 취급하지 않는다. `plan`에도 같은 진단을 표시하되 설치 상태만으로 종료 코드를 바꾸지 않는다. `apply`는 사용자 비활성화 설정을 켜지 않으며, 저장 후 진단에 실패하면 저장 사실과 원인을 알리고 exit 1을 반환한다. 여러 런타임 적용은 각각 처리하며, JSON에는 전체 `hooks`와 실패 시 `errors`를 보고한다. 프로젝트·관리자 계층 전체의 병합 결과나 실제 hook 호출 성공은 보장하지 않는다. agent 런타임의 hook 신뢰·재로드 상태는 각 런타임이 담당하므로, 설정 파일에 hook이 있어도 새 세션 또는 hook 관리 화면에서 재로드가 필요할 수 있다.
 
 `agent hooks` JSON 설치와 Claude overlay 설치는 대상 경로별 프로세스 간 잠금 안에서 최신 파일 읽기·수정·백업·고유 임시 파일 쓰기·rename·저장 결과 재읽기를 수행한다. 값이 동일하면 파일과 백업을 쓰지 않는다. 신규 파일은 0644에 프로세스 umask를 적용하고, 기존 파일의 권한은 보존한다. 기존 내용을 담는 임시 파일은 원본보다 넓은 접근 권한으로 생성하지 않는다. 기존 JSON 숫자와 다른 설정값을 보존하고 파싱/변환 오류면 원본을 덮어쓰지 않는다. 직렬화 보장은 이 저장 경로를 사용하는 quota 명령 사이에 한정되며 외부 편집기를 통제하지 않는다.
@@ -264,7 +264,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 **`agent overlay` 동작**:
 - spec 파일은 기본적으로 `~/.config/quota/agent-overlay.json`에서 읽고, 모든 서브커맨드가 `--spec <file>`로 재정의한다. spec 파일이 없으면 `init`을 제외한 모든 명령이 명시적 오류로 실패한다 — 값이 비었을 때 다른 계층에서 끌어오는 암시적 기본값/fallback은 없다.
 - spec 스키마는 `version`(정수, 1만 지원. 다른 값은 명시 오류), 선택적 `claude`/`codex`/`verify` 섹션으로 구성된다. spec JSON은 알 수 없는 필드를 허용하지 않는다(중첩 구조 포함) — 오타 키는 조용히 무시하지 않고 명시 오류로 load를 실패시킨다. `claude.hooks`와 `codex.hooks`는 `이벤트이름 → [ { command } ]` 맵이며, hook 이벤트 이름은 고정 목록이 아니라 spec에 적힌 키를 그대로 쓴다. `claude.replaces`는 이전 spec 버전이 설치했던 command 문자열 배열로, apply가 교체 대상으로 삼는다 — 비교는 문자열 완전 일치(`==`)뿐이고 접두·패턴·argv[0] 해석은 없다. `codex` 엔트리는 `additionalContextLimit`를 선택적으로 가질 수 있고, `codex.settings`는 top-level 설정 키/값 맵이다. `verify`는 런타임별로 분리되어 `verify.claude.command`/`verify.codex.command`가 각각 argv 배열이다(전역 `verify.command`는 없다). 모든 hook `command`는 비어 있으면 검증 오류이고, 각 `verify.<runtime>.command`는 비어 있지 않은 argv[0]을 요구한다. 생략된 runtime 섹션은 `doctor`에서 `unconfigured`로 보고한다.
-- `init`은 위 스키마를 그대로 담은 placeholder spec을 생성한다. 모든 command는 `/path/to/overlay-hook` 형태의 placeholder이며 사용자가 실제 명령으로 교체한다. 기존 파일은 `--force` 없이는 덮어쓰지 않고, 쓰기는 임시 파일 + rename으로 원자적이다.
+- `init`은 위 스키마를 그대로 담은 placeholder spec을 생성한다. 모든 command는 `/path/to/overlay-hook` 형태의 placeholder이며 사용자가 실제 명령으로 교체한다. 기존 파일은 `--force` 없이는 덮어쓰지 않는다. 동시 비강제 생성은 하나만 성공하며, 강제 저장도 완성된 파일 단위로 교체한다. 대상 심볼릭 링크는 덮어쓰지 않는다.
 - Claude 설치 객체와 Codex 안내 스니펫에 쓰는 기대 설정을 검사 기준으로 공유한다. `plan`, `doctor`, Claude 저장 후 검사는 같은 검사 결과를 사용한다. `plan`은 항목별 차이와 명시적 방해 조건을 표시한다. command 완전 일치는 소유권 기준이며 정상 설치의 충분조건이 아니다. 지원 형태와 일치하면 `present`, Claude의 변형/교체 대상은 `stale`, Codex의 변형은 `mismatch`, 없는 항목은 `missing`이다. 대상 파일 파싱 실패는 오류로 exit 1.
 - `apply`의 Claude 대상은 `CLAUDE_CONFIG_DIR/settings.json` 또는 기본 `~/.claude/settings.json`의 `hooks.<event>`다. 기존 파일은 충돌 없는 `<path>.bak.<timestamp>` 백업(같은 초 반복 적용에도 기존 백업을 덮지 않음) 후 임시 파일 + rename으로 원자적으로 쓴다. managed 판정은 같은 이벤트에서 command 문자열이 (a) spec command와 완전 일치하거나 (b) `claude.replaces`에 든 command와 완전 일치하는 엔트리뿐이며, argv[0] 추론은 없다. 이 command 일치는 엔트리 형태와 무관하게 적용되므로(plain string, `type`이 다른 object 포함) managed command의 잘못된 변형도 남기지 않고 spec 버전으로 교체하며, 그 외 엔트리는 제거·수정하지 않는다. Codex apply는 지원하지 않는다 — `config.toml`은 주석·trust hash가 있는 대형 TOML이라 자동 재작성이 위험하므로 `codex apply is not supported in v1; use plan/doctor`로 명시 실패(exit 1)하고, `--runtime=all`에서는 Claude만 적용한 뒤 같은 안내를 남긴다.
 - `doctor`의 최고 상태는 `installed`다. 이는 검사한 대상 파일에서 관리 항목이 지원 형태와 일치하고 검사 대상인 명시적 방해 조건이 없다는 뜻이며 실제 실행 성공을 보장하지 않는다. 누락/불일치/방해 조건은 원인과 함께 `degraded`, runtime 생략은 `unconfigured`, 파싱/변환 실패는 `error`다. degraded/error가 있으면 exit 1.
@@ -341,7 +341,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
   - `home` (string, 필수): 해당 계정의 `CODEX_HOME` 디렉터리. `~`는 홈으로 확장된다. 서로 다른 계정은 서로 다른 `home`을 가리켜야 한다. 각 home에는 **동일/다른 계정을 별도 로그인**해 두어야 한다(인증 파일 복사가 아니라 `CODEX_HOME=<home> codex login`).
 - `execPrompt.accountSettings` (optional): 프롬프트 실행/agent 선택용 계정별 설정. `exec-prompt`와 `select-agent`가 사용한다. 키는 `claude`, `claude-<정수>`, `codex`, `codex-<정수>`만 허용한다. 현재 필드는 `minLeftPct`뿐이며 없으면 5, 값은 0 이상 100 이하의 숫자여야 한다. 이 설정은 조회 출력과 quota-bar 표시에 영향을 주지 않는다.
 - 파일이 없거나 목록이 비면 각 기본 계정만 조회한다(기존 동작).
-- 다음 항목은 건너뛰고 `errors`에 기록한다: 빈 `key`/`dir`, 형식 위반, 중복 `key`, 중복 `dir`. (중복 `configDir`/`home`은 같은 계정을 두 번 조회하는 설정 오류이므로 금지.)
+- 다음 항목은 건너뛰고 `errors`에 기록한다: 빈 `key`/`dir`, 형식 위반, 중복 `key`, 중복 `dir`. 기본 계정과 심볼릭 링크까지 해석한 실제 디렉터리로 중복을 판단하며 충돌한 모든 계정을 제외한다. 유효한 조회 경로는 절대경로로 해석한다.
 
 ### quota-bar
 
@@ -352,14 +352,15 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 
 **동작**:
 1. 시작 시 `~/.config/quota/quota-bar.json`에서 화면 설정(선택 항목) 로드
-2. `~/.config/quota/config.json`을 `config.ResolveAccounts()`(Claude) + `config.ResolveCodexAccounts()`(Codex)로 해석해 조회할 계정 목록 확정 (각 기본 `claude`/`codex` + 유효한 추가 계정). quota-cli와 동일한 규칙·순서를 공유한다. skip된 항목은 로그로만 기록.
+2. `~/.config/quota/config.json`을 `config.ResolveAccounts()`(Claude) + `config.ResolveCodexAccounts()`(Codex)로 해석해 조회할 계정 목록 확정 (각 기본 `claude`/`codex`와 추가 계정 중 유효하고 소유권이 명확한 계정). quota-cli와 동일한 규칙·순서를 공유한다. skip된 항목은 로그로만 기록.
 3. systray 아이콘 + 메뉴 구성 (Claude 계정별 그룹 + Codex 계정별 그룹)
 4. 즉시 1회 refresh 실행, 이후 활동 기반 간격으로 자동 refresh (활성/idle 주기는 `quota-bar.json`으로 설정 가능, 기본 3분/30분)
-5. **refresh = 각 Claude 계정 `claude.GetQuotaForConfigDir(timeout, configDir, maxAge)` (기본 `configDir=""`) + 각 Codex 계정 `codex.GetQuotaForHome(timeout, home, maxAge)` (기본 `home=""`)를 병렬 호출** (내부 패키지). maxAge는 refresh 주기와 무관하게 2분 — 공유 캐시(§공유 캐시)가 그보다 최근이면 재사용하고, 아니면 실측 후 캐시에 기록한다.
+5. **refresh = 각 Claude 계정 `claude.GetQuotaForConfigDir(timeout, configDir, maxAge)` (해석된 계정 경로) + 각 Codex 계정 `codex.GetQuotaForHome(timeout, home, maxAge)` (해석된 계정 경로)를 병렬 호출** (내부 패키지). maxAge는 refresh 주기와 무관하게 2분 — 공유 캐시(§공유 캐시)가 그보다 최근이면 재사용하고, 아니면 실측 후 캐시에 기록한다.
 6. 결과를 메뉴 항목에 표시
 
 **설정창**: 메뉴의 `Settings…`에서 표시 항목·리셋 표시 방식·활성/유휴 갱신 주기·로그인 시 실행, 계정 등록·해제·설정 디렉터리·위임 잔여량 하한, keepalive 설정을 편집한다. 하나의 네이티브 창을 재사용하며 취소는 변경을 저장하지 않는다. 로그인 시 실행 변경은 다음 로그인부터 적용하며 현재 앱이나 launchd 작업은 중단하지 않는다.
 - 저장 전에 전체 입력을 검증하고, 저장 실패나 편집 중 설정 충돌은 창에 표시한다. 성공 시 설정과 메뉴·조회 대상·스케줄을 재시작 없이 반영하며, 이전 계정 구성으로 시작한 조회 결과를 새 구성에 반영하지 않는다.
+- 설정창에서 계정 경로를 저장할 때 검증된 절대경로를 파일과 즉시 적용 설정에 동일하게 사용한다.
 - 계정 등록 해제는 quota의 등록만 제거한다. CLI 인증·설정·세션 파일은 변경하거나 삭제하지 않는다. 기본 계정은 등록 해제하지 않는다.
 - 설정 파일을 외부에서 직접 편집한 경우에는 앱 재시작으로 반영한다. 설정창은 외부 변경을 감지하면 오래된 편집 내용으로 덮어쓰지 않는다.
 
@@ -477,6 +478,7 @@ Quit
 
 - 예정 시각에 PC 입력이 지정 시간 이상 없고, 최근 지정 시간 안에 실제 작업 활동이 확인된 세션만 후보로 삼는다. CLI가 해당 세션을 열고 살아 있으며 평상시 입력 대기 중임을 확인해야 한다. 작업 중, 승인·질문 등 사용자 응답을 기다리는 작업, 미처리 입력이나 백그라운드 작업이 있는 세션, 상태가 불명확한 세션은 제외한다. 로그 수정 시각만으로 활동이나 실행 상태를 추론하지 않는다.
 - 메시지는 기존 CLI의 입력 경로로 보내며 별도 `resume`이나 새 세션을 만들지 않는다. 계정·모델·effort를 바꾸거나 다른 계정으로 라우팅하지 않는다. 전송 직전 PC 입력과 세션 상태를 다시 확인한다.
+- 잘못된 계정 경로나 중복된 계정 키·실제 home은 진단하고 해당 계정을 제외한다. 소유권이 모호한 그룹은 모든 구성원을 제외하며 무관한 정상 계정의 keepalive는 계속한다.
 - 같은 현지 날짜의 일정은 한 번만 시도한다. PC 사용 중이거나 앱 종료·잠자기로 놓친 일정은 나중에 실행하지 않는다. 일정 확인 간격이 30초를 넘으면 해당 시각을 놓친 것으로 취급한다. 재시작 후에도 중복 방지 기록을 유지하며, 캐시 유지 메시지는 새로운 실제 활동으로 계산하지 않는다.
 - 확인된 응답의 캐시 재사용량을 입력과 연결할 수 있으면 표시하며, 재사용 없음과 측정 불가를 구분한다. 이전 입력의 수치를 재사용하지 않는다. 캐시 재사용 확인은 이후의 보존 시간이나 추가 절감 효과를 보장하지 않는다.
 - 입력 접수와 응답 완료를 구분한다. 같은 세션에서 해당 입력의 응답 완료를 확인해야 성공으로 표시하고, 미확인 전송은 자동 재전송하지 않는다. 실행 상태를 확인할 수 없는 CLI는 미지원 원인을 표시하고 전송하지 않는다.

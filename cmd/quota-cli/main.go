@@ -267,7 +267,6 @@ func accountList() int {
 
 // validateNewAccount checks a new account against existing entries. The key
 // format rule is shared with query-time resolution via config.ClaudeExtraKeyRe.
-// configDir uniqueness is compared after tilde expansion.
 func validateNewAccount(existing []config.ClaudeAccount, key, dir string) error {
 	if key == "" || dir == "" {
 		return fmt.Errorf("key와 configDir 모두 필요")
@@ -275,12 +274,22 @@ func validateNewAccount(existing []config.ClaudeAccount, key, dir string) error 
 	if !config.ClaudeExtraKeyRe.MatchString(key) {
 		return fmt.Errorf("key %q는 claude-<N> 형식이어야 함 (예: claude-2)", key)
 	}
-	exp := config.ExpandTilde(dir)
+	exp, err := config.CanonicalAccountDirectory(dir)
+	if err != nil {
+		return err
+	}
+	defaultDir, err := config.DefaultAccountDirectory("claude")
+	if err != nil {
+		return err
+	}
+	if exp == defaultDir {
+		return fmt.Errorf("configDir duplicates default claude account")
+	}
 	for _, a := range existing {
 		if a.Key == key {
 			return fmt.Errorf("key %q는 이미 등록됨", key)
 		}
-		if config.ExpandTilde(a.ConfigDir) == exp {
+		if existingDir, err := config.CanonicalAccountDirectory(a.ConfigDir); err == nil && existingDir == exp {
 			return fmt.Errorf("configDir가 기존 계정 %q와 동일한 위치를 가리킴", a.Key)
 		}
 	}
@@ -289,7 +298,6 @@ func validateNewAccount(existing []config.ClaudeAccount, key, dir string) error 
 
 // validateNewCodexAccount is the Codex sibling of validateNewAccount. The key
 // format rule is shared with query-time resolution via config.CodexExtraKeyRe.
-// home uniqueness is compared after tilde expansion.
 func validateNewCodexAccount(existing []config.CodexAccount, key, home string) error {
 	if key == "" || home == "" {
 		return fmt.Errorf("key와 home 모두 필요")
@@ -297,12 +305,22 @@ func validateNewCodexAccount(existing []config.CodexAccount, key, home string) e
 	if !config.CodexExtraKeyRe.MatchString(key) {
 		return fmt.Errorf("key %q는 codex-<N> 형식이어야 함 (예: codex-2)", key)
 	}
-	exp := config.ExpandTilde(home)
+	exp, err := config.CanonicalAccountDirectory(home)
+	if err != nil {
+		return err
+	}
+	defaultDir, err := config.DefaultAccountDirectory("codex")
+	if err != nil {
+		return err
+	}
+	if exp == defaultDir {
+		return fmt.Errorf("home duplicates default codex account")
+	}
 	for _, a := range existing {
 		if a.Key == key {
 			return fmt.Errorf("key %q는 이미 등록됨", key)
 		}
-		if config.ExpandTilde(a.Home) == exp {
+		if existingDir, err := config.CanonicalAccountDirectory(a.Home); err == nil && existingDir == exp {
 			return fmt.Errorf("home이 기존 계정 %q와 동일한 위치를 가리킴", a.Key)
 		}
 	}

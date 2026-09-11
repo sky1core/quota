@@ -227,8 +227,7 @@ func selectAutoPromptAccount(cfg config.Config, opts autoPromptOptions, catalogs
 	wg.Wait()
 	scores := make([]accountScore, len(accounts))
 	usable := make([]bool, len(accounts))
-	var commonPeriods []int
-	periodsInitialized := false
+	minLeftPcts := make([]float64, len(accounts))
 	accountWindows := make([]map[int]map[string]any, len(accounts))
 	var failures []string
 	for i, result := range results {
@@ -245,35 +244,12 @@ func selectAutoPromptAccount(cfg config.Config, opts autoPromptOptions, catalogs
 		if !usable[i] {
 			continue
 		}
-		accountWindows[i] = autoPromptQuotaWindows(account.provider, result.quota)
-		if !periodsInitialized {
-			for period := range accountWindows[i] {
-				commonPeriods = append(commonPeriods, period)
-			}
-			periodsInitialized = true
-		} else {
-			var retained []int
-			for _, period := range commonPeriods {
-				if accountWindows[i][period] != nil {
-					retained = append(retained, period)
-				}
-			}
-			commonPeriods = retained
-		}
+		accountWindows[i] = aggregateQuotaWindowsByDuration(account.provider, result.quota)
+		minLeftPcts[i] = account.minLeftPct
 	}
-	if periodsInitialized && len(commonPeriods) == 0 {
-		return autoPromptAccount{}, fmt.Errorf("eligible accounts have no common quota window duration")
-	}
-	sort.Sort(sort.Reverse(sort.IntSlice(commonPeriods)))
-	for i := range accounts {
-		if !usable[i] {
-			continue
-		}
-		var priority []map[string]any
-		for _, period := range commonPeriods {
-			priority = append(priority, accountWindows[i][period])
-		}
-		scores[i], usable[i] = buildAccountScore(priority, accounts[i].minLeftPct, now)
+	scores, err = scoreCommonQuotaPeriods(accountWindows, usable, minLeftPcts, now)
+	if err != nil {
+		return autoPromptAccount{}, err
 	}
 	best := selectBestScore(scores, usable)
 	if best < 0 {
@@ -282,7 +258,47 @@ func selectAutoPromptAccount(cfg config.Config, opts autoPromptOptions, catalogs
 	return accounts[best], nil
 }
 
-func autoPromptQuotaWindows(provider string, quota map[string]any) map[int]map[string]any {
+func scoreCommonQuotaPeriods(accountWindows []map[int]map[string]any, usable []bool, minLeftPcts []float64, now time.Time) ([]accountScore, error) {
+	var commonPeriods []int
+	initialized := false
+	for i, windows := range accountWindows {
+		if !usable[i] {
+			continue
+		}
+		if !initialized {
+			for period := range windows {
+				commonPeriods = append(commonPeriods, period)
+			}
+			initialized = true
+		} else {
+			var retained []int
+			for _, period := range commonPeriods {
+				if windows[period] != nil {
+					retained = append(retained, period)
+				}
+			}
+			commonPeriods = retained
+		}
+	}
+	if initialized && len(commonPeriods) == 0 {
+		return nil, fmt.Errorf("eligible accounts have no common quota window duration")
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(commonPeriods)))
+	scores := make([]accountScore, len(accountWindows))
+	for i, windows := range accountWindows {
+		if !usable[i] {
+			continue
+		}
+		var priority []map[string]any
+		for _, period := range commonPeriods {
+			priority = append(priority, windows[period])
+		}
+		scores[i], usable[i] = buildAccountScore(priority, minLeftPcts[i], now)
+	}
+	return scores, nil
+}
+
+func aggregateQuotaWindowsByDuration(provider string, quota map[string]any) map[int]map[string]any {
 	windows := make(map[int]map[string]any)
 	for _, window := range quotaWindows(quota) {
 		if provider == "claude" {

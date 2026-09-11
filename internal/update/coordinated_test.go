@@ -263,9 +263,9 @@ func TestStageReleaseRealGo(t *testing.T) {
 	dir := t.TempDir()
 	protectedBin := t.TempDir()
 	t.Setenv("GOBIN", protectedBin)
-	targets := []Target{{Name: "quota-cli"}}
+	targets := []Target{{Name: "quota-cli", Updated: true}}
 	if runtime.GOOS == "darwin" {
-		targets = append(targets, Target{Name: "quota-bar"})
+		targets = append(targets, Target{Name: "quota-bar", Updated: true})
 	}
 	for _, target := range targets {
 		writeExecutable(t, filepath.Join(protectedBin, target.Name), "original "+target.Name)
@@ -280,7 +280,21 @@ func TestStageReleaseRealGo(t *testing.T) {
 		}
 		assertContents(t, filepath.Join(protectedBin, target.Name), "original "+target.Name)
 	}
-	badTargets := append(append([]Target(nil), targets...), Target{Name: "nonexistent-command"})
+
+	if runtime.GOOS == "darwin" {
+		t.Run("unchanged companion needs no compiler", func(t *testing.T) {
+			t.Setenv("CGO_ENABLED", "0")
+			changedOnly := t.TempDir()
+			partial := []Target{{Name: "quota-cli", Updated: true}, {Name: "quota-bar", Updated: false}}
+			if err := stageRelease(ctx, changedOnly, partial, version); err != nil {
+				t.Fatalf("unchanged bar blocked CLI: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(changedOnly, "quota-bar")); !os.IsNotExist(err) {
+				t.Fatalf("unchanged bar staged: %v", err)
+			}
+		})
+	}
+	badTargets := append(append([]Target(nil), targets...), Target{Name: "nonexistent-command", Updated: true})
 	if err := stageRelease(ctx, t.TempDir(), badTargets, version); err == nil || !strings.Contains(err.Error(), "staging release") {
 		t.Fatalf("real Go failure not propagated: %v", err)
 	}

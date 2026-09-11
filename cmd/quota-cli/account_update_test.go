@@ -242,3 +242,69 @@ func TestAccountConcurrentDuplicateDirectory(t *testing.T) {
 		})
 	}
 }
+
+func TestAccountAddRejectsCanonicalDuplicatesAndPreservesSpelling(t *testing.T) {
+	for _, provider := range []string{"claude", "codex"} {
+		for _, kind := range []string{"default", "environment default", "registered"} {
+			t.Run(provider+"/"+kind, func(t *testing.T) {
+				home := autoPromptTestHome(t)
+				base := filepath.Join(home, "."+provider)
+				if kind == "environment default" {
+					base = filepath.Join(home, "inherited")
+					env := "CLAUDE_CONFIG_DIR"
+					if provider == "codex" {
+						env = "CODEX_HOME"
+					}
+					t.Setenv(env, base)
+				}
+				if kind == "registered" {
+					base = filepath.Join(home, "existing")
+				}
+				if err := os.Mkdir(base, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(base, filepath.Join(home, "alias")); err != nil {
+					t.Fatal(err)
+				}
+				if kind == "registered" {
+					if code := accountAdd([]string{provider + "-2", base}); code != 0 {
+						t.Fatal(code)
+					}
+				}
+				before, _ := os.ReadFile(config.Path())
+				if code := accountAdd([]string{provider + "-3", "~/alias"}); code == 0 {
+					t.Fatal("duplicate registered")
+				}
+				after, _ := os.ReadFile(config.Path())
+				if string(before) != string(after) {
+					t.Fatal("rejected registration changed config")
+				}
+				t.Chdir(home)
+				if code := accountAdd([]string{provider + "-9", "new-account"}); code != 0 {
+					t.Fatal(code)
+				}
+				cfg, err := config.Load()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if provider == "claude" {
+					if cfg.ClaudeAccounts[len(cfg.ClaudeAccounts)-1].ConfigDir != "new-account" {
+						t.Fatal("CLI spelling changed")
+					}
+					accounts, skipped := cfg.ResolveAccounts()
+					if len(skipped) != 0 || accounts[len(accounts)-1].ConfigDir != filepath.Join(home, "new-account") {
+						t.Fatalf("resolution %v %v", accounts, skipped)
+					}
+				} else {
+					if cfg.CodexAccounts[len(cfg.CodexAccounts)-1].Home != "new-account" {
+						t.Fatal("CLI spelling changed")
+					}
+					accounts, skipped := cfg.ResolveCodexAccounts()
+					if len(skipped) != 0 || accounts[len(accounts)-1].Home != filepath.Join(home, "new-account") {
+						t.Fatalf("resolution %v %v", accounts, skipped)
+					}
+				}
+			})
+		}
+	}
+}

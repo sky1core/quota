@@ -6,7 +6,6 @@ import (
 	"math"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,7 +59,7 @@ func runClaudePrompt(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if err := refreshDelegationModels("claude", account.ConfigDir); err != nil {
+	if _, err := refreshDelegationModels("claude", account.ConfigDir); err != nil {
 		fmt.Fprintln(os.Stderr, "claude model catalog error:", err)
 		return 1
 	}
@@ -87,7 +86,7 @@ func runCodexPrompt(args []string) int {
 		fmt.Fprintln(os.Stderr, "codex CLI not found")
 		return 1
 	}
-	if err := refreshDelegationModels("codex", account.Home); err != nil {
+	if _, err := refreshDelegationModels("codex", account.Home); err != nil {
 		fmt.Fprintln(os.Stderr, "codex model catalog error:", err)
 		return 1
 	}
@@ -98,11 +97,11 @@ func runCodexPrompt(args []string) int {
 	return 0
 }
 
-func refreshDelegationModels(provider, accountDir string) error {
+func refreshDelegationModels(provider, accountDir string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), delegateProbeTimeout)
 	defer cancel()
-	_, err := loadAccountModels(ctx, provider, accountDir, false)
-	return err
+	snapshot, err := loadAccountModels(ctx, provider, accountDir, false)
+	return snapshot.Binary, err
 }
 
 func selectClaudeAccount(cfg config.Config, args []string, now time.Time) (config.ResolvedAccount, error) {
@@ -691,15 +690,7 @@ func failureSuffix(failures []string) string {
 }
 
 func findClaudePromptBinary() (string, error) {
-	if path, err := exec.LookPath("claude"); err == nil {
-		return path, nil
-	}
-	home, _ := os.UserHomeDir()
-	path := filepath.Join(home, ".local", "bin", "claude")
-	if _, err := os.Stat(path); err != nil {
-		return "", fmt.Errorf("claude CLI not found")
-	}
-	return path, nil
+	return claude.FindBinary()
 }
 
 func delegatedArgv(bin string, prefix, forwarded []string) []string {

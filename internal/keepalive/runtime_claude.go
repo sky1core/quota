@@ -11,11 +11,12 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sky1core/quota/internal/claude"
 )
 
 const claudeTranscriptLimit = 64 * 1024 * 1024
@@ -118,7 +119,7 @@ func scanClaudeRuntime(ctx context.Context, account Account, now time.Time, maxA
 	if len(records) == 0 {
 		return nil, scanErr
 	}
-	executable, err := exec.LookPath("claude")
+	executable, err := claude.FindBinary()
 	if err != nil {
 		return nil, errors.New("claude executable identity unavailable")
 	}
@@ -247,7 +248,7 @@ func deliverClaudeRuntime(ctx context.Context, account Account, c Candidate, mes
 	if matches != 1 || record.PID == 0 {
 		return Receipt{}, errors.New("claude delivery session is gone or ownership changed")
 	}
-	executable, err := exec.LookPath("claude")
+	executable, err := claude.FindBinary()
 	if err != nil {
 		return Receipt{}, errors.New("claude executable identity unavailable")
 	}

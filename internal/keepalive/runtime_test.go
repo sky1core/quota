@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -497,6 +498,88 @@ func TestAccountPathFailurePreservesIndependentAccounts(t *testing.T) {
 	for _, accounts := range [][]Account{{good, bad}, {bad, good}} {
 		if got, err := (&Runtime{Accounts: accounts}).runtimeAccounts(); err == nil || len(got) != 0 {
 			t.Fatalf("duplicate key escaped through path error: %v %v", got, err)
+		}
+	}
+}
+
+func TestRuntimeExcludesEveryConflictingAccountAndRetainsOthers(t *testing.T) {
+	for _, kind := range []string{"relative", "duplicate home", "duplicate key", "key and home", "invalid sibling", "symlink loop"} {
+		for _, reverse := range []bool{false, true} {
+			t.Run(kind+"/"+map[bool]string{false: "forward", true: "reverse"}[reverse], func(t *testing.T) {
+				root, err := filepath.EvalSymlinks(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				dir := filepath.Join(root, "conflict")
+				if err := os.Mkdir(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				alias := filepath.Join(root, "alias")
+				if err := os.Symlink(dir, alias); err != nil {
+					t.Fatal(err)
+				}
+				bad := []Account{{Provider: "claude", Key: "bad", Home: dir}}
+				switch kind {
+				case "relative":
+					bad[0].Home = "relative"
+				case "duplicate home":
+					bad = append(bad, Account{Provider: "claude", Key: "alias", Home: alias})
+				case "duplicate key":
+					bad = append(bad, Account{Provider: "claude", Key: "bad", Home: root})
+				case "key and home":
+					bad = append(bad, Account{Provider: "claude", Key: "bad", Home: root}, Account{Provider: "claude", Key: "alias", Home: alias})
+				case "invalid sibling":
+					bad = append(bad, Account{Provider: "claude", Key: "bad", Home: "relative"})
+				case "symlink loop":
+					loop := filepath.Join(root, "loop")
+					if err := os.Symlink(loop, loop); err != nil {
+						t.Fatal(err)
+					}
+					bad[0].Home = loop
+				}
+				goodDir := filepath.Join(root, "valid")
+				if err := os.Mkdir(goodDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				good := Account{Provider: "claude", Key: "valid", Home: goodDir}
+				otherProvider := Account{Provider: "codex", Key: "other", Home: dir}
+				entries := append(bad, good, otherProvider)
+				if reverse {
+					for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
+						entries[i], entries[j] = entries[j], entries[i]
+					}
+				}
+				runtime := &Runtime{Accounts: entries}
+				accounts, err := runtime.runtimeAccounts()
+				if err == nil || len(accounts) != 2 {
+					t.Fatalf("accounts = %v, %v", accounts, err)
+				}
+				for _, account := range accounts {
+					if account != good && account != otherProvider {
+						t.Fatalf("conflicting account retained: %v", account)
+					}
+				}
+				if err := os.Mkdir(filepath.Join(goodDir, "sessions"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(goodDir, "sessions", strconv.Itoa(os.Getpid())+".json"), []byte("{}"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				_, err = runtime.Scan(context.Background(), time.Now(), time.Hour, nil)
+				if err == nil || !strings.Contains(err.Error(), "keepalive account valid: claude runtime registry shape is unsupported") {
+					t.Fatalf("valid account was not scanned: %v", err)
+				}
+				candidate := Candidate{Provider: good.Provider, Account: good.Key, Home: good.Home, SessionID: runtimeTestSession, PID: 123, ActivityID: runtimeTestUser}
+				_, err = runtime.Deliver(context.Background(), candidate, "synthetic", time.Hour, runtimeTestAuto, func() bool { return true })
+				if err == nil || err.Error() != "claude runtime registry shape is unsupported" {
+					t.Fatalf("valid candidate rejected by unrelated account config: %v", err)
+				}
+				candidate.Account, candidate.Home = "bad", dir
+				_, err = runtime.Deliver(context.Background(), candidate, "synthetic", time.Hour, runtimeTestAuto, func() bool { return true })
+				if err == nil || !strings.Contains(err.Error(), "does not match a configured account") {
+					t.Fatalf("invalid candidate admitted: %v", err)
+				}
+			})
 		}
 	}
 }

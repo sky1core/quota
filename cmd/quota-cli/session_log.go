@@ -236,10 +236,12 @@ func validateSessionLogMaxCharsFlag(value int, stderr io.Writer) bool {
 func sessionLogInterspersedFlags(args []string, valueFlags map[string]bool) []string {
 	flags := make([]string, 0, len(args))
 	positionals := make([]string, 0, len(args))
+	sawTerminator := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
 			positionals = append(positionals, args[i+1:]...)
+			sawTerminator = true
 			break
 		}
 		if strings.HasPrefix(arg, "-") && arg != "-" {
@@ -252,6 +254,9 @@ func sessionLogInterspersedFlags(args []string, valueFlags map[string]bool) []st
 			continue
 		}
 		positionals = append(positionals, arg)
+	}
+	if sawTerminator {
+		flags = append(flags, "--")
 	}
 	return append(flags, positionals...)
 }
@@ -714,23 +719,20 @@ func encodeSessionLogJSON(stdout io.Writer, value any) int {
 
 func snippetAround(text, query string, maxChars int) string {
 	text = collapseWhitespace(text)
-	if maxChars <= 0 || utf8.RuneCountInString(text) <= maxChars {
+	runes := []rune(text)
+	if maxChars <= 0 || len(runes) <= maxChars {
 		return text
 	}
-	lowerText := strings.ToLower(text)
-	lowerQuery := strings.ToLower(query)
-	index := strings.Index(lowerText, lowerQuery)
-	if index < 0 {
+	queryStart := foldedRuneIndex(text, query)
+	if queryStart < 0 {
 		return truncateRunes(text, maxChars)
 	}
-	queryStart := utf8.RuneCountInString(text[:index])
 	queryLen := utf8.RuneCountInString(query)
 	start := queryStart - (maxChars-queryLen)/2
 	if start < 0 {
 		start = 0
 	}
 	end := start + maxChars
-	runes := []rune(text)
 	if end > len(runes) {
 		end = len(runes)
 		start = end - maxChars
@@ -746,6 +748,15 @@ func snippetAround(text, query string, maxChars int) string {
 		out += "..."
 	}
 	return out
+}
+
+func foldedRuneIndex(text, query string) int {
+	lower := strings.ToLower(text)
+	index := strings.Index(lower, strings.ToLower(query))
+	if index < 0 {
+		return -1
+	}
+	return utf8.RuneCountInString(lower[:index])
 }
 
 func truncateRunes(text string, maxChars int) string {

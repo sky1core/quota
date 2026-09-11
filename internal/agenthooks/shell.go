@@ -17,7 +17,7 @@ type Invocation struct {
 }
 
 func ParseShellInvocations(command string) ([]Invocation, error) {
-	return parseShellInvocations(command, 0)
+	return parseShellInvocations(command, 0, "")
 }
 
 func parseDirectShellInvocation(command string) (Invocation, bool) {
@@ -44,7 +44,7 @@ func parseDirectShellInvocation(command string) (Invocation, bool) {
 	return inv, true
 }
 
-func parseShellInvocations(command string, depth int) ([]Invocation, error) {
+func parseShellInvocations(command string, depth int, inheritedShellStartup string) ([]Invocation, error) {
 	if depth > 8 {
 		return nil, fmt.Errorf("nested shell command depth exceeded")
 	}
@@ -89,9 +89,21 @@ func parseShellInvocations(command string, depth int) ([]Invocation, error) {
 			inv.DynamicCommand = true
 		}
 		shellStartupDispatch, shellStartupReason := shellStartupAssignmentCanExecuteHiddenScript(call.Assigns, inv.Argv)
+		if inheritedShellStartup != "" {
+			shellStartupDispatch, shellStartupReason = true, inheritedShellStartup
+		}
+		norm, dynamicCommand, dynamicReason := normalizeArgv(inv.Argv)
+		if gitConfigDispatch && len(norm) > 0 && commandName(norm[0]) == "git" {
+			dynamicCommand = true
+			dynamicReason = gitConfigReason
+		}
+		if ghConfigDispatch && len(norm) > 0 && commandName(norm[0]) == "gh" {
+			dynamicCommand = true
+			dynamicReason = ghConfigReason
+		}
 		if !inv.Dynamic {
-			if script, ok := evalScript(inv.Argv); ok {
-				nested, err := parseShellInvocations(script, depth+1)
+			if script, ok := evalScript(norm); ok {
+				nested, err := parseShellInvocations(script, depth+1, shellStartupReason)
 				if err != nil {
 					invocations = append(invocations, Invocation{Argv: inv.Argv, Dynamic: true, DynamicCommand: true, DynamicReason: "eval script is not statically parseable"})
 					return false
@@ -103,8 +115,8 @@ func parseShellInvocations(command string, depth int) ([]Invocation, error) {
 			}
 		}
 		if !inv.Dynamic {
-			if script, ok := envSplitStringScript(inv.Argv); ok {
-				nested, err := parseShellInvocations(script, depth+1)
+			if script, ok := envSplitStringScript(norm); ok {
+				nested, err := parseShellInvocations(script, depth+1, shellStartupReason)
 				if err != nil {
 					invocations = append(invocations, Invocation{Argv: inv.Argv, Dynamic: true, DynamicReason: "env split string is not statically parseable"})
 					return false
@@ -114,15 +126,6 @@ func parseShellInvocations(command string, depth int) ([]Invocation, error) {
 				invocations = append(invocations, nested...)
 				return true
 			}
-		}
-		norm, dynamicCommand, dynamicReason := normalizeArgv(inv.Argv)
-		if gitConfigDispatch && len(norm) > 0 && commandName(norm[0]) == "git" {
-			dynamicCommand = true
-			dynamicReason = gitConfigReason
-		}
-		if ghConfigDispatch && len(norm) > 0 && commandName(norm[0]) == "gh" {
-			dynamicCommand = true
-			dynamicReason = ghConfigReason
 		}
 		if len(norm) > 0 && isShellCommand(norm[0]) {
 			if shellStartupDispatch && shellCanExecuteScript(norm) {
@@ -146,8 +149,8 @@ func parseShellInvocations(command string, depth int) ([]Invocation, error) {
 				return true
 			}
 		}
-		if scriptIndex, ok := shellScriptArgIndex(norm); ok {
-			nested, err := parseShellInvocations(norm[scriptIndex], depth+1)
+		if scriptIndex, ok := shellScriptArgIndex(norm); ok && !inv.Dynamic {
+			nested, err := parseShellInvocations(norm[scriptIndex], depth+1, shellStartupReason)
 			if err != nil {
 				invocations = append(invocations, Invocation{Argv: norm, Dynamic: true, DynamicReason: "nested shell command is not statically parseable"})
 				return false
@@ -226,7 +229,7 @@ func staticWordPart(part syntax.WordPart, quoted bool) (string, bool) {
 		}
 		return staticLitValue(p.Value, quoted), true
 	case *syntax.SglQuoted:
-		if p.Dollar {
+		if p.Dollar && p.Value != "" {
 			return "", false
 		}
 		return p.Value, true
@@ -380,7 +383,7 @@ func shellStartupAssignmentCanExecuteHiddenScript(assigns []*syntax.Assign, argv
 }
 
 func wrapperEnvCanSetShellStartup(argv []string) (bool, string) {
-	out := compactEmptyArgs(append([]string(nil), argv...))
+	out := argv
 	for {
 		if len(out) == 0 {
 			return false, ""
@@ -526,7 +529,7 @@ func ghConfigSudoArgsCanChangeCommandDispatch(argv []string) (bool, string) {
 }
 
 func gitConfigWrapperCanChangeCommandDispatch(argv []string) (bool, string) {
-	out := compactEmptyArgs(append([]string(nil), argv...))
+	out := argv
 	for {
 		if len(out) == 0 {
 			return false, ""
@@ -565,7 +568,7 @@ func gitConfigWrapperCanChangeCommandDispatch(argv []string) (bool, string) {
 }
 
 func ghConfigWrapperCanChangeCommandDispatch(argv []string) (bool, string) {
-	out := compactEmptyArgs(append([]string(nil), argv...))
+	out := argv
 	for {
 		if len(out) == 0 {
 			return false, ""
@@ -641,7 +644,7 @@ func markInvocationsDynamicForCommand(invocations []Invocation, command string, 
 }
 
 func normalizeArgv(argv []string) ([]string, bool, string) {
-	out := compactEmptyArgs(argv)
+	out := argv
 	for {
 		if len(out) == 0 {
 			return out, false, ""
@@ -689,17 +692,6 @@ func isCommandWrapper(cmd string) bool {
 	default:
 		return false
 	}
-}
-
-func compactEmptyArgs(argv []string) []string {
-	out := argv[:0]
-	for _, arg := range argv {
-		if arg == "" {
-			continue
-		}
-		out = append(out, arg)
-	}
-	return out
 }
 
 func normalizeCommandArgv(argv []string) []string {
@@ -895,26 +887,26 @@ func envSplitStringScript(argv []string) (string, bool) {
 			if i+1 >= len(argv) {
 				return "", false
 			}
-			return strings.Join(argv[i+1:], " "), true
+			return "env " + argv[i+1] + " " + quoteLiteralArgs(argv[i+2:]), true
 		}
 		if strings.HasPrefix(arg, "--split-string=") {
 			script := strings.TrimPrefix(arg, "--split-string=")
 			if i+1 < len(argv) {
-				script += " " + strings.Join(argv[i+1:], " ")
+				script += " " + quoteLiteralArgs(argv[i+1:])
 			}
-			return script, true
+			return "env " + script, true
 		}
 		if script, ok := envShortSplitStringScript(arg); ok {
 			if script == "" {
 				if i+1 >= len(argv) {
 					return "", false
 				}
-				return strings.Join(argv[i+1:], " "), true
+				return "env " + argv[i+1] + " " + quoteLiteralArgs(argv[i+2:]), true
 			}
 			if i+1 < len(argv) {
-				script += " " + strings.Join(argv[i+1:], " ")
+				script += " " + quoteLiteralArgs(argv[i+1:])
 			}
-			return script, true
+			return "env " + script, true
 		}
 		if envFlagNoValue(arg) {
 			continue
@@ -932,6 +924,14 @@ func envSplitStringScript(argv []string) (string, bool) {
 		return "", false
 	}
 	return "", false
+}
+
+func quoteLiteralArgs(args []string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
+	}
+	return strings.Join(quoted, " ")
 }
 
 func envShortSplitStringScript(arg string) (string, bool) {
@@ -1297,7 +1297,7 @@ func shellLoginOption(argv []string) bool {
 }
 
 func wrapperLoginShellStartupCanExecuteHiddenScript(argv []string) bool {
-	out := compactEmptyArgs(append([]string(nil), argv...))
+	out := argv
 	for {
 		if len(out) == 0 {
 			return false

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/sky1core/quota/internal/atomicfile"
 )
 
 const (
@@ -117,26 +119,17 @@ func SavePolicy(dir string, policy Policy, force bool) (string, error) {
 	if err := ValidatePolicy(policy); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
 	path := filepath.Join(dir, policy.ID+".json")
-	if _, err := os.Stat(path); err == nil && !force {
-		return "", fmt.Errorf("%s already exists", path)
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
 	policy.Path = ""
 	b, err := json.MarshalIndent(policy, "", "  ")
 	if err != nil {
 		return "", err
 	}
 	b = append(b, '\n')
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := atomicfile.Save(path, b, 0o600, force); err != nil {
+		if errors.Is(err, atomicfile.ErrExists) {
+			return "", fmt.Errorf("%s already exists", path)
+		}
 		return "", err
 	}
 	return path, nil

@@ -143,6 +143,10 @@ func resolvedKeys(accts []ResolvedAccount) []string {
 }
 
 func TestResolveAccounts_DefaultOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", "")
 	accts, skipped := Config{}.ResolveAccounts()
 	if len(skipped) != 0 {
 		t.Fatalf("no config → no skipped, got %v", skipped)
@@ -151,8 +155,8 @@ func TestResolveAccounts_DefaultOnly(t *testing.T) {
 		t.Fatalf("expected only the default account, got %v", resolvedKeys(accts))
 	}
 	got := accts[0]
-	if got.Key != "claude" || got.ConfigDir != "" || got.Label != "Claude" {
-		t.Errorf("default account = %+v, want {claude, \"\", Claude}", got)
+	if got.Key != "claude" || got.ConfigDir != filepath.Join(home, ".claude") || got.Label != "Claude" {
+		t.Errorf("default account = %+v, want absolute directory %q", got, filepath.Join(home, ".claude"))
 	}
 }
 
@@ -216,30 +220,26 @@ func TestResolveAccounts_DuplicateKey(t *testing.T) {
 		{Key: "claude-2", ConfigDir: "/a"},
 		{Key: "claude-2", ConfigDir: "/b"},
 	}}.ResolveAccounts()
-	if len(skipped) != 1 {
-		t.Fatalf("expected 1 duplicate-key skip, got %v", skipped)
+	if len(skipped) != 2 {
+		t.Fatalf("expected 2 duplicate-key skip, got %v", skipped)
 	}
-	if got := resolvedKeys(accts); strings.Join(got, ",") != "claude,claude-2" {
-		t.Errorf("only first claude-2 kept, got %v", got)
+	if got := resolvedKeys(accts); strings.Join(got, ",") != "claude" {
+		t.Errorf("ambiguous keys retained, got %v", got)
 	}
 }
 
 func TestResolveAccounts_DuplicateConfigDir(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
-	// Same expanded configDir under two keys is the same account queried twice:
-	// it would report identical numbers under two names, so the second must be
-	// skipped. Uses tilde vs absolute forms that expand to the same path to
-	// exercise post-ExpandTilde comparison.
 	accts, skipped := Config{ClaudeAccounts: []ClaudeAccount{
 		{Key: "claude-2", ConfigDir: "~/.same"},
 		{Key: "claude-3", ConfigDir: filepath.Join(dir, ".same")},
 	}}.ResolveAccounts()
-	if len(skipped) != 1 {
-		t.Fatalf("expected 1 duplicate-configDir skip, got %v", skipped)
+	if len(skipped) != 2 {
+		t.Fatalf("expected 2 duplicate-configDir skip, got %v", skipped)
 	}
-	if got := resolvedKeys(accts); strings.Join(got, ",") != "claude,claude-2" {
-		t.Errorf("only first configDir kept, got %v", got)
+	if got := resolvedKeys(accts); strings.Join(got, ",") != "claude" {
+		t.Errorf("ambiguous directories retained, got %v", got)
 	}
 }
 
@@ -252,6 +252,10 @@ func resolvedCodexKeys(accts []ResolvedCodexAccount) []string {
 }
 
 func TestResolveCodexAccounts_DefaultOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", "")
 	accts, skipped := Config{}.ResolveCodexAccounts()
 	if len(skipped) != 0 {
 		t.Fatalf("no config → no skipped, got %v", skipped)
@@ -260,8 +264,8 @@ func TestResolveCodexAccounts_DefaultOnly(t *testing.T) {
 		t.Fatalf("expected only the default account, got %v", resolvedCodexKeys(accts))
 	}
 	got := accts[0]
-	if got.Key != "codex" || got.Home != "" || got.Label != "Codex" {
-		t.Errorf("default account = %+v, want {codex, \"\", Codex}", got)
+	if got.Key != "codex" || got.Home != filepath.Join(home, ".codex") || got.Label != "Codex" {
+		t.Errorf("default account = %+v, want absolute directory %q", got, filepath.Join(home, ".codex"))
 	}
 }
 
@@ -321,29 +325,26 @@ func TestResolveCodexAccounts_DuplicateKey(t *testing.T) {
 		{Key: "codex-2", Home: "/a"},
 		{Key: "codex-2", Home: "/b"},
 	}}.ResolveCodexAccounts()
-	if len(skipped) != 1 {
-		t.Fatalf("expected 1 duplicate-key skip, got %v", skipped)
+	if len(skipped) != 2 {
+		t.Fatalf("expected 2 duplicate-key skip, got %v", skipped)
 	}
-	if got := resolvedCodexKeys(accts); strings.Join(got, ",") != "codex,codex-2" {
-		t.Errorf("only first codex-2 kept, got %v", got)
+	if got := resolvedCodexKeys(accts); strings.Join(got, ",") != "codex" {
+		t.Errorf("ambiguous keys retained, got %v", got)
 	}
 }
 
 func TestResolveCodexAccounts_DuplicateHome(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
-	// Two keys pointing at the same expanded CODEX_HOME are the same account;
-	// the second must be skipped. Uses tilde vs absolute forms that expand to the
-	// same path to exercise post-ExpandTilde comparison.
 	accts, skipped := Config{CodexAccounts: []CodexAccount{
 		{Key: "codex-2", Home: "~/.same"},
 		{Key: "codex-3", Home: filepath.Join(dir, ".same")},
 	}}.ResolveCodexAccounts()
-	if len(skipped) != 1 {
-		t.Fatalf("expected 1 duplicate-home skip, got %v", skipped)
+	if len(skipped) != 2 {
+		t.Fatalf("expected 2 duplicate-home skip, got %v", skipped)
 	}
-	if got := resolvedCodexKeys(accts); strings.Join(got, ",") != "codex,codex-2" {
-		t.Errorf("only first home kept, got %v", got)
+	if got := resolvedCodexKeys(accts); strings.Join(got, ",") != "codex" {
+		t.Errorf("ambiguous directories retained, got %v", got)
 	}
 }
 

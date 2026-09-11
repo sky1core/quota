@@ -5,7 +5,6 @@ package config
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -101,7 +100,7 @@ func Update(update func(map[string]any) error) error {
 // ResolvedAccount is a validated Claude account to query.
 type ResolvedAccount struct {
 	Key       string // "claude" (default) or "claude-2"
-	ConfigDir string // expanded; "" for the default account
+	ConfigDir string
 	Label     string // "Claude", "Claude 2"
 }
 
@@ -122,39 +121,15 @@ func accountLabel(key string) string {
 	return "Claude " + strings.TrimPrefix(key, "claude-")
 }
 
-// ResolveAccounts returns the accounts to query: the default "claude" account
-// first, then each valid extra account, plus a human-readable message for every
-// skipped entry. Skip rules, applied in order, are:
-//   - empty key or configDir;
-//   - key not matching ClaudeExtraKeyRe (e.g. "claude-<N>");
-//   - duplicate key (including a collision with the default "claude");
-//   - duplicate configDir after ExpandTilde (querying the same account twice
-//     is a config mistake, not a second account).
-//
-// The default account is always {Key:"claude", ConfigDir:"", Label:"Claude"}
-// and always leads the slice. Extra configDirs are tilde-expanded in the
-// returned ConfigDir; the default account keeps an empty ConfigDir.
 func (c Config) ResolveAccounts() ([]ResolvedAccount, []string) {
-	accounts := []ResolvedAccount{{Key: "claude", ConfigDir: "", Label: "Claude"}}
-	var skipped []string
-	seenKey := map[string]bool{"claude": true}
-	seenDir := map[string]bool{}
+	extras := make([]accountDirectory, 0, len(c.ClaudeAccounts))
 	for _, a := range c.ClaudeAccounts {
-		exp := ExpandTilde(a.ConfigDir)
-		switch {
-		case a.Key == "" || a.ConfigDir == "":
-			skipped = append(skipped, fmt.Sprintf("claude account skipped: empty key or configDir (key=%q)", a.Key))
-		case !ClaudeExtraKeyRe.MatchString(a.Key):
-			skipped = append(skipped, fmt.Sprintf("claude account key %q must match claude-<N> (e.g. claude-2), skipped", a.Key))
-		case seenKey[a.Key]:
-			skipped = append(skipped, fmt.Sprintf("claude account key %q is a duplicate, skipped", a.Key))
-		case seenDir[exp]:
-			skipped = append(skipped, fmt.Sprintf("claude account %q configDir %q duplicates another account, skipped", a.Key, a.ConfigDir))
-		default:
-			seenKey[a.Key] = true
-			seenDir[exp] = true
-			accounts = append(accounts, ResolvedAccount{Key: a.Key, ConfigDir: exp, Label: accountLabel(a.Key)})
-		}
+		extras = append(extras, accountDirectory{a.Key, a.ConfigDir})
+	}
+	resolved, skipped := resolveAccountDirectories("claude", extras, ClaudeExtraKeyRe)
+	accounts := make([]ResolvedAccount, 0, len(resolved))
+	for _, a := range resolved {
+		accounts = append(accounts, ResolvedAccount{Key: a.key, ConfigDir: a.dir, Label: accountLabel(a.key)})
 	}
 	return accounts, skipped
 }
@@ -169,7 +144,7 @@ var CodexExtraKeyRe = regexp.MustCompile(`^codex-\d+$`)
 // ResolvedCodexAccount is a validated Codex account to query.
 type ResolvedCodexAccount struct {
 	Key   string // "codex" (default) or "codex-2"
-	Home  string // expanded CODEX_HOME; "" for the default account
+	Home  string
 	Label string // "Codex", "Codex 2"
 }
 
@@ -183,40 +158,15 @@ func codexAccountLabel(key string) string {
 	return "Codex " + strings.TrimPrefix(key, "codex-")
 }
 
-// ResolveCodexAccounts returns the Codex accounts to query: the default "codex"
-// account first, then each valid extra account, plus a human-readable message
-// for every skipped entry. It mirrors ResolveAccounts (Claude). Skip rules,
-// applied in order, are:
-//   - empty key or home;
-//   - key not matching CodexExtraKeyRe (e.g. "codex-<N>");
-//   - duplicate key (including a collision with the default "codex");
-//   - duplicate home after ExpandTilde (two entries pointing at the same
-//     CODEX_HOME are the same account — redundant).
-//
-// The default account is always {Key:"codex", Home:"", Label:"Codex"} and always
-// leads the slice. Extra homes are tilde-expanded in the returned Home; the
-// default account keeps an empty Home (inherits the process CODEX_HOME).
 func (c Config) ResolveCodexAccounts() ([]ResolvedCodexAccount, []string) {
-	accounts := []ResolvedCodexAccount{{Key: "codex", Home: "", Label: "Codex"}}
-	var skipped []string
-	seenKey := map[string]bool{"codex": true}
-	seenDir := map[string]bool{}
+	extras := make([]accountDirectory, 0, len(c.CodexAccounts))
 	for _, a := range c.CodexAccounts {
-		exp := ExpandTilde(a.Home)
-		switch {
-		case a.Key == "" || a.Home == "":
-			skipped = append(skipped, fmt.Sprintf("codex account skipped: empty key or home (key=%q)", a.Key))
-		case !CodexExtraKeyRe.MatchString(a.Key):
-			skipped = append(skipped, fmt.Sprintf("codex account key %q must match codex-<N> (e.g. codex-2), skipped", a.Key))
-		case seenKey[a.Key]:
-			skipped = append(skipped, fmt.Sprintf("codex account key %q is a duplicate, skipped", a.Key))
-		case seenDir[exp]:
-			skipped = append(skipped, fmt.Sprintf("codex account %q home %q duplicates another account, skipped", a.Key, a.Home))
-		default:
-			seenKey[a.Key] = true
-			seenDir[exp] = true
-			accounts = append(accounts, ResolvedCodexAccount{Key: a.Key, Home: exp, Label: codexAccountLabel(a.Key)})
-		}
+		extras = append(extras, accountDirectory{a.Key, a.Home})
+	}
+	resolved, skipped := resolveAccountDirectories("codex", extras, CodexExtraKeyRe)
+	accounts := make([]ResolvedCodexAccount, 0, len(resolved))
+	for _, a := range resolved {
+		accounts = append(accounts, ResolvedCodexAccount{Key: a.key, Home: a.dir, Label: codexAccountLabel(a.key)})
 	}
 	return accounts, skipped
 }

@@ -42,17 +42,18 @@ type selectAgentResult struct {
 }
 
 type selectAgentCandidate struct {
-	Provider   string              `json:"provider"`
-	Key        string              `json:"key"`
-	Label      string              `json:"label"`
-	Status     string              `json:"status"`
-	Reason     string              `json:"reason,omitempty"`
-	Error      string              `json:"error,omitempty"`
-	MinLeftPct float64             `json:"minLeftPct"`
-	Command    []string            `json:"command,omitempty"`
-	SetEnv     map[string]string   `json:"setEnv,omitempty"`
-	UnsetEnv   []string            `json:"unsetEnv,omitempty"`
-	Windows    []selectAgentWindow `json:"windows,omitempty"`
+	windowsByDuration map[int]map[string]any
+	Provider          string              `json:"provider"`
+	Key               string              `json:"key"`
+	Label             string              `json:"label"`
+	Status            string              `json:"status"`
+	Reason            string              `json:"reason,omitempty"`
+	Error             string              `json:"error,omitempty"`
+	MinLeftPct        float64             `json:"minLeftPct"`
+	Command           []string            `json:"command,omitempty"`
+	SetEnv            map[string]string   `json:"setEnv,omitempty"`
+	UnsetEnv          []string            `json:"unsetEnv,omitempty"`
+	Windows           []selectAgentWindow `json:"windows,omitempty"`
 }
 
 type selectAgentWindow struct {
@@ -101,7 +102,8 @@ func runSelectAgentWithIO(args []string, stdout, stderr io.Writer) int {
 		if selected.Provider == "claude" {
 			dirKey = "CLAUDE_CONFIG_DIR"
 		}
-		if catalogErr := refreshDelegationModels(selected.Provider, selected.SetEnv[dirKey]); catalogErr != nil {
+		binary, catalogErr := refreshDelegationModels(selected.Provider, selected.SetEnv[dirKey])
+		if catalogErr != nil {
 			err = fmt.Errorf("%s model catalog: %w", selected.Key, catalogErr)
 			for i := range result.Candidates {
 				if result.Candidates[i].Key == selected.Key {
@@ -110,6 +112,8 @@ func runSelectAgentWithIO(args []string, stdout, stderr io.Writer) int {
 				}
 			}
 			result.Selected = nil
+		} else {
+			selected.Command[0] = binary
 		}
 	}
 	if opts.jsonOut {
@@ -196,6 +200,18 @@ func buildSelectAgentResult(cfg config.Config, opts selectAgentOptions, now time
 		scores = append(scores, providerScores...)
 		usable = append(usable, providerUsable...)
 	}
+	if opts.agent == selectAgentAll {
+		windows := make([]map[int]map[string]any, len(result.Candidates))
+		floors := make([]float64, len(result.Candidates))
+		for i, candidate := range result.Candidates {
+			windows[i], floors[i] = candidate.windowsByDuration, candidate.MinLeftPct
+		}
+		var err error
+		scores, err = scoreCommonQuotaPeriods(windows, usable, floors, now)
+		if err != nil {
+			return result, err
+		}
+	}
 	best := selectBestScore(scores, usable)
 	if best >= 0 {
 		result.Candidates[best].Status = selectAgentStatusSelected
@@ -259,6 +275,7 @@ func collectClaudeSelectAgentCandidates(cfg config.Config, requestedModel string
 			candidates[i] = candidate
 			continue
 		}
+		candidate.windowsByDuration = aggregateQuotaWindowsByDuration(candidate.Provider, results[i].quota)
 		scores[i] = score
 		usable[i] = true
 		candidates[i] = candidate
@@ -318,6 +335,7 @@ func collectCodexSelectAgentCandidates(cfg config.Config, now time.Time) ([]sele
 			candidates[i] = candidate
 			continue
 		}
+		candidate.windowsByDuration = aggregateQuotaWindowsByDuration(candidate.Provider, results[i].quota)
 		scores[i] = score
 		usable[i] = true
 		candidates[i] = candidate

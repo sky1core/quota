@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/sky1core/quota/internal/atomicfile"
 )
 
 const SpecVersion = 1
@@ -212,17 +214,10 @@ func InitTemplate() Spec {
 }
 
 // SaveSpec writes spec to path atomically. An existing file is refused unless
-// force is set.
+// force is set; the no-clobber check is process-safe under concurrent
+// initializers.
 func SaveSpec(path string, spec Spec, force bool) (string, error) {
 	if err := spec.Validate(); err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return "", err
-	}
-	if _, err := os.Stat(path); err == nil && !force {
-		return "", fmt.Errorf("%s already exists", path)
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
 	b, err := json.MarshalIndent(spec, "", "  ")
@@ -230,11 +225,10 @@ func SaveSpec(path string, spec Spec, force bool) (string, error) {
 		return "", err
 	}
 	b = append(b, '\n')
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := atomicfile.Save(path, b, 0o600, force); err != nil {
+		if errors.Is(err, atomicfile.ErrExists) {
+			return "", fmt.Errorf("%s already exists", path)
+		}
 		return "", err
 	}
 	return path, nil

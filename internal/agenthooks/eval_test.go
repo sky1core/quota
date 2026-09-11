@@ -295,6 +295,80 @@ func TestGitCommitFlagValuesThroughHookEvent(t *testing.T) {
 	}
 }
 
+func TestEvaluateCommandEmptyCommitArgs(t *testing.T) {
+	policy, err := Preset(PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrappers := []string{
+		``, `command -- `, `builtin command `, `exec -a '' `,
+		`env -u '' `, `sudo -p '' `,
+		`command exec -a '' env FOO= sudo -p '' `,
+	}
+	for _, wrapper := range wrappers {
+		for _, args := range []string{
+			`--allow-empty-message -m ""`,
+			`--allow-empty-message --message ''`,
+			`--allow-empty-message -qm ''""`,
+			`--allow-empty-message --mess ""`,
+			`--allow-empty-message -m $''`,
+			`--allow-empty-message --message=`,
+			`-m message`,
+			`-m --amend`,
+		} {
+			for _, amend := range []bool{false, true} {
+				command := wrapper + `git -C '' commit ` + args
+				if amend {
+					command += ` --amend`
+				}
+				t.Run(command, func(t *testing.T) {
+					decision, err := EvaluateCommand([]Policy{policy}, command)
+					if err != nil || decision.Allowed == amend {
+						t.Fatalf("decision = %+v, err = %v, want allowed=%v", decision, err, !amend)
+					}
+					if amend && decision.RuleID != "deny-git-commit-amend" {
+						t.Fatalf("decision = %+v, want amend rule", decision)
+					}
+				})
+			}
+		}
+	}
+	for _, tt := range []struct {
+		command string
+		allowed bool
+	}{
+		{`git commit --allow-empty-message -m ""`, true},
+		{`git commit --allow-empty-message -m "" --amend`, false},
+		{`git-commit --allow-empty-message -m "" --amend`, false},
+		{`git commit -m '' -- --amend`, true},
+		{`git commit -m '' --amend --no-amend`, true},
+		{`git commit -m '' --no-amend --amend`, false},
+		{`git commit --author '' --amend`, false},
+		{`git commit --trailer '' --amend`, false},
+		{`git commit -F '' --amend`, false},
+		{`sh -c 'git commit -m "" --amend'`, false},
+		{`sh -c '' 'git commit --amend'`, true},
+		{`env -S 'git commit -m' '' --amend`, false},
+		{`env -S 'git commit --allow-empty-message -m' ''`, true},
+		{`env -S 'git commit -m' 'message --amend'`, true},
+		{`command env -S 'git commit -m' '' --amend`, false},
+		{`eval 'git commit -m' '' --amend`, true},
+		{`command eval 'git commit -m' '' --amend`, true},
+		{`'' git commit --amend`, true},
+		{`command '' git commit --amend`, true},
+		{`env '' git commit --amend`, true},
+		{`exec -a '' '' git commit --amend`, true},
+		{`sudo -p '' '' git commit --amend`, true},
+	} {
+		t.Run(tt.command, func(t *testing.T) {
+			decision, err := EvaluateCommand([]Policy{policy}, tt.command)
+			if err != nil || decision.Allowed != tt.allowed {
+				t.Fatalf("decision = %+v, err = %v, want allowed=%v", decision, err, tt.allowed)
+			}
+		})
+	}
+}
+
 func TestEvaluateHookEventDeniesProtectedCommand(t *testing.T) {
 	policy, err := Preset(PresetGitHubHistoryGuard)
 	if err != nil {
@@ -317,4 +391,71 @@ func findPresetTestRule(policy Policy, name string) string {
 		}
 	}
 	return ""
+}
+
+func TestStaticEmptyArgumentRemainsVisibleInDecision(t *testing.T) {
+	policy, err := Preset(PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := EvaluateCommand([]Policy{policy}, `git commit --allow-empty-message -m "" --amend`)
+	if err != nil || result.Allowed || len(result.Command) != 6 || result.Command[4] != "" {
+		t.Fatalf("decision=%+v err=%v", result, err)
+	}
+}
+
+func TestEnvSplitPreservesAssignmentsAndLiteralMessages(t *testing.T) {
+	policy, err := Preset(PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		command string
+		allowed bool
+	}{
+		{`env -S '' FOO=bar git push origin main`, false},
+		{`command env --split-string='' FOO=bar git commit -m '' --amend`, false},
+		{`env -iS '' FOO=bar git push origin main`, false},
+		{`env -S '' GIT_CONFIG_GLOBAL=fixture git status`, false},
+		{`env -S 'git commit -m' 'subject
+body'`, true},
+		{"env -S 'git commit -m' 'subject\tbody'", true},
+		{`env -S 'git commit -m' 'subject --amend'`, true},
+		{`env -S '' FOO=bar git commit -m ''`, true},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			got, err := EvaluateCommand([]Policy{policy}, tc.command)
+			if err != nil || got.Allowed != tc.allowed {
+				t.Fatalf("decision = %+v, err=%v, want allowed=%v", got, err, tc.allowed)
+			}
+		})
+	}
+}
+
+func TestRecursiveShellParsingPreservesStartupEnvironment(t *testing.T) {
+	policy, err := Preset(PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		command string
+		allowed bool
+	}{
+		{`BASH_ENV=fixture command env -S 'bash -c true'`, false},
+		{`BASH_ENV=fixture env --split-string='bash -c true'`, false},
+		{`env BASH_ENV=fixture -S 'bash -c true'`, false},
+		{`BASH_ENV=fixture command eval 'bash -c true'`, false},
+		{`ENV=fixture env -S 'sh -c true'`, false},
+		{`ZDOTDIR=fixture command env -S 'zsh -c true'`, false},
+		{`BASH_ENV=fixture env -S 'env -S "bash -c true"'`, false},
+		{`BASH_ENV=fixture env -S 'echo safe'`, true},
+		{`env -S 'bash -c true'`, true},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			got, err := EvaluateCommand([]Policy{policy}, tc.command)
+			if err != nil || got.Allowed != tc.allowed {
+				t.Fatalf("decision=%+v error=%v, want allowed=%v", got, err, tc.allowed)
+			}
+		})
+	}
 }

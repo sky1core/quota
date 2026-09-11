@@ -267,16 +267,8 @@ func validateLiveSettings(d liveSettingsDraft) (settings, config.Config, error) 
 	}
 	seen := map[string]bool{}
 	dirs := map[string]map[string]bool{"claude": {}, "codex": {}}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return bar, shared, err
-	}
-	for provider, env := range map[string]string{"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"} {
-		dir := os.Getenv(env)
-		if dir == "" {
-			dir = filepath.Join(home, "."+provider)
-		}
-		canonical, err := settingsAccountDirectory(dir)
+	for _, provider := range []string{"claude", "codex"} {
+		canonical, err := config.DefaultAccountDirectory(provider)
 		if err != nil {
 			return bar, shared, err
 		}
@@ -313,9 +305,9 @@ func validateLiveSettings(d liveSettingsDraft) (settings, config.Config, error) 
 			}
 			dirs[a.Provider][dir] = true
 			if a.Provider == "claude" {
-				shared.ClaudeAccounts = append(shared.ClaudeAccounts, config.ClaudeAccount{Key: a.Key, ConfigDir: a.ConfigDir})
+				shared.ClaudeAccounts = append(shared.ClaudeAccounts, config.ClaudeAccount{Key: a.Key, ConfigDir: dir})
 			} else {
-				shared.CodexAccounts = append(shared.CodexAccounts, config.CodexAccount{Key: a.Key, Home: a.ConfigDir})
+				shared.CodexAccounts = append(shared.CodexAccounts, config.CodexAccount{Key: a.Key, Home: dir})
 			}
 		}
 		if a.MinLeftPct != nil {
@@ -347,41 +339,7 @@ func validateLiveSettings(d liveSettingsDraft) (settings, config.Config, error) 
 }
 
 func settingsAccountDirectory(dir string) (string, error) {
-	if strings.TrimSpace(dir) == "" || strings.ContainsRune(dir, 0) {
-		return "", errors.New("account directory is required")
-	}
-	expanded, err := filepath.Abs(config.ExpandTilde(dir))
-	if err != nil {
-		return "", err
-	}
-	expanded = filepath.Clean(expanded)
-	if info, err := os.Stat(expanded); err == nil {
-		if !info.IsDir() {
-			return "", errors.New("account path is not a directory")
-		}
-	} else if !os.IsNotExist(err) {
-		return "", err
-	}
-	suffix := []string{}
-	current := expanded
-	for {
-		resolved, err := filepath.EvalSymlinks(current)
-		if err == nil {
-			for i := len(suffix) - 1; i >= 0; i-- {
-				resolved = filepath.Join(resolved, suffix[i])
-			}
-			return resolved, nil
-		}
-		if !os.IsNotExist(err) {
-			return "", err
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return "", fmt.Errorf("cannot resolve directory %s", dir)
-		}
-		suffix = append(suffix, filepath.Base(current))
-		current = parent
-	}
+	return config.CanonicalAccountDirectory(dir)
 }
 
 func settingsObject(root map[string]any, key string) (map[string]any, error) {
@@ -397,7 +355,7 @@ func settingsObject(root map[string]any, key string) (map[string]any, error) {
 	return object, nil
 }
 
-func patchLiveSettings(barRoot, sharedRoot map[string]any, bar settings, d liveSettingsDraft) error {
+func patchLiveSettings(barRoot, sharedRoot map[string]any, bar settings, d liveSettingsDraft, shared config.Config) error {
 	barRoot["selected"] = d.Selected
 	barRoot["showResetTime"] = d.ShowResetTime
 	barRoot["refreshActiveMinutes"] = d.RefreshActiveMinutes
@@ -416,6 +374,13 @@ func patchLiveSettings(barRoot, sharedRoot map[string]any, bar settings, d liveS
 	}
 	for key, value := range fields {
 		k[key] = value
+	}
+	directories := map[string]string{}
+	for _, a := range shared.ClaudeAccounts {
+		directories[a.Key] = a.ConfigDir
+	}
+	for _, a := range shared.CodexAccounts {
+		directories[a.Key] = a.Home
 	}
 	removed := map[string]bool{}
 	for _, provider := range []string{"claude", "codex"} {
@@ -448,7 +413,7 @@ func patchLiveSettings(barRoot, sharedRoot map[string]any, bar settings, d liveS
 			if row == nil {
 				row = map[string]any{}
 			}
-			row["key"], row[dirKey] = a.Key, a.ConfigDir
+			row["key"], row[dirKey] = a.Key, directories[a.Key]
 			rows = append(rows, row)
 		}
 		sharedRoot[arrayKey] = rows
@@ -527,7 +492,7 @@ func persistLiveSettings(s liveSettingsSnapshot, d liveSettingsDraft, generation
 	if err != nil {
 		return bar, shared, err
 	}
-	if err = patchLiveSettings(barRoot, sharedRoot, bar, d); err != nil {
+	if err = patchLiveSettings(barRoot, sharedRoot, bar, d, shared); err != nil {
 		return bar, shared, err
 	}
 	targets := map[string]bool{}

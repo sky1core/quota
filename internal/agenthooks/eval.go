@@ -62,7 +62,7 @@ func evaluateInvocation(policies []Policy, inv Invocation) Decision {
 			Decision: DecisionDeny,
 			Allowed:  false,
 			Reason:   "dynamic command name for protected policy is blocked",
-			Command:  visibleArgv(inv.Argv),
+			Command:  visibleArgv(inv.Argv, inv.Dynamic),
 		}
 	}
 	if inv.Dynamic && protectedDynamicInvocation(policies, inv) {
@@ -70,12 +70,12 @@ func evaluateInvocation(policies []Policy, inv Invocation) Decision {
 			Decision: DecisionDeny,
 			Allowed:  false,
 			Reason:   "dynamic arguments for protected command are blocked",
-			Command:  visibleArgv(inv.Argv),
+			Command:  visibleArgv(inv.Argv, inv.Dynamic),
 		}
 	}
 	if isGitCommit(inv.Argv) && hasEnabledDenyRulesForCommand(policies, "git") {
 		if _, err := gitCommitFlags(inv.Argv[2:]); err != nil {
-			return Decision{Decision: DecisionDeny, Allowed: false, Reason: err.Error(), Command: visibleArgv(inv.Argv)}
+			return Decision{Decision: DecisionDeny, Allowed: false, Reason: err.Error(), Command: visibleArgv(inv.Argv, inv.Dynamic)}
 		}
 	}
 	for _, policy := range policies {
@@ -92,7 +92,7 @@ func evaluateInvocation(policies []Policy, inv Invocation) Decision {
 				RuleID:   rule.ID,
 				PolicyID: policy.ID,
 				Reason:   rule.Message,
-				Command:  visibleArgv(inv.Argv),
+				Command:  visibleArgv(inv.Argv, inv.Dynamic),
 			}
 			if decision.Reason == "" {
 				decision.Reason = fmt.Sprintf("matched policy %s rule %s", policy.ID, rule.ID)
@@ -105,7 +105,7 @@ func evaluateInvocation(policies []Policy, inv Invocation) Decision {
 			Decision: DecisionDeny,
 			Allowed:  false,
 			Reason:   reason,
-			Command:  visibleArgv(inv.Argv),
+			Command:  visibleArgv(inv.Argv, inv.Dynamic),
 		}
 	}
 	return Decision{Decision: DecisionAllow, Allowed: true}
@@ -417,10 +417,10 @@ var knownGhCommands = map[string]struct{}{
 	"ssh-key": {}, "stack": {}, "status": {}, "variable": {}, "workflow": {},
 }
 
-func visibleArgv(argv []string) []string {
+func visibleArgv(argv []string, dynamic bool) []string {
 	out := make([]string, 0, len(argv))
 	for _, arg := range argv {
-		if arg == "" {
+		if arg == "" && dynamic {
 			out = append(out, "<dynamic>")
 			continue
 		}

@@ -127,7 +127,7 @@ func TestSelectAgentDefaultDoesNotUseClaudeModelRows(t *testing.T) {
 	}
 }
 
-func TestSelectAgentAllModeKeepsMissingLongWindowScoreShape(t *testing.T) {
+func TestSelectAgentAllModeComparesSharedFiveHours(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", "")
@@ -136,14 +136,14 @@ func TestSelectAgentAllModeKeepsMissingLongWindowScoreShape(t *testing.T) {
 	validUntil := time.Now().Add(time.Hour)
 
 	quotacache.Put("claude:"+filepath.Join(home, ".claude"), "Current session: 10% used - resets in 4h", validUntil)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex"), `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":10,"windowDurationMins":10080}}}`, validUntil)
+	quotacache.Put("codex:"+filepath.Join(home, ".codex"), `{"rateLimits":{"primary":{"usedPercent":70,"windowDurationMins":300},"secondary":{"usedPercent":70,"windowDurationMins":10080}}}`, validUntil)
 
 	result, err := buildSelectAgentResult(config.Config{}, selectAgentOptions{agent: selectAgentAll}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Selected == nil || result.Selected.Key != "codex" {
-		t.Fatalf("selected = %+v, want codex with present long window", result.Selected)
+	if result.Selected == nil || result.Selected.Key != "claude" {
+		t.Fatalf("selected = %+v, want claude with 90%% left in shared 5h window", result.Selected)
 	}
 }
 
@@ -349,4 +349,36 @@ func stringSliceContains(items []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func TestSelectAgentCommonQuotaPeriods(t *testing.T) {
+	for _, tc := range []struct {
+		name, claude, codex, want string
+		floor                     float64
+	}{
+		{"both 5h", "Current session: 10% used", `{"rateLimits":{"primary":{"usedPercent":70,"windowDurationMins":300}}}`, "claude", 5},
+		{"shared weekly", "Current session: 70% used\nCurrent week (all models): 10% used", `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":70,"windowDurationMins":10080}}}`, "claude", 5},
+		{"no common duration", "Current session: 10% used", `{"rateLimits":{"primary":{"usedPercent":70,"windowDurationMins":600}}}`, "", 5},
+		{"monthly is not weekly", "Current week (all models): 10% used", `{"rateLimits":{"primary":{"usedPercent":70,"windowDurationMins":43200}}}`, "", 5},
+		{"ineligible does not constrain periods", "Current session: 76% used", `{"rateLimits":{"primary":{"usedPercent":70,"windowDurationMins":600}}}`, "codex", 5},
+		{"25 percent included", "Current session: 75% used", `{"rateLimits":{"primary":{"usedPercent":76,"windowDurationMins":300}}}`, "claude", 5},
+		{"configured floor retained", "Current session: 61% used", `{"rateLimits":{"primary":{"usedPercent":60,"windowDurationMins":300}}}`, "codex", 40},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := autoPromptTestHome(t)
+			putAutoPromptQuota(t, "claude", filepath.Join(home, ".claude"), tc.claude)
+			putAutoPromptQuota(t, "codex", filepath.Join(home, ".codex"), tc.codex)
+			cfg := config.Config{ExecPrompt: &config.ExecPromptConfig{AccountSettings: map[string]config.ExecPromptAccountSettings{
+				"claude": {MinLeftPct: &tc.floor}, "codex": {MinLeftPct: &tc.floor},
+			}}}
+			got, err := buildSelectAgentResult(cfg, selectAgentOptions{agent: selectAgentAll}, time.Now())
+			if tc.want == "" {
+				if err == nil || !strings.Contains(err.Error(), "no common quota window duration") || got.Selected != nil || len(got.Candidates) != 2 {
+					t.Fatalf("incomparable: %+v %v", got, err)
+				}
+			} else if err != nil || got.Selected == nil || got.Selected.Key != tc.want {
+				t.Fatalf("selected: %+v %v; want %s", got.Selected, err, tc.want)
+			}
+		})
+	}
 }

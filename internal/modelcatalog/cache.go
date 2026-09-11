@@ -85,7 +85,17 @@ func (c Cache) Get(ctx context.Context, target Target, force bool) (Snapshot, er
 }
 
 func cacheKey(target Target) string {
-	identity, _ := json.Marshal([]string{target.Provider, target.Binary, target.ConfigDir})
+	envKey := "CLAUDE_CONFIG_DIR"
+	if target.Provider == "codex" {
+		envKey = "CODEX_HOME"
+	}
+	var override *string
+	for _, entry := range target.Env {
+		if value, found := strings.CutPrefix(entry, envKey+"="); found {
+			override = &value
+		}
+	}
+	identity, _ := json.Marshal([]any{target.Provider, target.Binary, target.ConfigDir, override})
 	sum := sha256.Sum256(identity)
 	return hex.EncodeToString(sum[:])
 }

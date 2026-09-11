@@ -43,7 +43,7 @@ func TestExecPromptPreservesSharedCache(t *testing.T) {
 							id = "code-model"
 						}
 						snapshot := modelcatalog.Snapshot{SchemaVersion: 1, Provider: p, Binary: bin, ConfigDir: dir, CLIVersion: "test-cli-v1", FetchedAt: time.Now(), Models: []modelcatalog.Model{autoPromptTestModel(id, "high")}}
-						identity, _ := json.Marshal([]string{p, bin, dir})
+						identity, _ := json.Marshal([]any{p, bin, dir, ""})
 						sum := sha256.Sum256(identity)
 						data, err := json.Marshal(snapshot)
 						if err != nil {

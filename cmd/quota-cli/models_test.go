@@ -5,10 +5,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/sky1core/quota/internal/claude"
+	"github.com/sky1core/quota/internal/codex"
 	"github.com/sky1core/quota/internal/config"
+	"github.com/sky1core/quota/internal/modelcatalog"
 )
 
 func TestModelsOptions(t *testing.T) {
@@ -41,43 +46,198 @@ func TestModelAccountSelection(t *testing.T) {
 	}
 }
 
-func TestModelTargetUsesAbsoluteAccountEnvironment(t *testing.T) {
-	dir := t.TempDir()
-	for _, provider := range []string{"claude", "codex"} {
-		if err := os.WriteFile(filepath.Join(dir, provider), []byte("placeholder"), 0o700); err != nil {
+type modelProvider struct {
+	name       string
+	envKey     string
+	secretKey  string
+	extraKey   string
+	extraField func(dir string) config.Config
+	env        func(base []string, dir string) []string
+	setEnv     func(dir string) map[string]string
+	unsetEnv   func(dir string) []string
+}
+
+func modelProviders() []modelProvider {
+	return []modelProvider{
+		{
+			name:      "claude",
+			envKey:    "CLAUDE_CONFIG_DIR",
+			secretKey: "ANTHROPIC_API_KEY",
+			extraKey:  "claude-2",
+			extraField: func(dir string) config.Config {
+				return config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: dir}}}
+			},
+			env:      claude.EnvForConfigDir,
+			setEnv:   selectAgentClaudeSetEnv,
+			unsetEnv: selectAgentClaudeUnsetEnv,
+		},
+		{
+			name:      "codex",
+			envKey:    "CODEX_HOME",
+			secretKey: "OPENAI_API_KEY",
+			extraKey:  "codex-2",
+			extraField: func(dir string) config.Config {
+				return config.Config{CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: dir}}}
+			},
+			env:      codex.EnvForHome,
+			setEnv:   selectAgentCodexSetEnv,
+			unsetEnv: selectAgentCodexUnsetEnv,
+		},
+	}
+}
+
+func targetForAccount(t *testing.T, cfg config.Config, provider, account string) (modelcatalog.Target, string) {
+	t.Helper()
+	results, dirs, err := modelAccounts(cfg, modelOptions{agent: provider, account: account})
+	if err != nil {
+		t.Fatalf("modelAccounts(%s, %q): %v", provider, account, err)
+	}
+	for i := range results {
+		if results[i].Provider == provider && (account == "" || results[i].Account == account) {
+			target, err := modelTarget(provider, dirs[i])
+			if err != nil {
+				t.Fatalf("modelTarget(%s, %q): %v", provider, dirs[i], err)
+			}
+			return target, dirs[i]
+		}
+	}
+	t.Fatalf("no %s account for %q in %v", provider, account, results)
+	return modelcatalog.Target{}, ""
+}
+
+func TestModelTargetInheritsDefaultAccountEnvironment(t *testing.T) {
+	bin := t.TempDir()
+	for _, p := range modelProviders() {
+		if err := os.WriteFile(filepath.Join(bin, p.name), []byte("placeholder"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	t.Setenv("PATH", dir)
-	t.Setenv("CLAUDE_CONFIG_DIR", "relative-claude-account")
-	t.Setenv("CODEX_HOME", "relative-codex-account")
-	t.Setenv("ANTHROPIC_API_KEY", "placeholder")
-	t.Setenv("OPENAI_API_KEY", "placeholder")
-	for _, provider := range []string{"claude", "codex"} {
-		target, err := modelTarget(provider, "")
-		if err != nil {
+	for _, p := range modelProviders() {
+		t.Run(p.name, func(t *testing.T) {
+			defaultCases := []struct {
+				name      string
+				setEnv    bool
+				inherited string
+			}{
+				{name: "unspecified", setEnv: false},
+				{name: "explicit-empty", setEnv: true, inherited: ""},
+				{name: "inherited-absolute", setEnv: true, inherited: filepath.Join(t.TempDir(), "inherited")},
+			}
+			for _, tc := range defaultCases {
+				t.Run("default/"+tc.name, func(t *testing.T) {
+					home := t.TempDir()
+					t.Setenv("HOME", home)
+					t.Setenv("PATH", bin)
+					t.Setenv("ANTHROPIC_API_KEY", "test-not-a-real-key")
+					t.Setenv("OPENAI_API_KEY", "test-not-a-real-key")
+					t.Setenv(p.envKey, "")
+					if tc.setEnv {
+						t.Setenv(p.envKey, tc.inherited)
+					} else {
+						if err := os.Unsetenv(p.envKey); err != nil {
+							t.Fatal(err)
+						}
+					}
+
+					target, dir := targetForAccount(t, config.Config{}, p.name, "")
+					if dir != "" {
+						t.Fatalf("default account dir = %q, want empty", dir)
+					}
+
+					if want := p.env(os.Environ(), ""); !reflect.DeepEqual(target.Env, want) {
+						t.Fatal("model discovery and quota/delegation environments differ")
+					}
+					got := envMap(target.Env)
+					if _, ok := got[p.secretKey]; ok {
+						t.Fatalf("auth credential %s leaked into run env", p.secretKey)
+					}
+					if tc.setEnv {
+						if v, ok := got[p.envKey]; !ok || v != tc.inherited {
+							t.Fatalf("%s = %q (present=%v), want inherited %q", p.envKey, v, ok, tc.inherited)
+						}
+					} else if _, ok := got[p.envKey]; ok {
+						t.Fatalf("%s forced into run env for default account: %q", p.envKey, got[p.envKey])
+					}
+
+					if !filepath.IsAbs(target.ConfigDir) {
+						t.Fatalf("cache identity not absolute: %q", target.ConfigDir)
+					}
+
+					if slices.Contains(p.unsetEnv(dir), p.envKey) {
+						t.Fatal("recommendation removes inherited account environment")
+					}
+					if set := p.setEnv(dir); len(set) != 0 {
+						t.Fatalf("default account recommended override: %v", set)
+					}
+					if v, ok := envMap(autoPromptEnv(autoPromptAccount{provider: p.name, dir: dir}, os.Environ()))[p.envKey]; ok != tc.setEnv || (tc.setEnv && v != tc.inherited) {
+						t.Fatalf("autoPromptEnv %s = %q (present=%v), want inherited", p.envKey, v, ok)
+					}
+				})
+			}
+
+			t.Run("extra", func(t *testing.T) {
+				home := t.TempDir()
+				extra := t.TempDir()
+				t.Setenv("HOME", home)
+				t.Setenv("PATH", bin)
+				t.Setenv("ANTHROPIC_API_KEY", "test-not-a-real-key")
+				t.Setenv("OPENAI_API_KEY", "test-not-a-real-key")
+				t.Setenv(p.envKey, filepath.Join(home, "inherited"))
+
+				target, dir := targetForAccount(t, p.extraField(extra), p.name, p.extraKey)
+				if !filepath.IsAbs(dir) {
+					t.Fatalf("extra account dir not absolute: %q", dir)
+				}
+
+				if !reflect.DeepEqual(target.Env, p.env(os.Environ(), dir)) {
+					t.Fatal("extra model discovery and quota/delegation environments differ")
+				}
+				got := envMap(target.Env)
+				if got[p.envKey] != dir {
+					t.Fatalf("extra %s = %q, want override %q", p.envKey, got[p.envKey], dir)
+				}
+				if _, ok := got[p.secretKey]; ok {
+					t.Fatalf("auth credential %s leaked into run env", p.secretKey)
+				}
+				if target.ConfigDir != dir {
+					t.Fatalf("cache identity = %q, want %q", target.ConfigDir, dir)
+				}
+				if set := p.setEnv(dir); len(set) != 1 || set[p.envKey] != dir {
+					t.Fatalf("extra account override = %v, want {%s:%s}", set, p.envKey, dir)
+				}
+				if v := envMap(autoPromptEnv(autoPromptAccount{provider: p.name, dir: dir}, os.Environ()))[p.envKey]; v != dir {
+					t.Fatalf("autoPromptEnv %s = %q, want override %q", p.envKey, v, dir)
+				}
+			})
+		})
+	}
+}
+
+func TestModelTargetRejectsRelativeAccountEnvironment(t *testing.T) {
+	bin := t.TempDir()
+	for _, p := range modelProviders() {
+		if err := os.WriteFile(filepath.Join(bin, p.name), []byte("placeholder"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		want, _ := filepath.Abs("relative-" + provider + "-account")
-		key := "CODEX_HOME"
-		secretKey := "OPENAI_API_KEY"
-		if provider == "claude" {
-			key, secretKey = "CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY"
-		}
-		if target.ConfigDir != want || target.Binary != filepath.Join(dir, provider) {
-			t.Fatalf("target = %+v", target)
-		}
-		found := false
-		for _, entry := range target.Env {
-			if entry == key+"="+want {
-				found = true
+	}
+	t.Setenv("PATH", bin)
+	for _, p := range modelProviders() {
+		t.Run(p.name, func(t *testing.T) {
+			t.Setenv(p.envKey, "relative-account")
+			for _, dir := range []string{"", "relative-account"} {
+				_, err := modelTarget(p.name, dir)
+				if err == nil || !strings.Contains(err.Error(), "absolute "+p.envKey) {
+					t.Fatalf("relative account directory should fail before discovery: %v", err)
+				}
+				if os.Getenv(p.envKey) != "relative-account" {
+					t.Fatal("validation changed the inherited environment")
+				}
 			}
-			if strings.HasPrefix(entry, secretKey+"=") {
-				t.Fatalf("credential override retained: %s", secretKey)
+			explicit := t.TempDir()
+			target, err := modelTarget(p.name, explicit)
+			if err != nil || envMap(target.Env)[p.envKey] != explicit {
+				t.Fatalf("relative inherited value blocked an explicit absolute account: %v", err)
 			}
-		}
-		if !found {
-			t.Fatalf("absolute %s missing", key)
-		}
+		})
 	}
 }

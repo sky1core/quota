@@ -2,6 +2,9 @@ package modelcatalog
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +12,60 @@ import (
 	"testing"
 	"time"
 )
+
+func TestModelCacheSeparatesAccountEnvironment(t *testing.T) {
+	for _, provider := range []string{"claude", "codex"} {
+		t.Run(provider, func(t *testing.T) {
+			envKey := "CLAUDE_CONFIG_DIR"
+			if provider == "codex" {
+				envKey = "CODEX_HOME"
+			}
+			target := Target{Provider: provider, Binary: "/bin/provider", ConfigDir: "/accounts/default", Env: []string{"PATH=/bin"}}
+			dir := t.TempDir()
+			paths := map[string]bool{}
+			for i, env := range [][]string{target.Env, {envKey + "="}, {envKey + "=" + target.ConfigDir}} {
+				selected := target
+				selected.Env = env
+				path := filepath.Join(dir, cacheKey(selected)+".json")
+				if paths[path] {
+					t.Fatalf("account environment %d reuses another environment's cache", i)
+				}
+				paths[path] = true
+				if err := writeSnapshot(path, Snapshot{ConfigDir: target.ConfigDir, Models: []Model{{ID: "example"}}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for path := range paths {
+				if _, err := readSnapshot(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			unrelated := target
+			unrelated.Env = []string{"PATH=/other/bin", "UNRELATED=changed"}
+			if cacheKey(unrelated) != cacheKey(target) {
+				t.Fatal("unrelated environment changed account identity")
+			}
+			inherited := target
+			inherited.Env = []string{envKey + "=" + target.ConfigDir}
+			repeated := inherited
+			repeated.Env = append([]string{envKey + "=/old/account"}, inherited.Env...)
+			if cacheKey(inherited) != cacheKey(repeated) {
+				t.Fatal("cache does not use the last account environment entry like os/exec")
+			}
+			legacyIdentity, err := json.Marshal([]string{target.Provider, target.Binary, target.ConfigDir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			legacySum := sha256.Sum256(legacyIdentity)
+			legacyKey := hex.EncodeToString(legacySum[:])
+			for _, selected := range []Target{target, inherited} {
+				if cacheKey(selected) == legacyKey {
+					t.Fatal("cache reuses a legacy catalog without account environment identity")
+				}
+			}
+		})
+	}
+}
 
 func TestSnapshotFreshness(t *testing.T) {
 	now := time.Now()

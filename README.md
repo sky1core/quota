@@ -166,6 +166,8 @@ quota-cli models refresh --account=codex
 
 등록된 계정별 CLI 메타데이터에서 모델 ID, alias 해석값, effort 지원 정보를 조회한다.
 `~/.config/quota/model-cache/`에 조회 성공 시각과 CLI 버전을 함께 저장한다.
+기본 계정의 모델 조회는 CLI 환경을 상속한다. `CLAUDE_CONFIG_DIR`·`CODEX_HOME`을 직접 설정한다면 절대경로를 사용해야 하며, 상대경로이면 모델 조회를 오류로 중단한다.
+모델 캐시는 계정 경로와 해당 환경변수의 지정 여부·값을 함께 구분한다.
 provider를 명시한 `exec-prompt`와 `select-agent`는 선택된 계정의 캐시가 없거나 3시간이 지났거나 CLI 버전이 바뀌면
 갱신한다. `models refresh`는 즉시 다시 조회한다. 갱신 실패 시 오래된 목록으로 진행하지 않고 오류를 반환한다.
 자동 라우팅은 분류 전에 Codex 계정들의 캐시만 확인한다. 조회 시각은 CLI 응답을 받은 시각이며,

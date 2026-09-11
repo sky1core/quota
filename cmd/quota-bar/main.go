@@ -58,11 +58,6 @@ const (
 	barCacheMaxAge = 2 * time.Minute
 )
 
-// resetCreditSlots is the number of pre-allocated submenu rows under the Codex
-// "Reset credits" item, one per usable reset credit (초기화권). The parent's
-// count reflects the true number even if it exceeds the visible detail rows.
-const resetCreditSlots = 8
-
 // Menu item keys are "<provider>_<window key>" where provider is an account key
 // ("claude", "claude-2", …, "codex", "codex-2", …) and the window key comes from
 // that provider's WindowKeys() vocabulary. Account keys match ^claude-\d+$ /
@@ -74,12 +69,6 @@ const resetCreditSlots = 8
 //
 // Every window row is dynamic: it is shown only when the refresh supplied that
 // window (and thus its label), because no provider guarantees a fixed window set.
-
-// itemKey builds a menu key for a provider and window key, e.g.
-// itemKey("claude-2", "session") == "claude-2_session".
-func itemKey(provider, suffix string) string {
-	return provider + "_" + suffix
-}
 
 type settings struct {
 	Keepalive *keepalive.Config `json:"keepalive,omitempty"`
@@ -612,11 +601,6 @@ func shortReset(s string) string {
 	return strings.TrimSpace(s)
 }
 
-type menuItem struct {
-	key  string
-	item *systray.MenuItem
-}
-
 func logPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "quota", "quota-bar.log")
@@ -840,88 +824,33 @@ func onReady() {
 		log.Printf("config: %s", s)
 	}
 
+	menus := newAccountMenus()
 	var (
 		providers          []string
 		allItems           []menuItem
 		allKeys            []string
-		errItems           = map[string]*systray.MenuItem{}
-		miResetsByKey      = map[string]*systray.MenuItem{}
-		resetChildrenByKey = map[string][]*systray.MenuItem{}
+		errItems           map[string]*systray.MenuItem
+		miResetsByKey      map[string]*systray.MenuItem
+		resetChildrenByKey map[string][]*systray.MenuItem
 	)
-	type accountMenuBlock struct {
-		header, errorRow, resets *systray.MenuItem
-		rows                     []*systray.MenuItem
-		resetChildren            []*systray.MenuItem
+	reconcileMenus := func() error {
+		var entries []accountMenuSpec
+		for _, a := range accounts {
+			entries = append(entries, accountMenuSpec{"claude", a.Key, a.Label, claude.WindowKeys()})
+		}
+		for _, a := range codexAccounts {
+			entries = append(entries, accountMenuSpec{"codex", a.Key, a.Label, codex.WindowKeys()})
+		}
+		if err := menus.reconcile(entries, cfg.isSelected); err != nil {
+			return err
+		}
+		providers, allItems, allKeys = menus.providers, menus.items, menus.keys
+		errItems, miResetsByKey, resetChildrenByKey = menus.errors, menus.resets, menus.resetChildren
+		return nil
 	}
-	accountParents := map[string]*systray.MenuItem{
-		"claude": systray.AddMenuItem("Claude", ""),
-		"codex":  systray.AddMenuItem("Codex", ""),
+	if err := reconcileMenus(); err != nil {
+		log.Fatalf("account menu: %v", err)
 	}
-	pools := map[string][]*accountMenuBlock{}
-	reconcileMenus := func() {
-		providers, allItems, allKeys = nil, nil, nil
-		clear(errItems)
-		clear(miResetsByKey)
-		clear(resetChildrenByKey)
-		for _, blocks := range pools {
-			for _, b := range blocks {
-				b.header.Hide()
-				b.errorRow.Hide()
-				for _, row := range b.rows {
-					row.Hide()
-				}
-				if b.resets != nil {
-					b.resets.Hide()
-				}
-			}
-		}
-		add := func(provider string, index int, key, label string, keys []string) {
-			if index == len(pools[provider]) {
-				parent := accountParents[provider]
-				b := &accountMenuBlock{header: parent.AddSubMenuItem("", ""), errorRow: parent.AddSubMenuItem("", "")}
-				b.header.Disable()
-				b.errorRow.Disable()
-				b.errorRow.Hide()
-				for range keys {
-					b.rows = append(b.rows, parent.AddSubMenuItemCheckbox("-", "", false))
-				}
-				if provider == "codex" {
-					b.resets = parent.AddSubMenuItem("Reset credits", "")
-					b.resets.Hide()
-					for range resetCreditSlots {
-						b.resetChildren = append(b.resetChildren, b.resets.AddSubMenuItem("", ""))
-					}
-				}
-				pools[provider] = append(pools[provider], b)
-			}
-			b := pools[provider][index]
-			b.header.SetTitle("── " + label + " ──")
-			b.header.Show()
-			providers = append(providers, key)
-			errItems[key] = b.errorRow
-			for i, wk := range keys {
-				item := menuItem{itemKey(key, wk), b.rows[i]}
-				if cfg.isSelected(item.key) {
-					item.item.Check()
-				} else {
-					item.item.Uncheck()
-				}
-				item.item.Hide()
-				allItems = append(allItems, item)
-				allKeys = append(allKeys, item.key)
-			}
-			if b.resets != nil {
-				miResetsByKey[key], resetChildrenByKey[key] = b.resets, b.resetChildren
-			}
-		}
-		for i, a := range accounts {
-			add("claude", i, a.Key, a.Label, claude.WindowKeys())
-		}
-		for i, a := range codexAccounts {
-			add("codex", i, a.Key, a.Label, codex.WindowKeys())
-		}
-	}
-	reconcileMenus()
 
 	systray.AddSeparator()
 	miUpdated := systray.AddMenuItem("Not yet updated", "")
@@ -1333,6 +1262,20 @@ func onReady() {
 			return errors.New("app update is handing over; settings were not saved")
 		}
 		defer operations.end(barOperationSettings)
+		if _, _, err := validateLiveSettings(draft); err != nil {
+			return err
+		}
+		var menuEntries []accountMenuSpec
+		for _, a := range draft.Accounts {
+			windows := claude.WindowKeys()
+			if a.Provider == "codex" {
+				windows = codex.WindowKeys()
+			}
+			menuEntries = append(menuEntries, accountMenuSpec{a.Provider, a.Key, "", windows})
+		}
+		if err := menus.prepare(menuEntries); err != nil {
+			return fmt.Errorf("settings were not saved: %w", err)
+		}
 		next, shared, err := persistLiveSettings(snap, draft, generation)
 		if err != nil {
 			var rollback *settingsRollbackError
@@ -1367,7 +1310,9 @@ func onReady() {
 			refreshGeneration++
 			lastOK, lastDisplayed = newQuotaData(), newQuotaData()
 			clear(lastSuccessAt)
-			reconcileMenus()
+			if err := reconcileMenus(); err != nil {
+				return err
+			}
 			miUpdated.SetTitle("Accounts changed — awaiting refresh")
 		}
 		repaint()

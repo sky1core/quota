@@ -312,7 +312,7 @@ Claude의 Codex 전용 필드, 음수 context limit, TOML 숫자 범위 초과, 
 quota-bar
 ```
 
-메뉴의 Claude/Codex 하위 메뉴에서 항목을 체크하면 상단 바에 남은 %를 표시.
+메뉴 첫 화면에 모든 계정의 쿼터를 펼쳐 표시한다. 항목을 체크하면 상단 바에 남은 %를 표시.
 
 `quota-cli account add`로 추가 계정을 등록해 두면, quota-bar도 계정별 그룹(`Claude`, `Claude 2`, …,
 `Codex`, `Codex 2`, …)으로 나눠 표시한다. quota-cli와 같은 `config.json`을 공유한다.

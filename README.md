@@ -229,21 +229,94 @@ quota-cli agent hooks eval --runtime=claude
 quota-cli agent hooks eval --runtime=codex
 ```
 
-#### Agent overlay 지침 오버레이
+#### Agent instructions — 공용·개인 지침 전달
+
+`agent instructions`는 `AGENTS.md`와 `AGENTS.local.md`를 Claude Code와 Codex CLI에서 함께 사용하도록 준비한다.
+실행부는 quota-cli에 포함되며 별도 스크립트·Python·hook spec이 필요하지 않다.
+Git 2.36 이상, Claude Code 2.1.232 이상·Codex CLI 0.154.0 이상을 대상으로 한다.
+
+**관리할 파일과 처음 설정**
+
+공용 지침은 각 checkout의 `AGENTS.md`, 개인 지침은 primary의 `AGENTS.local.md`에 작성한다. 개인 파일은 Git에서 제외한다.
+여기서 primary는 Git 저장소의 기본 작업 폴더이며, bare 저장소에서는 bare 루트다.
+Codex용 `AGENTS.override.md`와 linked worktree의 로컬 복사본은 quota가 생성·갱신한다. 사용자가 직접 만들거나 편집할 파일이 아니다.
+기존 사용자 override나 사용자가 수정한 생성물은 덮어쓰지 않고 충돌을 보고한다.
+
+아래는 두 도구를 함께 준비하는 예다. 한 도구만 쓰면 각 명령의 `--agent=all`을 `--agent=claude` 또는 `--agent=codex`로 바꾼다.
 
 ```bash
-quota-cli agent overlay init
-quota-cli agent overlay plan
-quota-cli agent overlay apply
-quota-cli agent overlay doctor
-quota-cli agent overlay verify
+quota-cli agent instructions setup . --agent=all --dry-run
+quota-cli agent instructions setup . --agent=all
+quota-cli agent instructions status . --agent=all
 ```
 
-`agent overlay`는 Claude/Codex CLI에 지침 오버레이용 hook·설정 엔트리를 설치·검증한다.
-quota-cli는 범용 기계만 제공하고, 구체 명령 문자열은 사용자의 로컬 spec 파일에 있다.
-spec은 기본적으로 `~/.config/quota/agent-overlay.json`에서 읽으며 모든 서브커맨드가
-`--spec <file>`로 재정의한다. spec 파일이 없으면 `init`을 제외한 모든 명령이 명시적으로
-실패한다(암시적 기본값 없음). spec 스키마는 `version`(1 고정), 선택적 `claude`/`codex`/`verify`
+`--dry-run`은 같은 사전 검사와 변경 계획을 보여주며 원본·관리 파일·계정 설정을 쓰지 않는다. CLI 시작 과정의 런타임 캐시는 갱신될 수 있다.
+`all`은 현재 환경으로 선택되는 공급자별 계정 하나씩이며 등록 계정 전체가 아니다.
+`setup`은 현재 Claude 계정의 hook 연결을 설치하고, Codex 계정의 정확히 식별된 이전 지침 주입 hook은 제거한다.
+무관한 사용자 hook은 보존한다. 계정의 hook 제거는 그 계정을 사용하는 다른 저장소에도 적용되므로 해당 저장소도 native 로딩으로 준비해야 한다.
+
+**평소 사용과 원본 변경**
+
+Claude는 `CLAUDE.md`·`CLAUDE.local.md`의 native 로딩을 사용한다.
+Codex는 개인 원본이 있으면 공용·개인 본문을 합친 관리 `AGENTS.override.md`를, 없으면 공용 `AGENTS.md`를 native로 읽는다.
+준비한 작업 폴더에서는 평소처럼 CLI를 직접 실행하거나 기존 세션을 `resume`하면 된다. 같은 본문을 hook이나 매 턴 입력에 다시 붙이지 않는다.
+
+| 상황 | 할 일 |
+|---|---|
+| 원본·관리 파일과 계정·설정이 그대로임 | 준비된 폴더에서 그대로 실행·재개한다. 매번 `setup`할 필요는 없다. |
+| 원본 지침 또는 등록한 로컬 파일을 변경함 | 다음 실행·재개 전에 `setup`을 다시 실행해 복사본·병합본을 갱신한다. |
+| 사용할 계정이나 Codex 설정을 바꿈 | 해당 계정·환경에서 `status`로 확인하고, 준비가 필요하면 `setup`한다. |
+| 외부 `git worktree add`로 새 checkout을 만듦 | 해당 checkout에서 agent 실행 전에 `setup`한다. |
+| Claude의 관리된 WorktreeCreate로 만듦 | quota가 파일 준비를 마친 뒤 새 worktree 경로를 반환한다. |
+
+실행 중 원본 변경을 자동으로 감시·반영하지 않는다. 지침 변경 뒤 기존 세션을 재개하면 이전 본문이 컨텍스트에 남을 수 있다.
+quota는 과거 지침을 선택 삭제하거나 자동 압축하지 않는다.
+
+공용 파일은 각 checkout의 버전이 기본이다. primary의 미추적 공용 파일도 복사하려면 `setup --shared-source=primary`를 지정한다.
+추가 ignored 파일은 `setup --local-file=config/example.local.json`처럼 primary 기준 상대 경로로 등록한다. 여러 파일은 옵션을 반복한다.
+복사 대상은 8MiB 이하의 ignored·untracked 정규 파일이며 소유자 실행 권한을 보존한다. `.gitignore` 자체는 등록할 수 없다.
+등록은 다음 setup에도 유지된다. 목록을 비우려면 아래 repository 해제를 두 공급자 모두에 적용한 뒤 필요한 목록으로 다시 setup한다. 원본 파일은 보존한다.
+
+**설정 확인과 중단 조건**
+
+`status`는 모델 호출 없이 관리 파일의 소유권·최신성과 Codex의 유효 설정을 검사한다. 준비되지 않았거나 확인할 수 없으면 성공으로 처리하지 않는다.
+`setup`은 모든 선택 대상의 사전 검사를 쓰기 전에 수행하며, 다음 경우 파일을 적용하지 않고 중단한다.
+
+- 사용자 파일과 충돌하거나 Codex의 신뢰·문서 탐색 설정·지침 크기 제한이 전달 조건을 충족하지 못한 경우.
+- Codex가 실제로 읽는 설정·hook의 위치를 적용 예정 파일과 대응시킬 수 없는 경우. 예를 들어 로컬 파일 복사로 없던 `.codex` 폴더를 만들면, 생성 후 읽힐 hook의 출처를 사전에 확인할 수 없어 중단할 수 있다.
+
+오류에 표시된 경로와 원인을 확인하고, 의도한 설정이 Codex에서 확인 가능한 상태가 된 뒤 `setup --dry-run`부터 다시 실행한다.
+quota가 출처 불명 파일을 자동으로 채택하거나 신뢰 설정을 임의로 바꾸지는 않는다.
+`setup` 실행 중에는 외부 편집기·프로그램으로 Codex 전역 설정이나 관리자 정책을 바꾸지 않는다. quota의 잠금은 이런 외부 변경과의 동시 적용까지 보장하지 않는다.
+사전 검사 통과 후 파일 쓰기 중 오류가 나면 일부 적용됐을 수 있다. 출력의 적용·실패 경로를 확인하고 원인을 해결한 뒤 setup과 status를 다시 실행한다.
+
+**실제 전달 검증**
+
+```bash
+quota-cli agent instructions verify . --agent=codex
+```
+
+`verify`는 같은 전제 검사 후 임시 저장소의 새 메인 세션에서 전달·비전달 대조군을 실행하므로 쿼터를 사용한다.
+확인 불가·도구 사용·불완전한 응답은 검증 성공이 아니다. 이 명령의 성공을 서브에이전트·resume·compact의 전달 보장으로 확대하지 않는다.
+Claude의 native memory를 생략하는 내장 subagent와 호출별 설정 override는 이 검증 범위 밖이다.
+
+**해제**
+
+```bash
+quota-cli agent instructions uninstall . --scope=repository --agent=all
+quota-cli agent instructions uninstall --scope=account --agent=codex
+```
+
+repository 해제는 같은 Git common-dir의 선택 공급자 지침을 비활성화하고 관리 생성물을 정리한다.
+account 해제는 해당 CLI 설정 홈의 연결을 제거하므로 그 계정의 다른 저장소에도 영향을 준다.
+원본 파일은 보존한다. 다시 `setup`하면 활성화된다. Codex native 공용 지침 로딩을 끄는 명령은 아니다.
+
+#### Agent overlay — 기존 spec 호환 명령
+
+사용자 정의 외부 명령을 연결하는 기존 spec도 지원한다. 아래 스키마의 구체 명령은 로컬 spec에 있다.
+설치·진단 명령은 기본적으로 `~/.config/quota/agent-overlay.json`을 읽으며
+`--spec <file>`로 재정의한다. 이 spec이 없으면 `plan`·`apply`·`doctor`·`verify`는 명시적으로
+실패한다(암시적 기본값 없음). `agent instructions`는 이 spec을 사용하지 않는다. spec 스키마는 `version`(1 고정), 선택적 `claude`/`codex`/`verify`
 섹션이며, hook 이벤트 이름은 고정 목록이 아니라 spec에 적힌 키를 그대로 쓴다.
 
 ```json

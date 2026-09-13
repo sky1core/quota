@@ -29,6 +29,8 @@ func runAgent(args []string) int {
 		return runAgentHooks(args[1:], os.Stdout, os.Stderr)
 	case "overlay":
 		return runAgentOverlay(args[1:], os.Stdout, os.Stderr)
+	case "instructions":
+		return runAgentInstructions(args[1:], os.Stdin, os.Stdout, os.Stderr)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown agent command: %q\n\n", args[0])
 		printAgentUsage(os.Stderr)
@@ -39,6 +41,7 @@ func runAgent(args []string) int {
 func printAgentUsage(output io.Writer) {
 	fmt.Fprint(output, `usage:
   quota-cli agent hooks <init|list|plan|apply|verify|doctor|eval> [options]
+  quota-cli agent instructions <setup|status|verify|uninstall> [options]
   quota-cli agent overlay <init|plan|apply|doctor|verify> [options]
 `)
 }

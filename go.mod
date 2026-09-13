@@ -6,6 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/getlantern/systray v1.2.2
 	golang.org/x/sys v0.44.0
+	golang.org/x/text v0.41.0
 	mvdan.cc/sh/v3 v3.13.1
 )
 

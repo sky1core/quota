@@ -1,0 +1,138 @@
+package agenthooks
+
+import (
+	"fmt"
+	"path/filepath"
+	"strings"
+)
+
+type InstructionHook struct {
+	Event string
+	Owned bool
+}
+
+func OwnsInstructionCommand(command, executable, agent, event string) bool {
+	if command == ShellQuote([]string{executable, "agent", "instructions", "_hook", "--agent=" + agent, "--event=" + event}) || command == ShellQuote([]string{executable, "agent", "overlay", "hook", "--runtime=" + agent, "--event=" + event}) {
+		return true
+	}
+	legacy := map[string]string{"claude/SessionStart": "json SessionStart CLAUDE.md CLAUDE.local.md . claude-session", "claude/WorktreeCreate": "claude-worktree-create", "claude/WorktreeRemove": "claude-worktree-remove", "codex/SessionStart": "json SessionStart AGENTS.md - . codex-session", "codex/SubagentStart": "json SubagentStart AGENTS.md - . codex-subagent"}
+	suffix, ok := legacy[agent+"/"+event]
+	return ok && command == `sh "$HOME/.local/bin/agents-overlay-context" `+suffix
+}
+func SuspiciousInstructionCommand(command string, knownExecutables ...string) bool {
+	invocations, err := ParseShellInvocations(strings.NewReplacer("$HOME", "/placeholder-home", "${HOME}", "/placeholder-home").Replace(command))
+	if err != nil {
+		return false
+	}
+	for _, inv := range invocations {
+		argv := inv.Argv
+		if len(argv) == 0 {
+			continue
+		}
+		quotaExecutable := filepath.Base(argv[0]) == "quota-cli"
+		for _, known := range knownExecutables {
+			if argv[0] == known {
+				quotaExecutable = true
+				break
+			}
+		}
+		if quotaExecutable && len(argv) >= 4 && argv[1] == "agent" && ((argv[2] == "instructions" && argv[3] == "_hook") || (argv[2] == "overlay" && argv[3] == "hook")) {
+			return true
+		}
+		if filepath.Base(argv[0]) == "agents-overlay-context" {
+			return true
+		}
+		if len(argv) > 1 && (filepath.Base(argv[0]) == "sh" || filepath.Base(argv[0]) == "bash") && filepath.Base(argv[1]) == "agents-overlay-context" {
+			return true
+		}
+	}
+	return false
+}
+func instructionHookArray(v any) ([]any, bool) {
+	switch a := v.(type) {
+	case []any:
+		return a, true
+	case []map[string]any:
+		r := make([]any, len(a))
+		for n := range a {
+			r[n] = a[n]
+		}
+		return r, true
+	default:
+		return nil, false
+	}
+}
+func ClaudeInstructionHooks(root map[string]any, executable string) ([]InstructionHook, error) {
+	return instructionHooks(root, executable, "claude")
+}
+func CodexInstructionHooks(root map[string]any, executable string) ([]InstructionHook, error) {
+	return instructionHooks(root, executable, "codex")
+}
+func instructionHooks(root map[string]any, executable, agent string) ([]InstructionHook, error) {
+	raw, exists := root["hooks"]
+	if !exists {
+		return nil, nil
+	}
+	hooks, valid := raw.(map[string]any)
+	if !valid {
+		return nil, fmt.Errorf("hooks must be an object")
+	}
+	entries := []InstructionHook{}
+	for event, raw := range hooks {
+		if agent == "codex" && event == "state" {
+			if err := ValidateCodexHookState(raw); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		groups, valid := instructionHookArray(raw)
+		if !valid {
+			return nil, fmt.Errorf("hooks.%s must be an array", event)
+		}
+		for _, rawGroup := range groups {
+			group, valid := rawGroup.(map[string]any)
+			if !valid {
+				return nil, fmt.Errorf("hooks.%s group must be an object", event)
+			}
+			commands, valid := instructionHookArray(group["hooks"])
+			if !valid {
+				return nil, fmt.Errorf("hooks.%s group hooks must be an array", event)
+			}
+			for _, rawHook := range commands {
+				hook, valid := rawHook.(map[string]any)
+				if !valid {
+					return nil, fmt.Errorf("hooks.%s hook must be an object", event)
+				}
+				command, _ := hook["command"].(string)
+				owned := OwnsInstructionCommand(command, executable, agent, event)
+				if owned || SuspiciousInstructionCommand(command, executable) {
+					entries = append(entries, InstructionHook{Event: event, Owned: owned})
+				}
+			}
+		}
+	}
+	return entries, nil
+}
+func ValidateCodexHookState(raw any) error {
+	states, ok := raw.(map[string]any)
+	if !ok {
+		return fmt.Errorf("hooks.state must be an object")
+	}
+	for key, rawState := range states {
+		state, ok := rawState.(map[string]any)
+		if !ok {
+			return fmt.Errorf("hooks.state.%s must be an object", key)
+		}
+		if value, exists := state["enabled"]; exists {
+			if _, ok := value.(bool); !ok {
+				return fmt.Errorf("hooks.state.%s.enabled must be a boolean", key)
+			}
+		}
+		if value, exists := state["trusted_hash"]; exists {
+			if _, ok := value.(string); !ok {
+				return fmt.Errorf("hooks.state.%s.trusted_hash must be a string", key)
+			}
+		}
+	}
+	return nil
+}

@@ -40,7 +40,7 @@ func commitOptionsWithNegations() map[string]optionValue {
 		options[name] = value
 	}
 	for name := range commitOptions {
-		if strings.HasPrefix(name, "--") {
+		if strings.HasPrefix(name, "--") && name != "--trailer" {
 			negative := "--no-" + strings.TrimPrefix(name, "--")
 			if _, exists := options[negative]; !exists {
 				options[negative] = optionNoValue

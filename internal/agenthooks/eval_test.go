@@ -443,7 +443,8 @@ func TestRecursiveShellParsingPreservesStartupEnvironment(t *testing.T) {
 	}{
 		{`BASH_ENV=fixture command env -S 'bash -c true'`, false},
 		{`BASH_ENV=fixture env --split-string='bash -c true'`, false},
-		{`env BASH_ENV=fixture -S 'bash -c true'`, false},
+		{`env BASH_ENV=fixture -S 'bash -c true'`, true},
+		{`env -S 'BASH_ENV=fixture bash -c true'`, false},
 		{`BASH_ENV=fixture command eval 'bash -c true'`, false},
 		{`ENV=fixture env -S 'sh -c true'`, false},
 		{`ZDOTDIR=fixture command env -S 'zsh -c true'`, false},

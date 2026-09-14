@@ -272,6 +272,9 @@ func argvHasFlag(argv []string, flag string) (bool, error) {
 			return false, err
 		}
 		for _, parsed := range flags {
+			if parsed.disabled && !strings.Contains(flag, "=") {
+				continue
+			}
 			if parsed.name == flag || parsed.token == flag || strings.HasPrefix(parsed.token, flag+"=") {
 				return true, nil
 			}

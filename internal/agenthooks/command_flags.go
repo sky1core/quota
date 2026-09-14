@@ -14,6 +14,7 @@ const (
 	optionAttachedValue
 	optionLastArgDefault
 	optionBooleanValue
+	optionBooleanForce
 )
 
 type optionGroup struct {
@@ -22,8 +23,9 @@ type optionGroup struct {
 }
 
 type commandFlag struct {
-	name  string
-	token string
+	name     string
+	token    string
+	disabled bool
 }
 
 func optionValues(groups ...optionGroup) map[string]optionValue {
@@ -88,7 +90,8 @@ var gitCommandOptions = map[string]map[string]optionValue{
 
 var ghCheckoutOptions = optionValues(
 	optionGroup{optionRequiredValue, `-b --branch -R --repo`},
-	optionGroup{optionBooleanValue, `--detach -f --force --recurse-submodules -h --help`},
+	optionGroup{optionBooleanValue, `--detach --recurse-submodules -h --help`},
+	optionGroup{optionBooleanForce, `-f --force`},
 )
 
 var ghRepoEditOptions = optionValues(
@@ -111,14 +114,11 @@ func commandFlags(argv []string) ([]commandFlag, bool, error) {
 	case "git":
 		options = gitCommandOptions[argv[1]]
 	case "gh":
-		switch {
-		case argv[1] == "co":
-			options = ghCheckoutOptions
-		case len(argv) >= 3 && argv[1] == "pr" && (argv[2] == "checkout" || argv[2] == "co"):
-			options, start = ghCheckoutOptions, 3
-		case len(argv) >= 3 && argv[1] == "repo" && argv[2] == "edit":
-			options, start = ghRepoEditOptions, 3
+		if len(argv) >= 3 && argv[1] == "extension" && argv[2] == "exec" {
+			return nil, false, nil
 		}
+		_, flags, err := parseGhCommand(argv)
+		return flags, true, err
 	}
 	if options == nil {
 		return nil, false, nil
@@ -147,10 +147,13 @@ func parseCommandFlags(command string, args []string, options map[string]optionV
 			if attached && value == optionNoValue {
 				return nil, fmt.Errorf("%s option %s does not accept a value", command, name)
 			}
-			if attached && value == optionBooleanValue {
-				if _, err := strconv.ParseBool(text); err != nil {
+			disabled := false
+			if attached && (value == optionBooleanValue || value == optionBooleanForce) {
+				enabled, err := strconv.ParseBool(text)
+				if err != nil {
 					return nil, fmt.Errorf("%s option %s requires a boolean value", command, name)
 				}
+				disabled = !enabled && value == optionBooleanForce
 			}
 			if command == "git commit" && (name == "--amend" || name == "--no-amend") {
 				active := flags[:0]
@@ -161,7 +164,7 @@ func parseCommandFlags(command string, args []string, options map[string]optionV
 				}
 				flags = active
 			}
-			flags = append(flags, commandFlag{name: name, token: arg})
+			flags = appendCommandFlag(flags, commandFlag{name: name, token: arg, disabled: disabled}, value)
 			if !attached && (value == optionRequiredValue || value == optionLastArgDefault && i+1 < len(args)) {
 				i++
 				if i == len(args) {
@@ -176,7 +179,16 @@ func parseCommandFlags(command string, args []string, options map[string]optionV
 			if !ok {
 				return nil, fmt.Errorf("unsupported %s option %s", command, name)
 			}
-			flags = append(flags, commandFlag{name: name, token: arg})
+			disabled := false
+			booleanAttached := (value == optionBooleanValue || value == optionBooleanForce) && j+1 < len(arg) && arg[j+1] == '='
+			if booleanAttached {
+				enabled, err := strconv.ParseBool(arg[j+2:])
+				if err != nil {
+					return nil, fmt.Errorf("%s option %s requires a boolean value", command, name)
+				}
+				disabled = !enabled && value == optionBooleanForce
+			}
+			flags = appendCommandFlag(flags, commandFlag{name: name, token: arg, disabled: disabled}, value)
 			if value == optionRequiredValue {
 				if j == len(arg)-1 {
 					i++
@@ -189,10 +201,7 @@ func parseCommandFlags(command string, args []string, options map[string]optionV
 			if value == optionAttachedValue {
 				break
 			}
-			if value == optionBooleanValue && j+1 < len(arg) && arg[j+1] == '=' {
-				if _, err := strconv.ParseBool(arg[j+2:]); err != nil {
-					return nil, fmt.Errorf("%s option %s requires a boolean value", command, name)
-				}
+			if booleanAttached {
 				break
 			}
 		}
@@ -219,4 +228,15 @@ func resolveLongOption(name string, options map[string]optionValue, abbreviate b
 		}
 	}
 	return "", optionNoValue, fmt.Errorf("unsupported option %s", name)
+}
+
+func appendCommandFlag(flags []commandFlag, flag commandFlag, value optionValue) []commandFlag {
+	if value == optionBooleanForce {
+		for i := range flags {
+			if flags[i].name == "-f" || flags[i].name == "--force" {
+				flags[i].disabled = flag.disabled
+			}
+		}
+	}
+	return append(flags, flag)
 }

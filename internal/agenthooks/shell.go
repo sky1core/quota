@@ -424,6 +424,12 @@ func wrapperEnvCanSetShellStartup(argv []string) (bool, string) {
 				return false, ""
 			}
 			out = next
+		case "nohup", "nice", "timeout":
+			next, err := normalizeProcessWrapperArgv(out)
+			if err != nil || len(next) == len(out) {
+				return false, ""
+			}
+			out = next
 		default:
 			return false, ""
 		}
@@ -431,23 +437,13 @@ func wrapperEnvCanSetShellStartup(argv []string) (bool, string) {
 }
 
 func envArgsCanSetShellStartup(argv []string) (bool, string) {
-	if len(argv) < 2 || commandName(argv[0]) != "env" {
+	i := envAssignmentStart(argv)
+	if i < 0 {
 		return false, ""
 	}
-	for i := 1; i < len(argv); i++ {
-		arg := argv[i]
-		if arg == "--" {
-			return false, ""
-		}
-		if envFlagTakesValue(arg) {
-			i++
-			continue
-		}
-		if envShortFlagHasInlineValue(arg) || envFlagHasInlineValue(arg) || envFlagNoValue(arg) {
-			continue
-		}
-		name, _, ok := splitAssignmentArg(arg)
-		if !ok || strings.HasPrefix(arg, "-") {
+	for ; i < len(argv); i++ {
+		name, _, ok := strings.Cut(argv[i], "=")
+		if !ok {
 			return false, ""
 		}
 		if shellStartupEnvName(name) {
@@ -471,25 +467,15 @@ func shellStartupEnvName(name string) bool {
 }
 
 func gitConfigEnvArgsCanChangeCommandDispatch(argv []string) (bool, string) {
-	if len(argv) < 2 || commandName(argv[0]) != "env" {
+	i := envAssignmentStart(argv)
+	if i < 0 {
 		return false, ""
 	}
-	for i := 1; i < len(argv); i++ {
-		arg := argv[i]
-		if arg == "--" {
+	for ; i < len(argv); i++ {
+		name, value, ok := strings.Cut(argv[i], "=")
+		if !ok {
 			return false, ""
 		}
-		if envFlagTakesValue(arg) {
-			i++
-			continue
-		}
-		if envShortFlagHasInlineValue(arg) || envFlagHasInlineValue(arg) || envFlagNoValue(arg) {
-			continue
-		}
-		if !strings.Contains(arg, "=") || strings.HasPrefix(arg, "-") {
-			return false, ""
-		}
-		name, value, _ := strings.Cut(arg, "=")
 		if gitConfigEnvPairCanChangeCommandDispatch(name, value) {
 			return true, "git environment can change command dispatch"
 		}
@@ -498,25 +484,15 @@ func gitConfigEnvArgsCanChangeCommandDispatch(argv []string) (bool, string) {
 }
 
 func ghConfigEnvArgsCanChangeCommandDispatch(argv []string) (bool, string) {
-	if len(argv) < 2 || commandName(argv[0]) != "env" {
+	i := envAssignmentStart(argv)
+	if i < 0 {
 		return false, ""
 	}
-	for i := 1; i < len(argv); i++ {
-		arg := argv[i]
-		if arg == "--" {
+	for ; i < len(argv); i++ {
+		name, _, ok := strings.Cut(argv[i], "=")
+		if !ok {
 			return false, ""
 		}
-		if envFlagTakesValue(arg) {
-			i++
-			continue
-		}
-		if envShortFlagHasInlineValue(arg) || envFlagHasInlineValue(arg) || envFlagNoValue(arg) {
-			continue
-		}
-		if !strings.Contains(arg, "=") || strings.HasPrefix(arg, "-") {
-			return false, ""
-		}
-		name, _, _ := strings.Cut(arg, "=")
 		if assignmentNameCanChangeGhCommandDispatch(name) {
 			return true, "gh configuration directory can change command dispatch"
 		}
@@ -558,6 +534,21 @@ func gitConfigWrapperCanChangeCommandDispatch(argv []string) (bool, string) {
 			}
 			next := normalizeEnvArgv(out)
 			if len(next) == len(out) {
+				return false, ""
+			}
+			out = next
+		case "sudo":
+			if ok, reason := sudoEnvCanExpose(out, gitConfigEnvNameCanChangeCommandDispatch, "git environment can change command dispatch"); ok {
+				return true, reason
+			}
+			next := normalizeSudoArgv(out)
+			if len(next) == len(out) {
+				return false, ""
+			}
+			out = next
+		case "nohup", "nice", "timeout":
+			next, err := normalizeProcessWrapperArgv(out)
+			if err != nil || len(next) == len(out) {
 				return false, ""
 			}
 			out = next
@@ -609,10 +600,20 @@ func ghConfigWrapperCanChangeCommandDispatch(argv []string) (bool, string) {
 				return false, ""
 			}
 			out = next
+		case "nohup", "nice", "timeout":
+			next, err := normalizeProcessWrapperArgv(out)
+			if err != nil || len(next) == len(out) {
+				return false, ""
+			}
+			out = next
 		default:
 			return false, ""
 		}
 	}
+}
+
+func gitConfigEnvNameCanChangeCommandDispatch(name string) bool {
+	return gitConfigEnvPairCanChangeCommandDispatch(name, "") || strings.HasPrefix(name, "GIT_CONFIG_KEY_")
 }
 
 func gitConfigEnvPairCanChangeCommandDispatch(name, value string) bool {
@@ -668,6 +669,11 @@ func normalizeArgv(argv []string) ([]string, bool, string) {
 			}
 			out = next
 		case "env":
+			if len(out) > 1 && envAssignmentStart(out) < 0 {
+				if _, split := envSplitStringScript(out); !split {
+					return out, true, "unsupported or incomplete env options"
+				}
+			}
 			next := normalizeEnvArgv(out)
 			if len(next) == len(out) {
 				return normalizeFirst(next)
@@ -675,6 +681,15 @@ func normalizeArgv(argv []string) ([]string, bool, string) {
 			out = next
 		case "sudo":
 			next := normalizeSudoArgv(out)
+			if len(next) == len(out) {
+				return normalizeFirst(next)
+			}
+			out = next
+		case "nohup", "nice", "timeout":
+			next, err := normalizeProcessWrapperArgv(out)
+			if err != nil {
+				return out, true, err.Error()
+			}
 			if len(next) == len(out) {
 				return normalizeFirst(next)
 			}
@@ -687,7 +702,7 @@ func normalizeArgv(argv []string) ([]string, bool, string) {
 
 func isCommandWrapper(cmd string) bool {
 	switch commandName(cmd) {
-	case "command", "builtin", "exec", "env", "sudo", "eval", "sh", "bash", "zsh", "dash", "ksh":
+	case "command", "builtin", "exec", "env", "sudo", "nohup", "nice", "timeout", "eval", "sh", "bash", "zsh", "dash", "ksh":
 		return true
 	default:
 		return false
@@ -823,20 +838,25 @@ func splitAssignmentArg(arg string) (string, string, bool) {
 	return name, value, true
 }
 
-func normalizeEnvArgv(argv []string) []string {
+func envAssignmentStart(argv []string) int {
 	if len(argv) < 2 || commandName(argv[0]) != "env" {
-		return argv
+		return -1
 	}
 	i := 1
 	for i < len(argv) {
 		arg := argv[i]
 		if arg == "--" {
 			i++
+			if i < len(argv) && argv[i] == "-" {
+				i++
+			}
 			break
 		}
+		if arg == "--help" || arg == "--version" {
+			return len(argv)
+		}
 		if strings.Contains(arg, "=") && !strings.HasPrefix(arg, "-") {
-			i++
-			continue
+			break
 		}
 		if envFlagNoValue(arg) {
 			i++
@@ -844,7 +864,7 @@ func normalizeEnvArgv(argv []string) []string {
 		}
 		if envFlagTakesValue(arg) {
 			if i+1 >= len(argv) {
-				return argv
+				return -1
 			}
 			i += 2
 			continue
@@ -854,9 +874,20 @@ func normalizeEnvArgv(argv []string) []string {
 			continue
 		}
 		if strings.HasPrefix(arg, "-") {
-			return argv
+			return -1
 		}
 		break
+	}
+	return i
+}
+
+func normalizeEnvArgv(argv []string) []string {
+	i := envAssignmentStart(argv)
+	if i < 0 {
+		return argv
+	}
+	for i < len(argv) && strings.Contains(argv[i], "=") {
+		i++
 	}
 	if i >= len(argv) {
 		return argv
@@ -953,7 +984,7 @@ func envShortSplitStringScript(arg string) (string, bool) {
 }
 
 func envFlagNoValue(arg string) bool {
-	return arg == "-i" || arg == "--ignore-environment" || isEnvNoValueShortOptionGroup(arg)
+	return arg == "-" || arg == "-i" || arg == "--ignore-environment" || isEnvNoValueShortOptionGroup(arg)
 }
 
 func isEnvNoValueShortOptionGroup(arg string) bool {
@@ -1338,6 +1369,12 @@ func wrapperLoginShellStartupCanExecuteHiddenScript(argv []string) bool {
 				return false
 			}
 			out = next
+		case "nohup", "nice", "timeout":
+			next, err := normalizeProcessWrapperArgv(out)
+			if err != nil || len(next) == len(out) {
+				return false
+			}
+			out = next
 		default:
 			return false
 		}
@@ -1571,11 +1608,11 @@ func normalizeGitGlobalOptions(argv []string) ([]string, bool, string) {
 			return argv, true, "git config can change command dispatch"
 		case gitGlobalFlagTakesValue(arg):
 			if i+1 >= len(argv) {
-				return argv, false, ""
+				return argv, true, "git global option requires a value"
 			}
 			i += 2
 		default:
-			return argv, false, ""
+			return argv, true, "unsupported git global option"
 		}
 	}
 	if i <= 1 || i >= len(argv) {
@@ -1588,7 +1625,7 @@ func gitGlobalFlagNoValue(arg string) bool {
 	switch arg {
 	case "-p", "-P", "--paginate", "--no-pager", "--bare", "--literal-pathspecs", "--no-literal-pathspecs",
 		"--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-optional-locks",
-		"--no-replace-objects", "--no-lazy-fetch", "--no-advice", "--version", "--help", "--html-path",
+		"--no-replace-objects", "--no-lazy-fetch", "--no-advice", "-v", "--version", "-h", "--help", "--html-path",
 		"--man-path", "--info-path":
 		return true
 	default:
@@ -1610,7 +1647,7 @@ func gitGlobalConfigFlagHasInlineDispatchKey(arg string) bool {
 
 func gitGlobalFlagHasInlineValue(arg string) bool {
 	for _, prefix := range []string{
-		"--git-dir=", "--work-tree=", "--namespace=", "--super-prefix=", "--config-env=", "--exec-path=",
+		"--git-dir=", "--work-tree=", "--namespace=", "--super-prefix=", "--config-env=", "--exec-path=", "--attr-source=",
 	} {
 		if strings.HasPrefix(arg, prefix) {
 			return true
@@ -1643,7 +1680,7 @@ func gitConfigKeyCanChangeCommandDispatch(key string) bool {
 
 func gitGlobalFlagTakesValue(arg string) bool {
 	switch arg {
-	case "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env":
+	case "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", "--attr-source":
 		return true
 	default:
 		return false
@@ -1651,77 +1688,9 @@ func gitGlobalFlagTakesValue(arg string) bool {
 }
 
 func normalizeGhGlobalOptions(argv []string) ([]string, bool, string) {
-	i := 1
-	for i < len(argv) {
-		arg := argv[i]
-		if arg == "--" {
-			i++
-			break
-		}
-		if !strings.HasPrefix(arg, "-") {
-			break
-		}
-		switch {
-		case ghGlobalFlagNoValue(arg):
-			i++
-		case ghGlobalDispatchFlagHasInlineValue(arg):
-			return argv, true, "gh configuration directory can change command dispatch"
-		case ghGlobalFlagHasInlineValue(arg):
-			i++
-		case ghGlobalShortFlagHasInlineValue(arg):
-			i++
-		case ghGlobalDispatchFlagTakesValue(arg):
-			return argv, true, "gh configuration directory can change command dispatch"
-		case ghGlobalFlagTakesValue(arg):
-			if i+1 >= len(argv) {
-				return argv, false, ""
-			}
-			i += 2
-		default:
-			return argv, false, ""
-		}
-	}
-	if i <= 1 || i >= len(argv) {
+	normalized, _, err := parseGhCommand(argv)
+	if err != nil {
 		return argv, false, ""
 	}
-	return append([]string{argv[0]}, argv[i:]...), false, ""
-}
-
-func ghGlobalFlagNoValue(arg string) bool {
-	switch arg {
-	case "--paginate", "--help", "-h", "--version":
-		return true
-	default:
-		return false
-	}
-}
-
-func ghGlobalDispatchFlagHasInlineValue(arg string) bool {
-	return strings.HasPrefix(arg, "--config-dir=")
-}
-
-func ghGlobalFlagHasInlineValue(arg string) bool {
-	for _, prefix := range []string{"--repo=", "--hostname=", "--config-dir=", "--git-protocol=", "--editor=", "--browser="} {
-		if strings.HasPrefix(arg, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-func ghGlobalShortFlagHasInlineValue(arg string) bool {
-	return strings.HasPrefix(arg, "-R") && len(arg) > len("-R")
-}
-
-func ghGlobalDispatchFlagTakesValue(arg string) bool {
-	return arg == "--config-dir"
-}
-
-func ghGlobalFlagTakesValue(arg string) bool {
-	switch arg {
-	case "-R", "--repo", "--hostname", "--config-dir", "--git-protocol", "--editor", "--browser":
-		return true
-	default:
-		return false
-	}
+	return normalized, false, ""
 }

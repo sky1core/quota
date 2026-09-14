@@ -301,7 +301,8 @@ func PlanNativeCodexRepository(ctx context.Context, dir, agent, sharedSource str
 	if problems := plan.repo.preflight(agent, plan.state); len(problems) > 0 {
 		return plan, nil, fmt.Errorf("%s", strings.Join(problems, "; "))
 	}
-	return plan, plan.repo.plannedPaths(agent, plan.state), nil
+	paths, err := plan.repo.plannedPaths(agent, plan.state)
+	return plan, paths, err
 }
 
 type ValidatedCodexSetup struct {

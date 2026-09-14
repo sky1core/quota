@@ -100,6 +100,32 @@ func TestClaudeWeeklyModelUsesConfiguredFloor(t *testing.T) {
 	}
 }
 
+func TestClaudeSelectionUsesModelOptionOutsideOtherOptionValues(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		args  []string
+		allow bool
+	}{
+		{"prompt text", []string{"--model", "opus", "--append-system-prompt", "--model=sonnet", "--", "test"}, false},
+		{"file path", []string{"--model=opus", "--system-prompt-file", "--model=sonnet", "test"}, false},
+		{"short name", []string{"--model=opus", "-n", "--model=sonnet", "test"}, false},
+		{"available model", []string{"--model", "sonnet", "--append-system-prompt", "--model=opus", "test"}, true},
+		{"subsequent model", []string{"--model=opus", "--append-system-prompt", "--model=opus", "--model=sonnet", "test"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := autoPromptTestHome(t)
+			putAutoPromptQuota(t, "claude", filepath.Join(home, ".claude"), "Current session: 10% used\nCurrent week (all models): 10% used\nCurrent week (Opus): 100% used\nCurrent week (Sonnet): 10% used")
+			_, err := selectClaudeAccount(config.Config{}, tc.args, time.Now())
+			if (err == nil) != tc.allow {
+				t.Fatalf("selection error=%v, want allowed=%t", err, tc.allow)
+			}
+			if !tc.allow && (!strings.Contains(err.Error(), "model=opus") || !strings.Contains(err.Error(), "Opus [extra_1]: left=0%; required>=5%; insufficient")) {
+				t.Fatalf("missing requested model quota evidence: %v", err)
+			}
+		})
+	}
+}
+
 func TestExecPromptQuotaFailureEvidence(t *testing.T) {
 	for _, tc := range []struct {
 		name, provider, model, raw string

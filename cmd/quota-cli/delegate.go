@@ -692,19 +692,69 @@ func claudeRequestedModel(args []string) string {
 		if arg == "--" {
 			break
 		}
-		switch {
-		case arg == "-m" || arg == "--model":
-			if i+1 < len(args) {
-				model = args[i+1]
-				i++
+		if strings.HasPrefix(arg, "--") {
+			name, value, attached := strings.Cut(arg, "=")
+			if !claudeOptionRequiresValue(name) {
+				continue
 			}
-		case strings.HasPrefix(arg, "--model="):
-			model = strings.TrimPrefix(arg, "--model=")
-		case strings.HasPrefix(arg, "-m="):
-			model = strings.TrimPrefix(arg, "-m=")
+			if !attached {
+				if i+1 == len(args) {
+					break
+				}
+				i++
+				value = args[i]
+			}
+			if name == "--model" {
+				model = value
+			}
+			continue
+		}
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+	shortOptions:
+		for j := 1; j < len(arg); j++ {
+			switch arg[j] {
+			case 'm', 'n':
+				value := strings.TrimPrefix(arg[j+1:], "=")
+				if j+1 == len(arg) {
+					if i+1 == len(args) {
+						break shortOptions
+					}
+					i++
+					value = args[i]
+				}
+				if arg[j] == 'm' {
+					model = value
+				}
+				break shortOptions
+			case 'c', 'h', 'p', 'v':
+				continue
+			default:
+				break shortOptions
+			}
 		}
 	}
 	return strings.ToLower(strings.TrimSpace(model))
+}
+
+func claudeOptionRequiresValue(name string) bool {
+	switch name {
+	case "--add-dir", "--advisor", "--agent", "--agent-color", "--agent-id", "--agent-name", "--agent-type", "--agents", "--allowedTools", "--allowed-tools",
+		"--append-system-prompt", "--append-system-prompt-file", "--append-subagent-system-prompt", "--append-subagent-system-prompt-file",
+		"--attach-serve", "--autocompact", "--betas", "--channels", "--correlation-id", "--dangerously-load-development-channels", "--debug-file",
+		"--deep-link-cwd-b64", "--deep-link-last-fetch", "--deep-link-repo", "--disallowedTools", "--disallowed-tools", "--effort", "--environment",
+		"--fallback-model", "--file", "--forward-home-settings", "--inherit-permission-mode", "--input-format", "--json-schema",
+		"--managed-settings", "--max-budget-usd", "--max-thinking-tokens", "--max-turns", "--mcp-config", "--messaging-socket-path", "--model", "--name",
+		"--on-branch", "--output-format", "--parent-session-id", "--permission-mode", "--permission-prompt-tool", "--permission-prompts", "--plan-mode-instructions",
+		"--plugin-dir", "--plugin-dir-no-mcp", "--plugin-url", "--pool", "--prefill", "--prefill-b64", "--ref", "--remote-control-session-name-prefix",
+		"--resume-drops-turn", "--resume-session-at", "--rewind-files", "--sdk-url", "--session-id", "--setting-sources", "--settings",
+		"--system-prompt", "--system-prompt-file", "--system-prompt-snapshot", "--task-budget", "--team-name", "--teammate-mode",
+		"--thinking", "--thinking-display", "--tools", "--watch-artifact", "--watch-artifact-no-autoreact", "--workload":
+		return true
+	default:
+		return false
+	}
 }
 
 func findClaudePromptBinary() (string, error) {

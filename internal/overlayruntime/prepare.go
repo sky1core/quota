@@ -268,7 +268,7 @@ func (r repoContext) topologyProblems() []string {
 	return out
 }
 func (r repoContext) prepareShared(state *RepositoryState, changes *[]string) error {
-	if state.SharedSource != "primary" {
+	if state.SharedSource != "primary" || len(r.Copies()) == 0 {
 		return nil
 	}
 	var source sharedRuleExpectation
@@ -350,7 +350,7 @@ func (r repoContext) preflight(agent string, state RepositoryState) []string {
 			out = append(out, err.Error())
 		} else {
 			expected[w] = expectation
-			if state.SharedSource == "primary" && !expectation.Present {
+			if state.SharedSource == "primary" && !expectation.Present && len(r.Copies()) > 0 {
 				out = append(out, "primary shared source is missing: "+expectation.Source)
 			}
 			if state.SharedSource == "primary" && w != r.Root {
@@ -437,7 +437,7 @@ func PlanRepository(ctx context.Context, dir, agent string) ([]string, error) {
 	if problems := r.preflight(agent, state); len(problems) > 0 {
 		return nil, fmt.Errorf("%s", strings.Join(problems, "; "))
 	}
-	return r.plannedPaths(agent, state), nil
+	return r.plannedPaths(agent, state)
 }
 
 func PlanRepositoryWithPolicy(ctx context.Context, dir, agent, sharedSource string, localFiles ...string) ([]string, error) {
@@ -472,7 +472,7 @@ func PlanRepositoryWithCodexHookRemovals(ctx context.Context, dir, agent, shared
 	if p := r.preflight(agent, state); len(p) > 0 {
 		return nil, fmt.Errorf("%s", strings.Join(p, "; "))
 	}
-	return r.plannedPaths(agent, state), nil
+	return r.plannedPaths(agent, state)
 }
 func SetupRepository(ctx context.Context, dir, agent, sharedSource string, localFiles ...string) error {
 	return SetupRepositoryWithCodexHookRemovals(ctx, dir, agent, sharedSource, nil, localFiles...)
@@ -719,7 +719,15 @@ func (r repoContext) planManagedInstructionRemovals(state RepositoryState, copie
 	return plans, nil
 }
 
-func (r repoContext) plannedPaths(agent string, state RepositoryState) []string {
+func (r repoContext) plannedPaths(agent string, state RepositoryState) ([]string, error) {
+	plans, err := r.managedExpectations(agent, state)
+	if err != nil {
+		return nil, err
+	}
+	removals := make(map[string]bool)
+	for _, plan := range plans {
+		removals[plan.Path] = plan.Remove
+	}
 	paths := []string{"repository: " + r.Top, "shared source policy: " + state.SharedSource, "repository state: " + statePath(r)}
 	for _, w := range r.Checkouts() {
 		if (agent == "codex" || agent == "all") && (exists(r.localSource()) || state.Generated[filepath.Join(w, codexRule)] != "") {
@@ -743,7 +751,9 @@ func (r repoContext) plannedPaths(agent string, state RepositoryState) []string 
 			paths = append(paths, "managed shared copy: "+filepath.Join(w, sharedRule))
 		}
 		if agent == "all" || agent == "claude" {
-			if exists(filepath.Join(w, sharedRule)) || state.SharedSource == "primary" {
+			if removals[filepath.Join(w, sharedBridge)] {
+				paths = append(paths, "remove native shared bridge: "+filepath.Join(w, sharedBridge))
+			} else if exists(filepath.Join(w, sharedRule)) || state.SharedSource == "primary" && exists(filepath.Join(r.Root, sharedRule)) {
 				paths = append(paths, "native shared bridge: "+filepath.Join(w, sharedBridge))
 			}
 			if exists(r.localSource()) || exists(filepath.Join(w, localBridge)) {
@@ -777,5 +787,5 @@ func (r repoContext) plannedPaths(agent string, state RepositoryState) []string 
 	if needExclude {
 		paths = append(paths, "ignore patterns: "+exclude)
 	}
-	return paths
+	return paths, nil
 }

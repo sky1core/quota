@@ -672,7 +672,7 @@ func claudeSettingsFindingsWithPlannedFiles(r repoContext, plannedFiles map[stri
 				sharedRequired = planned[0][worktree].Present
 			}
 			required := name == sharedBridge && sharedRequired || name == localBridge && exists(r.localSource())
-			if !exists(bridge) && !required {
+			if !settingsFileExists(bridge, plannedFiles) && !required {
 				continue
 			}
 			candidates := []string{filepath.ToSlash(bridge), filepath.ToSlash(resolvePath(bridge))}

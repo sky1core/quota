@@ -270,12 +270,43 @@ func TestClaudeRequestedModel(t *testing.T) {
 		{[]string{"--model", "fable", "prompt"}, "fable"},
 		{[]string{"-m=claude-opus-4", "prompt"}, "claude-opus-4"},
 		{[]string{"--model=sonnet"}, "sonnet"},
+		{[]string{"--model", "opus", "--append-system-prompt", "--model=sonnet", "--", "test"}, "opus"},
+		{[]string{"--system-prompt", "--model", "sonnet"}, ""},
+		{[]string{"--model=opus", "--append-system-prompt-file", "-m=sonnet"}, "opus"},
+		{[]string{"--append-subagent-system-prompt", "--model=sonnet", "--model", "opus"}, "opus"},
+		{[]string{"--model=opus", "--plan-mode-instructions", "--model=sonnet"}, "opus"},
+		{[]string{"--model=opus", "--plugin-dir-no-mcp", "--model=sonnet"}, "opus"},
+		{[]string{"--model=opus", "--settings=--model=sonnet"}, "opus"},
+		{[]string{"--model=opus", "--settings", "--model=sonnet"}, "opus"},
+		{[]string{"--model=opus", "--name", "--model=sonnet"}, "opus"},
+		{[]string{"--model=opus", "-n", "--model=sonnet"}, "opus"},
+		{[]string{"--model=opus", "-cn", "--model=sonnet"}, "opus"},
+		{[]string{"--model=opus", "-n--model=sonnet"}, "opus"},
+		{[]string{"--model=opus", "--tools", "--model=sonnet"}, "opus"},
+		{[]string{"--tools", "Read", "Edit", "--model", "opus"}, "opus"},
+		{[]string{"--allowed-tools", "Read", "--model=opus"}, "opus"},
+		{[]string{"--resume", "--model=opus"}, "opus"},
+		{[]string{"--model=opus", "-rmsonnet"}, "opus"},
+		{[]string{"--debug", "--model=opus"}, "opus"},
+		{[]string{"--model=opus", "--append-system-prompt", "", "--model=sonnet"}, "sonnet"},
+		{[]string{"--append-system-prompt", "--", "--model=opus"}, "opus"},
+		{[]string{"--model=opus", "--", "--model=sonnet"}, "opus"},
+		{[]string{"--model=opus", "--model", "sonnet"}, "sonnet"},
+		{[]string{"--model=opus", "--model="}, ""},
+		{[]string{"--model=opus", "--model", ""}, ""},
+		{[]string{"-m", "opus"}, "opus"},
+		{[]string{"-mopus"}, "opus"},
+		{[]string{"-pmopus"}, "opus"},
 		{[]string{"--", "--model", "fable"}, ""},
 		{[]string{"prompt"}, ""},
 	}
 	for _, tt := range tests {
+		original := append([]string(nil), tt.args...)
 		if got := claudeRequestedModel(tt.args); got != tt.want {
 			t.Errorf("claudeRequestedModel(%v) = %q, want %q", tt.args, got, tt.want)
+		}
+		if !reflect.DeepEqual(tt.args, original) {
+			t.Errorf("model extraction mutated args: got %v, want %v", tt.args, original)
 		}
 	}
 }

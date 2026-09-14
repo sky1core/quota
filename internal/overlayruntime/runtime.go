@@ -267,6 +267,9 @@ func checkRepository(r repoContext, agent string, stdout io.Writer) (int, error)
 	}
 	if state.SharedSource == "primary" {
 		for _, w := range r.Checkouts() {
+			if w == r.Root && !exists(filepath.Join(w, sharedRule)) && len(r.Copies()) == 0 {
+				continue
+			}
 			expectation, err := r.sharedExpectation(w, state)
 			if err != nil {
 				problems = append(problems, err.Error())

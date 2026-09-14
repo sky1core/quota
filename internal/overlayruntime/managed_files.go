@@ -168,6 +168,27 @@ func (r repoContext) managedExpectations(agent string, state RepositoryState) ([
 		return nil, err
 	}
 	var plans []managedInstructionFile
+	if agent == "claude" || agent == "all" {
+		for _, w := range r.Checkouts() {
+			expectation, err := r.sharedExpectation(w, state)
+			if err != nil {
+				return nil, err
+			}
+			path := filepath.Join(w, sharedBridge)
+			if !expectation.Present && (exists(path) || state.Generated[path] != "") {
+				if state.Generated[path] == "" {
+					bridge, err := inspectBridge(path, "@AGENTS.md")
+					if err != nil {
+						return nil, err
+					}
+					if !bridge.Normalizable {
+						continue
+					}
+				}
+				plans = append(plans, managedInstructionFile{Path: path, Remove: true})
+			}
+		}
+	}
 	if local == nil && contains(r.Checkouts(), r.Root) && (agent == "claude" || agent == "all") {
 		path := filepath.Join(r.Root, localBridge)
 		if state.Generated[path] != "" {
@@ -236,7 +257,7 @@ func (r repoContext) managedDestination(path string, state RepositoryState) (str
 		if err != nil {
 			continue
 		}
-		if rel == codexRule || w == r.Root && rel == localBridge && state.Generated[path] != "" || w != r.Root && (rel == localRule || contains(state.LocalFiles, filepath.ToSlash(rel))) {
+		if rel == sharedBridge || rel == codexRule || w == r.Root && rel == localBridge && state.Generated[path] != "" || w != r.Root && (rel == localRule || contains(state.LocalFiles, filepath.ToSlash(rel))) {
 			return w, rel, nil
 		}
 	}
@@ -251,7 +272,18 @@ func (r repoContext) inspectManagedFile(plan managedInstructionFile, state Repos
 	if err = managedParents(w, rel, false); err != nil {
 		return nil, err
 	}
-	if err = r.managedGitTarget(w, rel, requireIgnored); err != nil {
+	if rel == sharedBridge {
+		if !plan.Remove {
+			return nil, fmt.Errorf("%s only supports managed removal", plan.Path)
+		}
+		tracked, err := r.tracked(w, rel)
+		if err != nil {
+			return nil, err
+		}
+		if tracked {
+			return nil, fmt.Errorf("%s is tracked; file preserved", plan.Path)
+		}
+	} else if err = r.managedGitTarget(w, rel, requireIgnored); err != nil {
 		return nil, err
 	}
 	previous, err := readRegular(plan.Path)
@@ -384,6 +416,9 @@ func (r repoContext) checkManagedFiles(agent string, state RepositoryState) []st
 		}
 		if plan.Remove || !bytes.Equal(previous, plan.Data) {
 			problems = append(problems, plan.Path+" is stale")
+		}
+		if filepath.Base(plan.Path) == sharedBridge && contains(r.Checkouts(), filepath.Dir(plan.Path)) {
+			continue
 		}
 		info, err := os.Lstat(plan.Path)
 		if err != nil {

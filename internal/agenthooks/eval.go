@@ -73,8 +73,8 @@ func evaluateInvocation(policies []Policy, inv Invocation) Decision {
 			Command:  visibleArgv(inv.Argv, inv.Dynamic),
 		}
 	}
-	if isGitCommit(inv.Argv) && hasEnabledDenyRulesForCommand(policies, "git") {
-		if _, err := gitCommitFlags(inv.Argv[2:]); err != nil {
+	if len(inv.Argv) > 0 && hasEnabledDenyRulesForCommand(policies, commandName(inv.Argv[0])) {
+		if _, _, err := commandFlags(inv.Argv); err != nil {
 			return Decision{Decision: DecisionDeny, Allowed: false, Reason: err.Error(), Command: visibleArgv(inv.Argv, inv.Dynamic)}
 		}
 	}
@@ -83,7 +83,18 @@ func evaluateInvocation(policies []Policy, inv Invocation) Decision {
 			continue
 		}
 		for _, rule := range policy.Rules {
-			if !matchCommand(rule.Match, inv.Argv) || matchAny(rule.Except, inv.Argv) {
+			matched, err := matchCommand(rule.Match, inv.Argv)
+			if err != nil {
+				return Decision{Decision: DecisionDeny, Allowed: false, Reason: err.Error(), Command: visibleArgv(inv.Argv, inv.Dynamic)}
+			}
+			if !matched {
+				continue
+			}
+			excepted, err := matchAny(rule.Except, inv.Argv)
+			if err != nil {
+				return Decision{Decision: DecisionDeny, Allowed: false, Reason: err.Error(), Command: visibleArgv(inv.Argv, inv.Dynamic)}
+			}
+			if excepted {
 				continue
 			}
 			decision := Decision{
@@ -175,43 +186,45 @@ func RunPolicyTests(policies []Policy) []TestResult {
 	return results
 }
 
-func matchAny(matches []Match, argv []string) bool {
+func matchAny(matches []Match, argv []string) (bool, error) {
 	for _, match := range matches {
-		if matchCommand(match, argv) {
-			return true
+		matched, err := matchCommand(match, argv)
+		if err != nil || matched {
+			return matched, err
 		}
 	}
-	return false
+	return false, nil
 }
 
-func matchCommand(match Match, argv []string) bool {
+func matchCommand(match Match, argv []string) (bool, error) {
 	if len(argv) == 0 {
-		return false
+		return false, nil
 	}
 	if len(match.Argv) > 0 {
 		if len(argv) < len(match.Argv) {
-			return false
+			return false, nil
 		}
 		if match.Exact && len(argv) != len(match.Argv) {
-			return false
+			return false, nil
 		}
 		for i, pattern := range match.Argv {
 			if !matchArg(pattern, argv[i], i == 0) {
-				return false
+				return false, nil
 			}
 		}
 	}
 	for _, pattern := range match.Contains {
 		if !argvContains(argv, pattern) {
-			return false
+			return false, nil
 		}
 	}
 	for _, flag := range match.HasFlag {
-		if !argvHasFlag(argv, flag) {
-			return false
+		matched, err := argvHasFlag(argv, flag)
+		if err != nil || !matched {
+			return false, err
 		}
 	}
-	return true
+	return true, nil
 }
 
 func matchArg(pattern ArgPattern, arg string, command bool) bool {
@@ -250,21 +263,28 @@ func argvContains(argv []string, pattern ArgPattern) bool {
 	return false
 }
 
-func argvHasFlag(argv []string, flag string) bool {
-	args := argv[1:]
-	if isGitCommit(argv) {
-		var err error
-		args, err = gitCommitFlags(argv[2:])
-		if err != nil {
-			return false
-		}
+func argvHasFlag(argv []string, flag string) (bool, error) {
+	if len(argv) == 0 {
+		return false, nil
 	}
+	if flags, supported, err := commandFlags(argv); supported {
+		if err != nil {
+			return false, err
+		}
+		for _, parsed := range flags {
+			if parsed.name == flag || parsed.token == flag || strings.HasPrefix(parsed.token, flag+"=") {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	args := argv[1:]
 	for _, arg := range args {
 		if arg == flag || strings.HasPrefix(arg, flag+"=") || shortFlagGroupMatches(arg, flag) || longFlagAbbreviationMatches(arg, flag) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func shortFlagGroupMatches(arg, flag string) bool {

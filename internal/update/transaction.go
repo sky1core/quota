@@ -17,6 +17,7 @@ type replacement struct {
 type preparedReplacement struct {
 	destination string
 	staged      string
+	stagedInfo  os.FileInfo
 	backup      string
 	original    os.FileInfo
 }
@@ -61,6 +62,10 @@ func prepareReplacements(work string, files []replacement) ([]preparedReplacemen
 		if err := copyExecutable(file.source, p.staged); err != nil {
 			return nil, fmt.Errorf("preparing %s: %w", file.destination, err)
 		}
+		p.stagedInfo, err = os.Lstat(p.staged)
+		if err != nil {
+			return nil, fmt.Errorf("preparing %s: %w", file.destination, err)
+		}
 		prepared = append(prepared, p)
 	}
 	return prepared, nil
@@ -97,7 +102,7 @@ func commitReplacements(ctx context.Context, files []preparedReplacement) (bool,
 	for i, file := range files {
 		err := ctx.Err()
 		if err == nil {
-			err = unchangedDestination(file)
+			err = unchangedDestination(file.destination, file.original)
 		}
 		if err == nil {
 			err = os.Rename(file.staged, file.destination)
@@ -110,16 +115,16 @@ func commitReplacements(ctx context.Context, files []preparedReplacement) (bool,
 	return false, nil
 }
 
-func unchangedDestination(file preparedReplacement) error {
-	info, err := os.Lstat(file.destination)
-	if file.original == nil && errors.Is(err, os.ErrNotExist) {
+func unchangedDestination(destination string, expected os.FileInfo) error {
+	info, err := os.Lstat(destination)
+	if expected == nil && errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if file.original == nil || !os.SameFile(info, file.original) || info.Mode() != file.original.Mode() || info.Size() != file.original.Size() || !info.ModTime().Equal(file.original.ModTime()) {
-		return fmt.Errorf("destination changed during update: %s", file.destination)
+	if expected == nil || !os.SameFile(info, expected) || info.Mode() != expected.Mode() || info.Size() != expected.Size() || !info.ModTime().Equal(expected.ModTime()) {
+		return fmt.Errorf("destination changed during update: %s", destination)
 	}
 	return nil
 }
@@ -128,11 +133,13 @@ func rollbackReplacements(files []preparedReplacement) error {
 	var errs []error
 	for i := len(files) - 1; i >= 0; i-- {
 		file := files[i]
-		var err error
-		if file.original == nil {
-			err = os.Remove(file.destination)
-		} else {
-			err = os.Rename(file.backup, file.destination)
+		err := unchangedDestination(file.destination, file.stagedInfo)
+		if err == nil {
+			if file.original == nil {
+				err = os.Remove(file.destination)
+			} else {
+				err = os.Rename(file.backup, file.destination)
+			}
 		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("rollback failed for %s (backup %s): %w", file.destination, file.backup, err))

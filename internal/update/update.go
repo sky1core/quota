@@ -93,32 +93,38 @@ func Latest(ctx context.Context) (string, error) {
 // BinPath returns where `go install` puts a binary named name: GOBIN if set,
 // else the first GOPATH element's bin directory.
 func BinPath(ctx context.Context, name string) (string, error) {
-	cmd, err := goCmd(ctx, "env", "GOBIN", "GOPATH")
+	gobin, err := goEnvValue(ctx, "GOBIN")
+	if err != nil {
+		return "", err
+	}
+	if gobin != "" {
+		return filepath.Join(gobin, name), nil
+	}
+	gopath, err := goEnvValue(ctx, "GOPATH")
+	if err != nil {
+		return "", err
+	}
+	if gopath != "" {
+		// GOPATH can be a list; go install uses its first element.
+		return filepath.Join(filepath.SplitList(gopath)[0], "bin", name), nil
+	}
+	return "", errors.New("go env reported neither GOBIN nor GOPATH")
+}
+
+func goEnvValue(ctx context.Context, key string) (string, error) {
+	cmd, err := goCmd(ctx, "env", key)
 	if err != nil {
 		return "", err
 	}
 	out, err := childprocess.Output(cmd)
 	if err != nil {
-		return "", fmt.Errorf("go env: %w%s", err, stderrOf(err))
+		return "", fmt.Errorf("go env %s: %w%s", key, err, stderrOf(err))
 	}
-	// One value per line, in argument order. An unset GOBIN is an EMPTY first
-	// line — trim per line, never the output as a whole (that would swallow
-	// the empty line and misread GOPATH as GOBIN).
-	lines := strings.Split(string(out), "\n")
-	lineAt := func(i int) string {
-		if i < len(lines) {
-			return strings.TrimSpace(lines[i])
-		}
-		return ""
+	value, terminated := strings.CutSuffix(string(out), "\n")
+	if !terminated {
+		return "", fmt.Errorf("go env %s returned an unterminated value", key)
 	}
-	if gobin := lineAt(0); gobin != "" {
-		return filepath.Join(gobin, name), nil
-	}
-	if gopath := lineAt(1); gopath != "" {
-		// GOPATH can be a list; go install uses its first element.
-		return filepath.Join(filepath.SplitList(gopath)[0], "bin", name), nil
-	}
-	return "", errors.New("go env reported neither GOBIN nor GOPATH")
+	return value, nil
 }
 
 // stderrOf extracts captured stderr from an exec .Output() error, prefixed

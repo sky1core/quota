@@ -275,9 +275,6 @@ func createWorktreeWithNativeCodexPreflight(ctx context.Context, stdin io.Reader
 					return fmt.Errorf("%s", problems[0])
 				}
 				if !wasPresent {
-					if e = r.appendExclude(sharedBridge); e != nil {
-						return e
-					}
 					b, e := readRegular(bridge)
 					if e != nil {
 						return e

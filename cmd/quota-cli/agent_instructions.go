@@ -287,6 +287,9 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 		}
 		if dryRun {
 			report.Repository = []string{"Disable instruction delivery for " + *agent + " in this Git worktree group; preserve source and user changes"}
+			if err := overlayruntime.ValidateRepositoryUninstall(ctx, dir, *agent); err != nil {
+				return finish(err, true)
+			}
 			return finish(nil, false)
 		}
 		if err := overlayruntime.UninstallRepository(ctx, dir, *agent); err != nil {

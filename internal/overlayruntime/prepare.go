@@ -541,6 +541,14 @@ func registerLocalFiles(state *RepositoryState, paths []string) error {
 	return nil
 }
 func UninstallRepository(ctx context.Context, dir, agent string) error {
+	return uninstallRepository(ctx, dir, agent, false)
+}
+
+func ValidateRepositoryUninstall(ctx context.Context, dir, agent string) error {
+	return uninstallRepository(ctx, dir, agent, true)
+}
+
+func uninstallRepository(ctx context.Context, dir, agent string, dryRun bool) error {
 	if !validRuntime(agent) {
 		return fmt.Errorf("invalid agent %q", agent)
 	}
@@ -551,7 +559,7 @@ func UninstallRepository(ctx context.Context, dir, agent string) error {
 	if e != nil {
 		return e
 	}
-	return withRepositoryLock(r, func() error {
+	uninstall := func() error {
 		s, e := readState(r)
 		if e != nil {
 			return e
@@ -565,8 +573,18 @@ func UninstallRepository(ctx context.Context, dir, agent string) error {
 		} else {
 			s.Disabled[agent] = true
 		}
-		if e = writeState(r, s); e != nil {
-			return e
+		if !dryRun {
+			if e = writeState(r, s); e != nil {
+				return e
+			}
+		}
+		removeManaged := func(copies bool) error {
+			plans, err := r.planManagedInstructionRemovals(s, copies)
+			if err != nil || dryRun {
+				return err
+			}
+			var changes []string
+			return r.applyManagedFiles(plans, &s, &changes)
 		}
 		var problems []string
 		if agent == "all" || agent == "claude" {
@@ -599,9 +617,11 @@ func UninstallRepository(ctx context.Context, dir, agent string) error {
 						problems = append(problems, e.Error())
 						continue
 					}
-					if e = os.Remove(p); e != nil {
-						problems = append(problems, e.Error())
-						continue
+					if !dryRun {
+						if e = os.Remove(p); e != nil {
+							problems = append(problems, e.Error())
+							continue
+						}
 					}
 					delete(s.Generated, p)
 					delete(s.GeneratedModes, p)
@@ -609,7 +629,7 @@ func UninstallRepository(ctx context.Context, dir, agent string) error {
 			}
 		}
 		if s.Disabled["claude"] && s.Disabled["codex"] {
-			if err := r.removeManagedInstructionFiles(&s, true, true); err != nil {
+			if err := removeManaged(true); err != nil {
 				problems = append(problems, err.Error())
 			} else {
 				s.LocalFiles = nil
@@ -641,35 +661,43 @@ func UninstallRepository(ctx context.Context, dir, agent string) error {
 					problems = append(problems, e.Error())
 					continue
 				}
-				if e = os.Remove(p); e != nil {
-					problems = append(problems, e.Error())
-					continue
+				if !dryRun {
+					if e = os.Remove(p); e != nil {
+						problems = append(problems, e.Error())
+						continue
+					}
 				}
 				delete(s.Generated, p)
 				delete(s.GeneratedModes, p)
 			}
 		} else if agent == "all" || agent == "codex" {
-			if err := r.removeManagedInstructionFiles(&s, true, false); err != nil {
+			if err := removeManaged(false); err != nil {
 				problems = append(problems, err.Error())
 			}
 		}
-		if e = writeState(r, s); e != nil {
-			return e
+		if !dryRun {
+			if e = writeState(r, s); e != nil {
+				return e
+			}
 		}
 		if len(problems) > 0 {
+			if dryRun {
+				return fmt.Errorf("repository uninstall conflicts; %s", strings.Join(problems, "; "))
+			}
 			return fmt.Errorf("repository disabled; %s", strings.Join(problems, "; "))
 		}
 		return nil
-	})
+	}
+	if dryRun {
+		return uninstall()
+	}
+	return withRepositoryLock(r, uninstall)
 }
 
-func (r repoContext) removeManagedInstructionFiles(state *RepositoryState, native, copies bool) error {
+func (r repoContext) planManagedInstructionRemovals(state RepositoryState, copies bool) ([]managedInstructionFile, error) {
 	var plans []managedInstructionFile
 	for _, worktree := range r.Checkouts() {
-		var paths []string
-		if native {
-			paths = append(paths, codexRule)
-		}
+		paths := []string{codexRule}
 		if copies && worktree != r.Root {
 			paths = append(paths, localRule)
 			paths = append(paths, state.LocalFiles...)
@@ -681,15 +709,14 @@ func (r repoContext) removeManagedInstructionFiles(state *RepositoryState, nativ
 			}
 			plan := managedInstructionFile{Path: path, Remove: true}
 			var err error
-			plan.Previous, err = r.inspectManagedFile(plan, *state, true)
+			plan.Previous, err = r.inspectManagedFile(plan, state, true)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			plans = append(plans, plan)
 		}
 	}
-	var changes []string
-	return r.applyManagedFiles(plans, state, &changes)
+	return plans, nil
 }
 
 func (r repoContext) plannedPaths(agent string, state RepositoryState) []string {

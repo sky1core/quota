@@ -575,7 +575,7 @@ func TestSelectClaudeAccountModelFailureMessage(t *testing.T) {
 	if err == nil {
 		t.Fatal("selection should fail when requested model quota is not usable")
 	}
-	if !strings.Contains(err.Error(), "no account has enough applicable Claude quota for --model fable") {
+	if !strings.Contains(err.Error(), "no account has usable Claude quota for --model fable") {
 		t.Fatalf("error = %q", err)
 	}
 }

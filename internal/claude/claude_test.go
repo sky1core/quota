@@ -9,6 +9,23 @@ import (
 	"github.com/sky1core/quota/internal/quotacache"
 )
 
+func TestMalformedOnlyQuotaRetainsWindowDiagnostics(t *testing.T) {
+	raw := "Current session: N/A% used\nCurrent week (all models): ??% used\nCurrent week (Fable): 101% used"
+	result, err := parseUsage(raw)
+	if err == nil || result != nil {
+		t.Fatalf("result=%v error=%v, want parsing failure", result, err)
+	}
+	for _, want := range []string{
+		`quota row "Session" has an unreadable percentage`,
+		`quota row "Week" has an unreadable percentage`,
+		`quota row "Fable" has an out-of-range percentage`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("missing %q: %v", want, err)
+		}
+	}
+}
+
 func TestGetQuotaForConfigDirUsesSharedCache(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PATH", "")

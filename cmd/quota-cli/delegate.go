@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -131,11 +132,12 @@ func selectClaudeAccount(cfg config.Config, args []string, now time.Time) (confi
 	usable := make([]bool, len(results))
 	for i, result := range results {
 		if result.err != nil {
-			failures = append(failures, accounts[i].Key+": "+result.err.Error())
+			failures = append(failures, quotaSelectionFailure(accounts[i].Key, "claude", requestedModel, result, minLeftPcts[i]))
 			continue
 		}
 		score, ok := scoreClaudeQuota(result.quota, requestedModel, compareModel, minLeftPcts[i], now)
 		if !ok {
+			failures = append(failures, quotaSelectionFailure(accounts[i].Key, "claude", requestedModel, result, minLeftPcts[i]))
 			continue
 		}
 		scores[i] = score
@@ -146,9 +148,9 @@ func selectClaudeAccount(cfg config.Config, args []string, now time.Time) (confi
 		return accounts[best], nil
 	}
 	if requestedModel != "" {
-		return config.ResolvedAccount{}, fmt.Errorf("no account has enough applicable Claude quota for --model %s%s", requestedModel, failureSuffix(failures))
+		return config.ResolvedAccount{}, fmt.Errorf("no account has usable Claude quota for --model %s%s", requestedModel, quotaFailureSuffix(failures))
 	}
-	return config.ResolvedAccount{}, fmt.Errorf("no account has usable quota%s", failureSuffix(failures))
+	return config.ResolvedAccount{}, fmt.Errorf("no account has usable quota%s", quotaFailureSuffix(failures))
 }
 
 func selectCodexAccount(cfg config.Config, now time.Time) (config.ResolvedCodexAccount, error) {
@@ -177,11 +179,12 @@ func selectCodexAccount(cfg config.Config, now time.Time) (config.ResolvedCodexA
 	usable := make([]bool, len(results))
 	for i, result := range results {
 		if result.err != nil {
-			failures = append(failures, accounts[i].Key+": "+result.err.Error())
+			failures = append(failures, quotaSelectionFailure(accounts[i].Key, "codex", "", result, minLeftPcts[i]))
 			continue
 		}
 		score, ok := scoreCodexQuota(result.quota, compareShortest, minLeftPcts[i], now)
 		if !ok {
+			failures = append(failures, quotaSelectionFailure(accounts[i].Key, "codex", "", result, minLeftPcts[i]))
 			continue
 		}
 		scores[i] = score
@@ -191,11 +194,11 @@ func selectCodexAccount(cfg config.Config, now time.Time) (config.ResolvedCodexA
 	if best >= 0 {
 		return accounts[best], nil
 	}
-	return config.ResolvedCodexAccount{}, fmt.Errorf("no account has usable quota%s", failureSuffix(failures))
+	return config.ResolvedCodexAccount{}, fmt.Errorf("no account has usable quota%s", quotaFailureSuffix(failures))
 }
 
 func scoreClaudeQuota(quota map[string]any, requestedModel string, compareModel bool, minLeftPct float64, now time.Time) (accountScore, bool) {
-	if quotaAdmissionRejection(quota, "claude") != "" {
+	if quotaAdmissionRejection(quota, "claude") != "" || claudeModelQuotaRejection(quota, requestedModel) != "" {
 		return accountScore{}, false
 	}
 	windows := quotaWindows(quota)
@@ -217,6 +220,28 @@ func scoreClaudeQuota(quota map[string]any, requestedModel string, compareModel 
 		score.windows = append([]scoredWindow{modelScore}, score.windows...)
 	}
 	return score, true
+}
+
+func claudeModelQuotaRejection(quota map[string]any, requestedModel string) string {
+	if requestedModel == "" {
+		return ""
+	}
+	raw, exists := quota["modelWindowErrors"]
+	if !exists {
+		return ""
+	}
+	diagnostics, ok := raw.(map[string]string)
+	if !ok {
+		return "invalid model quota window diagnostics"
+	}
+	var reasons []string
+	for label, message := range diagnostics {
+		if requestedModelMatchesLabel(requestedModel, label) {
+			reasons = append(reasons, message)
+		}
+	}
+	sort.Strings(reasons)
+	return strings.Join(reasons, "; ")
 }
 
 func shouldCompareClaudeModelWindow(results []quotaProbeResult, requestedModel string, minLeftPcts []float64, now time.Time) bool {
@@ -680,13 +705,6 @@ func claudeRequestedModel(args []string) string {
 		}
 	}
 	return strings.ToLower(strings.TrimSpace(model))
-}
-
-func failureSuffix(failures []string) string {
-	if len(failures) == 0 {
-		return ""
-	}
-	return " (probe failures: " + strings.Join(failures, "; ") + ")"
 }
 
 func findClaudePromptBinary() (string, error) {

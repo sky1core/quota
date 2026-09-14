@@ -233,7 +233,7 @@ func selectAutoPromptAccount(cfg config.Config, opts autoPromptOptions, catalogs
 	for i, result := range results {
 		account := accounts[i]
 		if result.err != nil {
-			failures = append(failures, account.key+": "+selectAgentErrorSummary(result.err))
+			failures = append(failures, quotaSelectionFailure(account.key, account.provider, account.model.model, result, account.minLeftPct))
 			continue
 		}
 		if account.provider == "claude" {
@@ -242,6 +242,7 @@ func selectAutoPromptAccount(cfg config.Config, opts autoPromptOptions, catalogs
 			scores[i], usable[i] = scoreCodexQuota(result.quota, true, account.minLeftPct, now)
 		}
 		if !usable[i] {
+			failures = append(failures, quotaSelectionFailure(account.key, account.provider, account.model.model, result, account.minLeftPct))
 			continue
 		}
 		accountWindows[i] = aggregateQuotaWindowsByDuration(account.provider, result.quota)
@@ -253,7 +254,7 @@ func selectAutoPromptAccount(cfg config.Config, opts autoPromptOptions, catalogs
 	}
 	best := selectBestScore(scores, usable)
 	if best < 0 {
-		return autoPromptAccount{}, fmt.Errorf("no account has usable quota for requested models and efforts%s", failureSuffix(failures))
+		return autoPromptAccount{}, fmt.Errorf("no account has usable quota for requested models and efforts%s", quotaFailureSuffix(failures))
 	}
 	return accounts[best], nil
 }

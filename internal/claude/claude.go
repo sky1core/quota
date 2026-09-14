@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -313,16 +314,27 @@ var usageRowLabelRe = regexp.MustCompile(`^(Current\s+[^:]+)(?::|$)`)
 func parseUsage(text string) (map[string]any, error) {
 	var windows []map[string]any
 	var windowErrors []string
-	seenKey := map[string]bool{}
+	modelWindowErrors := map[string]string{}
 	seenExtra := map[string]bool{}
+	recordWindowError := func(screen, problem string) {
+		label := windowLabel(screen)
+		message := fmt.Sprintf("claude quota row %q has %s", label, problem)
+		if aggregateWindowKey(screen) != "" {
+			windowErrors = append(windowErrors, message)
+		} else if !seenExtra[label] {
+			seenExtra[label] = true
+			modelWindowErrors[label] = message
+		}
+	}
+	seenKey := map[string]bool{}
 	extraIdx := 0
 
 	for _, raw := range strings.Split(stripANSI(text), "\n") {
 		line := strings.TrimSpace(raw)
 		m := usageRowRe.FindStringSubmatch(line)
 		if m == nil {
-			if mm := usageRowLabelRe.FindStringSubmatch(line); mm != nil && aggregateWindowKey(mm[1]) != "" {
-				windowErrors = append(windowErrors, fmt.Sprintf("claude quota row %q has an unreadable percentage", windowLabel(mm[1])))
+			if mm := usageRowLabelRe.FindStringSubmatch(line); mm != nil {
+				recordWindowError(mm[1], "an unreadable percentage")
 			}
 			continue
 		}
@@ -332,9 +344,7 @@ func parseUsage(text string) (map[string]any, error) {
 		}
 		pct, err := strconv.Atoi(m[2])
 		if err != nil || pct < 0 || pct > 100 {
-			if aggregateWindowKey(screen) != "" {
-				windowErrors = append(windowErrors, fmt.Sprintf("claude quota row %q has an out-of-range percentage", windowLabel(screen)))
-			}
+			recordWindowError(screen, "an out-of-range percentage")
 			continue
 		}
 
@@ -375,6 +385,14 @@ func parseUsage(text string) (map[string]any, error) {
 	}
 
 	if len(windows) == 0 {
+		var modelErrors []string
+		for _, message := range modelWindowErrors {
+			modelErrors = append(modelErrors, message)
+		}
+		sort.Strings(modelErrors)
+		if diagnostics := append(windowErrors, modelErrors...); len(diagnostics) > 0 {
+			return nil, fmt.Errorf("could not parse claude quota from /usage output: %s", strings.Join(diagnostics, "; "))
+		}
 		if looksLikeSessionUsageSummary(text) {
 			return nil, errors.New("could not find Claude plan quota rows in /usage output; only session usage summary was returned (check claude.ai subscription auth for this CLAUDE_CONFIG_DIR)")
 		}
@@ -383,6 +401,9 @@ func parseUsage(text string) (map[string]any, error) {
 	out := map[string]any{"windows": windows}
 	if len(windowErrors) > 0 {
 		out["windowErrors"] = windowErrors
+	}
+	if len(modelWindowErrors) > 0 {
+		out["modelWindowErrors"] = modelWindowErrors
 	}
 	return out, nil
 }

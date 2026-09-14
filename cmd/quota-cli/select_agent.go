@@ -270,6 +270,9 @@ func collectClaudeSelectAgentCandidates(cfg config.Config, requestedModel string
 			candidate.Status = selectAgentStatusSkipped
 			candidate.Reason = quotaAdmissionRejection(results[i].quota, selectAgentClaude)
 			if candidate.Reason == "" {
+				candidate.Reason = claudeModelQuotaRejection(results[i].quota, requestedModel)
+			}
+			if candidate.Reason == "" {
 				candidate.Reason = selectAgentSkipReason(candidate.Windows, minLeftPcts[i])
 			}
 			candidates[i] = candidate

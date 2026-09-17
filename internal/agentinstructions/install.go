@@ -119,17 +119,17 @@ func installEvents(agent string) []string {
 	if agent == "claude" {
 		return []string{"SessionStart", "WorktreeCreate", "WorktreeRemove"}
 	}
-	return nil
+	return []string{"SessionStart"}
 }
 func (i *Installation) command(agent, event string) string {
-	return agenthooks.ShellQuote([]string{i.executable, "agent", "instructions", "_hook", "--agent=" + agent, "--event=" + event})
+	return agenthooks.ShellQuote([]string{i.executable, "agent", "instructions", "_prepare", "--agent=" + agent, "--event=" + event})
 }
 func (i *Installation) desired(agent, event string) map[string]any {
-	h := map[string]any{"type": "command", "command": i.command(agent, event)}
+	hook := map[string]any{"type": "command", "command": i.command(agent, event)}
 	if agent == "codex" {
-		h["additionalContextLimit"] = 0
+		hook["additionalContextLimit"] = 0
 	}
-	return map[string]any{"hooks": []any{h}}
+	return map[string]any{"hooks": []any{hook}}
 }
 func (i *Installation) owns(command, agent, event string) bool {
 	return agenthooks.OwnsInstructionCommand(command, i.executable, agent, event)
@@ -307,9 +307,6 @@ func (i *Installation) Plan(agents []string, uninstall bool) (InstallPlan, error
 	}
 	for _, agent := range selected {
 		operation := op
-		if agent == "codex" {
-			operation = "remove account-wide managed instruction hooks; other repositories need native setup"
-		}
 		path := i.jsonPath(agent)
 		if err := checkInstallPath(path); err != nil {
 			return plan, err
@@ -336,7 +333,7 @@ func (i *Installation) Plan(agents []string, uninstall bool) (InstallPlan, error
 			if err != nil {
 				return plan, fmt.Errorf("%s: %w", path, err)
 			}
-			plan.Changes = append(plan.Changes, InstallChange{agent, path, string(before) != string(after), operation})
+			plan.Changes = append(plan.Changes, InstallChange{agent, path, string(before) != string(after), "remove legacy instruction hooks"})
 		}
 		plan.Changes = append(plan.Changes, InstallChange{agent, path, string(before) != string(after), operation})
 	}
@@ -475,9 +472,6 @@ func (i *Installation) Inspect(agents []string) ([]InstallStatus, error) {
 			}
 		}
 		if agent == "codex" {
-			if !installEqual(root, clone) {
-				problem("legacy instruction hooks must be removed for native instruction delivery; run setup")
-			}
 			s.Paths = append(s.Paths, i.targets.CodexConfig)
 			for _, msg := range i.inspectCodexConfig() {
 				problem(msg)
@@ -527,5 +521,5 @@ func uniqueInstallStrings(v []string) []string {
 }
 
 func (i *Installation) ExpectedCodexHooks() map[string]string {
-	return map[string]string{}
+	return map[string]string{"sessionStart": i.command("codex", "SessionStart")}
 }

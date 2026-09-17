@@ -202,14 +202,25 @@ quota-cli agent hooks doctor
 정책 파일은 기본적으로 `~/.config/quota/agent-hooks.d/*.json`에 저장된다. 사용자는 정책을 한 번만
 작성하고, `quota-cli`가 Claude/Codex hook 설정으로 렌더링한다.
 
-기본 preset `github-history-guard`는 PR/Issue 생성·수정 같은 GitHub 협업 메타데이터 작업은 허용하고,
-`git push`, `git send-pack`, `git pull`, `git merge`, `git rebase`, `git commit --amend`, `git reset --hard`,
-`git filter-branch`, `git hook run`, `git for-each-repo`, `git update-ref`, `git replace`, `git reflog expire`, 강제 branch reset, branch
-delete/move/copy, tag force/delete, `gh pr merge`, `gh pr update-branch`, `gh pr checkout/co --force`, `gh repo sync`, `gh release create`,
-`gh release delete`, raw `gh api`처럼 코드 이력이나 ref 상태를 바꾸는 명령은 차단한다. 보호 명령을 숨길 수 있는
+기본 preset `github-history-guard`는 두 그룹을 구분한다. `remote-code-ref-mutation`은 코드 이력, 원격 ref,
+tag/release, PR branch, repo 상태를 바꾸거나 그런 명령을 숨길 수 있는 명령을 차단한다.
+`github-collaboration-metadata`는 PR/Issue 본문·코멘트·조회와 push 없이 PR끼리 연결만 하는 stack link 작업을
+허용한다.
+
+차단 그룹에는 `git push`, `git send-pack`, `git pull`, `git merge`, `git rebase`, `git commit --amend`,
+`git reset --hard`, `git filter-branch`, `git hook run`, `git for-each-repo`, `git bisect run`,
+`git submodule foreach`, `git update-ref`, `git replace`, `git reflog expire`, 강제 branch reset,
+branch delete/move/copy, tag force/delete, `gh issue develop`, `gh pr merge`, `gh pr update-branch`,
+`gh pr revert`, `gh pr close --delete-branch`, `gh pr checkout/co --force`, `gh repo create`,
+`gh repo delete`, `gh repo fork`, `gh repo deploy-key add --allow-write`, `gh repo edit --visibility`, `gh repo sync`,
+`gh release create/edit/upload/delete/delete-asset`, `gh workflow run`, `gh run rerun`, `gh agent-task create`,
+`gh codespace ssh`, raw `gh api`처럼
+코드 이력이나 ref 상태를 바꾸거나 원격 자동화로 우회할 수 있는 명령이 들어간다. 보호 명령을 숨길 수 있는
 `git config alias.*`/`include.*`, shell `alias`/`source`/`.`/`trap`/`xargs`,
 `gh alias set/import/delete`, `gh extension exec`, 알 수 없는 `git`/`gh` alias·extension dispatch도 차단한다.
-`gh stack link <number> <number>`만 허용하고 다른 `gh stack ...` 형태는 차단한다.
+PR/Issue 본문·코멘트·조회, branch 삭제 없는 PR close와 `gh stack link <number> <number>`만 metadata 그룹으로 허용하고 다른
+`gh stack ...` 형태는 차단한다.
+`list`/`plan`은 그룹 이름과 설명을 보여주고, `verify` 출력은 내장 테스트 이름 앞에 그룹 이름을 붙여 어느 그룹의 동작을 확인하는지 보여준다.
 
 `plan`은 설치될 hook 위치와 명령을 보여주고 파일을 수정하지 않는다. `plan`/`doctor`/`apply`는
 `--runtime=claude|codex|all`, `--binary <quota-cli-path>`를 받을 수 있다. `apply`는 현재 사용자 계정의
@@ -231,153 +242,90 @@ quota-cli agent hooks eval --runtime=codex
 
 #### Agent instructions — 공용·개인 지침 전달
 
-`agent instructions`는 `AGENTS.md`와 `AGENTS.local.md`를 Claude Code와 Codex CLI에서 함께 사용하도록 준비한다.
-실행부는 quota-cli에 포함되며 별도 스크립트·Python·hook spec이 필요하지 않다.
+`agent instructions`는 공용 `AGENTS.md`와 개인 `AGENTS.local.md`를 Claude Code와 Codex CLI가 native로 읽게 한다.
+실행부는 quota-cli에 포함되며 별도 스크립트·hook spec이 필요하지 않다.
 Git 2.36 이상, Claude Code 2.1.232 이상·Codex CLI 0.154.0 이상을 대상으로 한다.
 
-**관리할 파일과 처음 설정**
-
-공용 지침은 각 checkout의 `AGENTS.md`, 개인 지침은 primary의 `AGENTS.local.md`에 작성한다. 개인 파일은 Git에서 제외한다.
-여기서 primary는 Git 저장소의 기본 작업 폴더이며, bare 저장소에서는 bare 루트다.
-Codex용 `AGENTS.override.md`와 linked worktree의 로컬 복사본은 quota가 생성·갱신한다. 사용자가 직접 만들거나 편집할 파일이 아니다.
-기존 사용자 override나 사용자가 수정한 생성물은 덮어쓰지 않고 충돌을 보고한다.
-
-아래는 두 도구를 함께 준비하는 예다. 한 도구만 쓰면 각 명령의 `--agent=all`을 `--agent=claude` 또는 `--agent=codex`로 바꾼다.
+**한 번만 설정**
 
 ```bash
-quota-cli agent instructions setup . --agent=all --dry-run
-quota-cli agent instructions setup . --agent=all
+quota-cli agent instructions setup --dry-run
+quota-cli agent instructions setup
+quota-cli agent instructions status
+```
+
+`setup`은 현재 계정에만 적용한다. Claude `settings.json`의 SessionStart·WorktreeCreate·WorktreeRemove와
+Codex `hooks.json`의 SessionStart에 고정된 준비 명령(`_prepare`)을 설치하고, Codex hook에는 `additionalContextLimit=0`을 둔다.
+이전 버전이 설치한 지침 hook은 교체·제거한다.
+Codex가 있으면 설치한 quota hook의 현재 native hook hash만 `config.toml`의 trust state에 동기화하고,
+무관한 hook·설정·신뢰 상태는 보존한다. 전역 git ignore 파일(`core.excludesFile`, 없으면 `~/.config/git/ignore`)에
+`AGENTS.override.md`와 `CLAUDE.local.md` 두 줄이 없으면 `# quota-cli agent instructions (managed)` 표식 아래에 추가한다.
+이미 있는 줄은 그대로 두고 관리 대상으로 삼지 않는다. `--no-global-ignore`를 주면 추가하지 않는다.
+`--agent=claude|codex`로 한 도구만 설정할 수 있고, `--dry-run`은 같은 사전 검사와 변경 계획만 출력한다.
+저장소별 준비 명령은 없다.
+
+**저장소 준비는 세션 시작 시 자동**
+
+공용 지침은 각 checkout의 `AGENTS.md`, 개인 지침은 primary(bare 저장소는 bare 루트)의 `AGENTS.local.md`에 작성한다.
+개인 파일은 Git에서 제외한다. 세션이 시작되면 준비 hook이 그 checkout에 대해 다음을 수행한다.
+
+- `CLAUDE.local.md`가 없으면 `@AGENTS.local.md` 한 줄로 만든다. 이미 있는 파일은 건드리지 않는다.
+- `AGENTS.override.md`를 checkout의 `AGENTS.md`(있으면)와 primary `AGENTS.local.md`의 병합본으로 만들거나 갱신한다. Codex는 이 파일이 있으면 이것을, 없으면 `AGENTS.md`를 읽는다.
+- linked worktree에는 primary `AGENTS.local.md`와 등록한 로컬 파일의 복사본을 갱신한다.
+- `AGENTS.local.md`가 없으면 quota가 만든 변경 없는 생성물과 복사본을 제거한다.
+
+생성물은 쓰기 전에 git-ignored여야 한다. ignore되지 않은 파일은 만들지 않고 이유와 필요한 ignore 줄을 세션에 알린다.
+quota가 만든 파일은 기록된 해시와 권한이 일치할 때만 갱신·제거한다. 사용자가 만든 파일이나 수정한 생성물은
+내용이 같아 보여도 덮어쓰거나 지우지 않는다. Git 저장소가 아닌 폴더에서는 아무것도 하지 않는다.
+
+quota는 저장소의 `.git/` 아래에 아무것도 쓰지 않는다. 생성물 소유권과 로컬 파일 등록은
+`~/.config/quota/instructions/<common-dir 해시>.json`에 소유자 전용 권한으로 저장한다.
+
+**첫 세션 1회 전달**
+
+새 세션(startup)에서 준비 hook이 그 호출에서 native 로딩이 이미 끝난 파일을 바꿨을 때만, 그 세션에 한해
+additionalContext로 한 번 전달한다. Claude는 `CLAUDE.local.md`가 생성됐거나 linked worktree의 `AGENTS.local.md`
+복사본이 생성·갱신됐을 때 개인 본문을 전달한다. Codex는 `AGENTS.override.md`가 생성됐을 때 개인 본문을,
+갱신됐을 때는 병합본 전체를, 로컬 지침 제거로 삭제됐을 때는 현재 `AGENTS.md` 본문을 전달한다.
+같은 checkout에서 준비 파일이 없던 첫 startup을 동시에 여러 개 시작하는 경우는 보장하지 않으며, 다음 새 세션부터 native 파일 상태를 따른다.
+resume·compact·clear, 변경 없음, 생성 실패에는 전달하지 않는다. 그 이후는 native 로딩만 사용하며
+같은 본문을 hook이나 매 턴 입력에 다시 붙이지 않는다. 지침을 바꾼 뒤 기존 세션을 재개하면 이전 본문이 컨텍스트에 남을 수 있다.
+
+**로컬 파일 복사 목록**
+
+```bash
+quota-cli agent instructions local-file add config/example.local.json
+quota-cli agent instructions local-file list
+quota-cli agent instructions local-file remove config/example.local.json
+```
+
+primary 기준 상대 경로를 linked worktree 복사 목록에 등록·해제·조회한다. 8MiB 이하의 ignored·untracked 정규 파일만
+복사하며 소유자 실행 권한을 보존한다. 경로 이탈·symlink·생성물 경로·`.gitignore`·대소문자와 Unicode 정규화 기준의 중복 경로는 거부한다.
+등록만 하며 실제 복사는 세션 시작과 Claude WorktreeCreate가 수행한다.
+
+**설정 확인**
+
+```bash
 quota-cli agent instructions status . --agent=all
 ```
 
-`--dry-run`은 같은 사전 검사와 변경 계획을 보여주며 원본·관리 파일·계정 설정을 쓰지 않는다. CLI 시작 과정의 런타임 캐시는 갱신될 수 있다.
-`all`은 현재 환경으로 선택되는 공급자별 계정 하나씩이며 등록 계정 전체가 아니다.
-`setup`은 현재 Claude 계정의 hook 연결을 설치하고, Codex 계정의 정확히 식별된 이전 지침 주입 hook은 제거한다.
-무관한 사용자 hook은 보존한다. 계정의 hook 제거는 그 계정을 사용하는 다른 저장소에도 적용되므로 해당 저장소도 native 로딩으로 준비해야 한다.
-
-**평소 사용과 원본 변경**
-
-Claude는 `CLAUDE.md`·`CLAUDE.local.md`의 native 로딩을 사용한다.
-Codex는 개인 원본이 있으면 공용·개인 본문을 합친 관리 `AGENTS.override.md`를, 없으면 공용 `AGENTS.md`를 native로 읽는다.
-준비한 작업 폴더에서는 평소처럼 CLI를 직접 실행하거나 기존 세션을 `resume`하면 된다. 같은 본문을 hook이나 매 턴 입력에 다시 붙이지 않는다.
-
-| 상황 | 할 일 |
-|---|---|
-| 원본·관리 파일과 계정·설정이 그대로임 | 준비된 폴더에서 그대로 실행·재개한다. 매번 `setup`할 필요는 없다. |
-| 원본 지침 또는 등록한 로컬 파일을 변경함 | 다음 실행·재개 전에 `setup`을 다시 실행해 복사본·병합본을 갱신한다. |
-| 사용할 계정이나 Codex 설정을 바꿈 | 해당 계정·환경에서 `status`로 확인하고, 준비가 필요하면 `setup`한다. |
-| 외부 `git worktree add`로 새 checkout을 만듦 | 해당 checkout에서 agent 실행 전에 `setup`한다. |
-| Claude의 관리된 WorktreeCreate로 만듦 | quota가 파일 준비를 마친 뒤 새 worktree 경로를 반환한다. |
-
-실행 중 원본 변경을 자동으로 감시·반영하지 않는다. 지침 변경 뒤 기존 세션을 재개하면 이전 본문이 컨텍스트에 남을 수 있다.
-quota는 과거 지침을 선택 삭제하거나 자동 압축하지 않는다.
-
-공용 파일은 각 checkout의 버전이 기본이다. primary의 미추적 공용 파일도 복사하려면 `setup --shared-source=primary`를 지정한다.
-추가 ignored 파일은 `setup --local-file=config/example.local.json`처럼 primary 기준 상대 경로로 등록한다. 여러 파일은 옵션을 반복한다.
-복사 대상은 8MiB 이하의 ignored·untracked 정규 파일이며 소유자 실행 권한을 보존한다. `.gitignore` 자체는 등록할 수 없다.
-등록은 다음 setup에도 유지된다. 목록을 비우려면 아래 repository 해제를 두 공급자 모두에 적용한 뒤 필요한 목록으로 다시 setup한다. 원본 파일은 보존한다.
-
-**설정 확인과 중단 조건**
-
-`status`는 모델 호출 없이 관리 파일의 소유권·최신성과 Codex의 유효 설정을 검사한다. 준비되지 않았거나 확인할 수 없으면 성공으로 처리하지 않는다.
-`setup`은 모든 선택 대상의 사전 검사를 쓰기 전에 수행하며, 다음 경우 파일을 적용하지 않고 중단한다.
-
-- 사용자 파일과 충돌하거나 Codex의 신뢰·문서 탐색 설정·지침 크기 제한이 전달 조건을 충족하지 못한 경우.
-- Codex가 실제로 읽는 설정·hook의 위치를 적용 예정 파일과 대응시킬 수 없는 경우. 예를 들어 로컬 파일 복사로 없던 `.codex` 폴더를 만들면, 생성 후 읽힐 hook의 출처를 사전에 확인할 수 없어 중단할 수 있다.
-
-오류에 표시된 경로와 원인을 확인하고, 의도한 설정이 Codex에서 확인 가능한 상태가 된 뒤 `setup --dry-run`부터 다시 실행한다.
-quota가 출처 불명 파일을 자동으로 채택하거나 신뢰 설정을 임의로 바꾸지는 않는다.
-`setup` 실행 중에는 외부 편집기·프로그램으로 Codex 전역 설정이나 관리자 정책을 바꾸지 않는다. quota의 잠금은 이런 외부 변경과의 동시 적용까지 보장하지 않는다.
-사전 검사 통과 후 파일 쓰기 중 오류가 나면 일부 적용됐을 수 있다. 출력의 적용·실패 경로를 확인하고 원인을 해결한 뒤 setup과 status를 다시 실행한다.
-
-**실제 전달 검증**
-
-```bash
-quota-cli agent instructions verify . --agent=codex
-```
-
-`verify`는 같은 전제 검사 후 임시 저장소의 새 메인 세션에서 전달·비전달 대조군을 실행하므로 쿼터를 사용한다.
-확인 불가·도구 사용·불완전한 응답은 검증 성공이 아니다. 이 명령의 성공을 서브에이전트·resume·compact의 전달 보장으로 확대하지 않는다.
-Claude의 native memory를 생략하는 내장 subagent와 호출별 설정 override는 이 검증 범위 밖이다.
+`status`는 모델 호출 없이 준비 hook과 같은 평가를 쓰기 없이 수행해, 다음 준비가 생성·갱신·제거·건너뜀으로 판단할
+파일과 그 이유를 보고하고 계정 연결·유효 native 설정을 검사한다. 이미 남아 있고 소유권이 유지된 생성물은 `generated:`로 표시한다.
+`AGENTS.md`가 있는데 `CLAUDE.md`가 `@AGENTS.md`를
+import하지 않으면 Claude를 차단됨으로 보고한다. 준비되지 않았거나 확인할 수 없으면 성공으로 처리하지 않는다.
+Codex는 유효 `project_doc_max_bytes` 기준으로 현재 읽히는 `AGENTS.override.md` 또는 `AGENTS.md`를 문제로 보고하고,
+`AGENTS.override.md`가 있을 때 한도를 넘은 비활성 `AGENTS.md`는 경고로 보고한다.
 
 **해제**
 
 ```bash
-quota-cli agent instructions uninstall . --scope=repository --agent=all
-quota-cli agent instructions uninstall --scope=account --agent=codex
+quota-cli agent instructions uninstall --dry-run
+quota-cli agent instructions uninstall
 ```
 
-repository 해제는 같은 Git common-dir의 선택 공급자 지침을 비활성화하고 관리 생성물을 정리한다.
-account 해제는 해당 CLI 설정 홈의 연결을 제거하므로 그 계정의 다른 저장소에도 영향을 준다.
-원본 파일은 보존한다. 다시 `setup`하면 활성화된다. Codex native 공용 지침 로딩을 끄는 명령은 아니다.
-
-#### Agent overlay — 기존 spec 호환 명령
-
-사용자 정의 외부 명령을 연결하는 기존 spec도 지원한다. 아래 스키마의 구체 명령은 로컬 spec에 있다.
-설치·진단 명령은 기본적으로 `~/.config/quota/agent-overlay.json`을 읽으며
-`--spec <file>`로 재정의한다. 이 spec이 없으면 `plan`·`apply`·`doctor`·`verify`는 명시적으로
-실패한다(암시적 기본값 없음). `agent instructions`는 이 spec을 사용하지 않는다. spec 스키마는 `version`(1 고정), 선택적 `claude`/`codex`/`verify`
-섹션이며, hook 이벤트 이름은 고정 목록이 아니라 spec에 적힌 키를 그대로 쓴다.
-
-```json
-{
-  "version": 1,
-  "claude": {
-    "hooks": { "SessionStart": [ { "command": "/path/to/overlay-hook session" } ] },
-    "replaces": [ "/path/to/overlay-hook session --previous" ]
-  },
-  "codex": {
-    "settings": { "project_doc_max_bytes": 32768 },
-    "hooks": { "SessionStart": [ { "command": "/path/to/overlay-hook codex-session", "additionalContextLimit": 0 } ] }
-  },
-  "verify": {
-    "claude": { "command": ["/path/to/overlay-hook", "verify", "claude"] },
-    "codex": { "command": ["/path/to/overlay-hook", "verify", "codex"] }
-  }
-}
-```
-
-spec JSON은 알 수 없는 필드를 허용하지 않아 오타 키는 조용히 무시하지 않고 load를 실패시킨다.
-`claude.replaces`는 이전 버전이 설치했던 command 문자열 배열로, 비교는 문자열 완전 일치(`==`)뿐이며
-접두·패턴·argv[0] 해석은 없다.
-
-- `init [--force]`: placeholder 명령이 든 spec 템플릿 생성. 기존 파일은 `--force` 없이 거부.
-- `plan [--runtime=all|claude|codex]`: 대상 파일 경로와 이벤트별 상태(Claude present/missing/stale,
-  Codex present/missing/mismatch)를 보여주며 파일을 수정하지 않는다.
-- `apply [--runtime=...]`: Claude는 `CLAUDE_CONFIG_DIR/settings.json`(없으면 `~/.claude/settings.json`)의
-  `hooks.<event>`에 spec 엔트리를 충돌 없는 백업 후 원자적으로 설치한다. 같은 이벤트에서 command
-  문자열이 spec command와 완전 일치하거나 `claude.replaces`에 든 command와 완전 일치하는 managed
-  엔트리만 spec 버전으로 교체하고, 그 외 엔트리는 보존한다(argv[0] 추론 없음). **Codex apply는 지원하지
-  않는다**(`config.toml`은 주석·trust hash가 있는 대형 TOML이라 자동 재작성이 위험) — Codex는
-  `plan`/`doctor`로 확인하고 손으로 반영한다. 새 hook은 Codex의 `/hooks`에서 검토·신뢰해야
-  실행된다([hook 신뢰 절차](https://developers.openai.com/codex/hooks#review-and-trust-hooks)).
-  quota의 `doctor`는 Codex에 저장된 hook 신뢰 상태를 검사하지 않는다.
-- `doctor [--runtime=...]`: verify 명령을 실행하지 않으며 최고 상태는 `installed`다. runtime별 상태를
-  `installed`(검사한 대상 파일의 관리 항목이 지원 형태와 일치하고 검사 대상인 명시적 방해 조건이 없음),
-  `degraded`(누락/불일치 또는 실효 저해 요인 — 원인, 누락 엔트리, Codex는 추가할 TOML 스니펫과 값
-  불일치 replace 안내 출력), `unconfigured`(spec에 해당 runtime 없음), `error`(대상 파일 파싱 불가)로
-  보고한다. Claude settings 루트의 `disableAllHooks: true`는 엔트리가 있어도 `degraded`다. Codex는
-  `CODEX_HOME/config.toml`(없으면 `~/.codex/config.toml`)을 **읽기 전용**으로 파싱하며, hook 엔트리는
-  `type=="command"`일 때만 존재로 인정한다. 누락 키/hook은 add 스니펫으로, 값 불일치 키는
-  교체용 별도 안내로 출력한다. Codex 기능 키는 `features.hooks`가 구형 별칭보다 우선하며, 지정된 키는 모두 boolean이어야 한다.
-  관리자 전용 키를 사용자 파일에 둔 것은 비활성화로 판정하지 않으며 관리자 정책 자체는 검사하지 않는다. degraded/error가 있으면 exit 1.
-- `verify [--spec <file>]`: doctor 엔트리 검사에 더해 엔트리가 설치된 configured 런타임의
-  `verify.<runtime>.command`를 현재 작업 디렉터리에서 실행한다. exit 0이면 그 런타임을 `enforced`로
-  올리고, 명령이 없으면 "live verification not configured", 명령이 실패하면 exit code를 원인으로 한
-  `degraded`다. 모든 configured 런타임이 `enforced`일 때만 exit 0이다.
-
-설치·스니펫 생성·진단은 같은 기대 설정을 사용한다. command가 같아도 그룹 조건이나 실행 필드가
-다르면 정상으로 인정하지 않는다. 빈 matcher와 생략, 문자열 statusMessage만 동등한 표현으로
-허용하며, `if`·`args` 등 지원하지 않는 추가 필드는 원인과 함께 `degraded`로 보고한다.
-Codex의 `features.hooks = false`도 진단하며, apply는 전역 비활성화 설정을 임의로 변경하지 않는다.
-`installed`는 실제 실행 성공을 뜻하지 않고, `enforced`는 지정된 검증 명령이 확인한 범위만 보장한다.
-
-Claude overlay와 agent hooks의 JSON 설치는 경로별 잠금 안에서 최신 설정을 읽고 수정·백업·저장한 뒤
-다시 읽어 확인한다. 서로 다른 quota 프로세스의 동시 적용을 직렬화하며 외부 편집기는 이 보장 대상이
-아니다. 신규 파일 권한에는 umask를 적용하고 기존 권한은 보존한다. 반복 적용으로 값이 같으면
-파일이나 백업을 쓰지 않는다. JSON 숫자의 정밀도를 보존하며,
-Claude의 Codex 전용 필드, 음수 context limit, TOML 숫자 범위 초과, `replaces`와 현재 명령의 중복은
-입력 오류로 거부한다.
+계정의 준비 hook을 제거한다. 전역 ignore의 관리 블록은 남은 생성물이 커밋되지 않도록 기본적으로 유지하며,
+`--remove-global-ignore`를 `--agent=all`과 함께 주면 표식 아래의 줄만 제거한다. 사용자가 직접 쓴 같은 줄은 남긴다.
+저장소의 생성물은 건드리지 않으며 `status`가 남은 생성물을 보고한다.
 
 ### quota-bar
 

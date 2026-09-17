@@ -42,18 +42,6 @@ func TestGetQuotaForConfigDirUsesSharedCache(t *testing.T) {
 	}
 }
 
-func TestInvalidateCacheForConfigDir(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	configDir := t.TempDir()
-	quotacache.Put(claudeCacheKey(configDir), "Current session: 12% used\n", time.Now().Add(time.Hour))
-
-	InvalidateCacheForConfigDir(configDir)
-
-	if _, ok := quotacache.Get(claudeCacheKey(configDir), time.Minute); ok {
-		t.Fatal("invalidated Claude cache entry should miss")
-	}
-}
-
 func TestEarliestReset(t *testing.T) {
 	later := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	earlier := later.Add(-time.Hour)

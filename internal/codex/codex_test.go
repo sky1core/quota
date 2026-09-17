@@ -32,25 +32,6 @@ func TestGetQuotaForHomeUsesSharedCache(t *testing.T) {
 	}
 }
 
-func TestInvalidateCacheForHome(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	codexHome := t.TempDir()
-	windowMins := 300
-	raw, err := json.Marshal(rateLimitsResponse{RateLimits: rateLimitSnapshot{
-		Primary: &rateLimitWindow{UsedPercent: intPtr(12), WindowDurationMins: &windowMins},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	quotacache.Put(codexCacheKey(codexHome), string(raw), time.Now().Add(time.Hour))
-
-	InvalidateCacheForHome(codexHome)
-
-	if _, ok := quotacache.Get(codexCacheKey(codexHome), time.Minute); ok {
-		t.Fatal("invalidated Codex cache entry should miss")
-	}
-}
-
 func TestWinToEntry_Nil(t *testing.T) {
 	if got := winToEntry(nil); got != nil {
 		t.Errorf("expected nil for nil window, got %v", got)

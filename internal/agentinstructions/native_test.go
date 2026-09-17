@@ -156,6 +156,36 @@ func TestNativeConfigRequiresEffectiveBudgetAndLayers(t *testing.T) {
 	}
 }
 
+func TestNativeCodexTrustIssueUsesEffectiveProjects(t *testing.T) {
+	report := NativeReport{}
+	raw := []byte(`{"config":{"project_root_markers":[],"project_doc_max_bytes":4096,"project_doc_fallback_filenames":[],"projects":{"/example/repo":{"trust_level":"trusted"},"/example/repo/sub":{"trust_level":"untrusted"}}},"layers":[]}`)
+	if err := parseNativeConfig(raw, &report); err != nil {
+		t.Fatal(err)
+	}
+	if issue := nativeCodexTrustIssue(report, "/example/repo/sub"); !strings.Contains(issue, "explicitly untrusted") {
+		t.Fatalf("issue = %q", issue)
+	}
+	if issue := nativeCodexTrustIssue(report, "/example/repo"); issue != "" {
+		t.Fatalf("trusted parent blocked: %q", issue)
+	}
+	report = NativeReport{}
+	raw = []byte(`{"config":{"project_root_markers":[],"project_doc_max_bytes":4096,"project_doc_fallback_filenames":[],"projects":{"/example/repo":{"trust_level":"untrusted"}}},"layers":[]}`)
+	if err := parseNativeConfig(raw, &report); err != nil {
+		t.Fatal(err)
+	}
+	if issue := nativeCodexTrustIssue(report, "/example/repo/sub"); !strings.Contains(issue, "/example/repo is explicitly untrusted") {
+		t.Fatalf("parent issue = %q", issue)
+	}
+	report = NativeReport{}
+	raw = []byte(`{"config":{"project_root_markers":[],"project_doc_max_bytes":4096,"project_doc_fallback_filenames":[],"projects":{"/example/repo":{"trust_level":"untrusted"},"/example/repo/sub":{"trust_level":"trusted"}}},"layers":[]}`)
+	if err := parseNativeConfig(raw, &report); err != nil {
+		t.Fatal(err)
+	}
+	if issue := nativeCodexTrustIssue(report, "/example/repo/sub/nested"); issue != "" {
+		t.Fatalf("trusted child blocked: %q", issue)
+	}
+}
+
 func TestNativeConfigMissingDiscoveryFields(t *testing.T) {
 	for _, config := range []string{
 		`{"project_root_markers":[".git"],"project_doc_max_bytes":42}`,
@@ -185,7 +215,6 @@ func TestNativeUnexpectedInstructionHooks(t *testing.T) {
 	for _, tc := range []struct{ name, command, source, state string }{
 		{"project legacy script", `sh "$HOME/.local/bin/agents-overlay-context" json SessionStart AGENTS.md - . codex-session`, "project", "blocked"},
 		{"plugin alternative executable", `/alternate/quota-cli agent instructions _hook --agent=codex --event=SessionStart`, "plugin", "blocked"},
-		{"legacy overlay command", `/alternate/quota-cli agent overlay hook --runtime=codex --event=SessionStart`, "project", "blocked"},
 		{"echo quoted words", `echo "quota-cli agent instructions _hook"`, "project", "configured"},
 		{"echo argument words", `echo agent instructions _hook`, "project", "configured"},
 		{"unrelated command", `example-tool --label instructions`, "plugin", "configured"},
@@ -398,35 +427,226 @@ func TestNativeCodexIsolatedDiscovery(t *testing.T) {
 	}
 }
 
+func TestNativeCodexTrustSyncApprovesManagedHook(t *testing.T) {
+	if _, err := exec.LookPath("codex"); err != nil {
+		t.Skip("Codex CLI is not installed")
+	}
+	i := testInstallation(t)
+	repo := t.TempDir()
+	plan, err := i.Plan([]string{"codex"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := i.Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	before, err := InspectNativeCodex(context.Background(), repo, i.ExpectedCodexHooks())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.State != "needs-trust" {
+		t.Fatalf("before sync = %+v", before)
+	}
+	synced, err := i.SyncCodexHookTrust(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !synced.Changed || synced.Key == "" {
+		t.Fatalf("sync result = %+v", synced)
+	}
+	after, err := InspectNativeCodex(context.Background(), repo, i.ExpectedCodexHooks())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.State != "configured" || len(after.Hooks) != 1 || after.Hooks[0].TrustStatus != "trusted" {
+		t.Fatalf("after sync = %+v", after)
+	}
+	again, err := i.SyncCodexHookTrust(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Changed {
+		t.Fatalf("second sync rewrote trust: %+v", again)
+	}
+}
+
+func TestCodexTrustTableQuotesHookKey(t *testing.T) {
+	after, err := syncCodexTrustTOML(nil, `/tmp/a"b\c:session_start:1:0`, `hash"with\chars`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "[hooks.state.\"/tmp/a\\\"b\\\\c:session_start:1:0\"]\ntrusted_hash = \"hash\\\"with\\\\chars\"\n"
+	if string(after) != want {
+		t.Fatalf("trust TOML = %q, want %q", after, want)
+	}
+	root, err := parseInstallTOML(after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !codexTrustStateMatches(root, `/tmp/a"b\c:session_start:1:0`, `hash"with\chars`) {
+		t.Fatal("quoted trust key did not round-trip")
+	}
+}
+
+func TestCodexTrustTOMLUpdatesExistingTableWithoutLosingFields(t *testing.T) {
+	before := "[hooks.state.example]\nenabled = false\ntrusted_hash = 'old' # old hash\n"
+	after, err := syncCodexTrustTOML([]byte(before), "example", "new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(after)
+	if !strings.Contains(got, "enabled = false") || strings.Contains(got, "trusted_hash = 'old'") || !strings.Contains(got, `trusted_hash = "new"`) || !strings.Contains(got, "# old hash") {
+		t.Fatalf("trust table update = %q", got)
+	}
+	again, err := syncCodexTrustTOML(after, "example", "new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(again) != got {
+		t.Fatal("trust sync was not idempotent")
+	}
+}
+
+func TestCodexTrustTOMLPreservesLongStringFollowingFields(t *testing.T) {
+	before := "[hooks.state.example]\ntrusted_hash = \"\"\"x\"\"\"\"\nenabled = false\nother = \"x\"\n"
+	after, err := syncCodexTrustTOML([]byte(before), "example", "new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := parseInstallTOML(after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := root["hooks"].(map[string]any)["state"].(map[string]any)["example"].(map[string]any)
+	if entry["trusted_hash"] != "new" || entry["enabled"] != false || entry["other"] != "x" {
+		t.Fatalf("trust update lost fields: %#v\n%s", entry, after)
+	}
+}
+
+func TestCodexTrustTOMLUpdatesInlineState(t *testing.T) {
+	for _, tc := range []struct {
+		name, before string
+	}{
+		{"inline hooks root", `hooks = { state = { existing = { enabled = false } } } # keep root comment` + "\n"},
+		{"inline hooks root dotted state", `hooks = { state.example = { trusted_hash = "old" } } # keep root comment` + "\n"},
+		{"inline hooks root dotted hash", `hooks = { state.example.trusted_hash = "old" } # keep root comment` + "\n"},
+		{"inline hooks root dotted field", `hooks = { state.example.enabled = true } # keep root comment` + "\n"},
+		{"inline hooks table state", `[hooks]` + "\n" + `state = { existing = { trusted_hash = "old" } } # keep state comment` + "\n"},
+		{"inline state entry", `[hooks.state]` + "\n" + `example = { enabled = false, trusted_hash = "old" } # keep entry comment` + "\n"},
+		{"inline state dotted hash", `[hooks.state]` + "\n" + `example.trusted_hash = "old" # keep entry comment` + "\n"},
+		{"inline state dotted field", `[hooks.state]` + "\n" + `example.enabled = true # keep entry comment` + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			after, err := syncCodexTrustTOML([]byte(tc.before), "example", "new")
+			if err != nil {
+				t.Fatal(err)
+			}
+			root, err := parseInstallTOML(after)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !codexTrustStateMatches(root, "example", "new") {
+				t.Fatalf("trust state was not updated: %s", after)
+			}
+			if strings.Contains(tc.before, "# keep") && !strings.Contains(string(after), "# keep") {
+				t.Fatalf("comment was not preserved: %s", after)
+			}
+		})
+	}
+}
+
+func TestNativeCodexHookSourceMatchesSymlinkedTargetWithDifferentName(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "codex-hooks-target.json")
+	link := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if !sameNativeCodexHookSource(link, target) {
+		t.Fatal("symlinked hook source did not match resolved target")
+	}
+}
+
+func TestCodexTrustTOMLRejectsInvalidState(t *testing.T) {
+	for _, before := range []string{
+		"[hooks]\nstate = []\n",
+		"[hooks.state.example]\ntrusted_hash = 42\n",
+	} {
+		if _, err := syncCodexTrustTOML([]byte(before), "example", "new"); err == nil {
+			t.Fatalf("invalid trust state accepted: %s", before)
+		}
+	}
+}
+
+func TestUpdateTOMLTrustCreatesConfigThroughManagedPath(t *testing.T) {
+	i := testInstallation(t)
+	i, err := i.resolveSelectedTargets([]string{"codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := i.updateTOMLTrust(i.targets.CodexConfig, "example", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("missing config.toml did not get created")
+	}
+	body, err := os.ReadFile(i.targets.CodexConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(body); !strings.Contains(got, `[hooks.state."example"]`) || !strings.Contains(got, `trusted_hash = "hash"`) {
+		t.Fatalf("config.toml = %q", got)
+	}
+	again, err := i.updateTOMLTrust(i.targets.CodexConfig, "example", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again {
+		t.Fatal("second trust sync rewrote config.toml")
+	}
+}
+
+func TestCodexQuotedKeySegmentEscapesTOMLString(t *testing.T) {
+	got := codexQuotedKeySegment(`/tmp/a"b\c:session_start:1:0`)
+	want := `"/tmp/a\"b\\c:session_start:1:0"`
+	if got != want {
+		t.Fatalf("quoted key = %q, want %q", got, want)
+	}
+}
+
 func TestNativeConfigInspectionIndependentOfHooks(t *testing.T) {
 	if _, err := exec.LookPath("codex"); err != nil {
-		t.Skip("real Codex CLI is not installed")
+		t.Skip("Codex CLI is not installed")
 	}
 	root := t.TempDir()
 	home, repo := filepath.Join(root, "home"), filepath.Join(root, "repo")
-	account := filepath.Join(home, ".codex")
-	for _, path := range []string{account, repo} {
+	codexHome := filepath.Join(home, ".codex")
+	for _, path := range []string{codexHome, repo} {
 		if err := os.MkdirAll(path, 0700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	t.Setenv("HOME", home)
-	t.Setenv("CODEX_HOME", account)
-	if err := os.WriteFile(filepath.Join(account, "config.toml"), []byte("project_doc_max_bytes = 12345\n[features]\nhooks = false\n"), 0600); err != nil {
+	t.Setenv("CODEX_HOME", codexHome)
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte("project_doc_max_bytes = 12345\n[features]\nhooks = false\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	for _, hooks := range []string{
 		`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"quota-cli agent instructions _hook --agent=codex --event=SessionStart"}]}]}}`,
 		`{invalid`,
 	} {
-		if err := os.WriteFile(filepath.Join(account, "hooks.json"), []byte(hooks), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(codexHome, "hooks.json"), []byte(hooks), 0600); err != nil {
 			t.Fatal(err)
 		}
 		report, err := InspectNativeCodexConfig(context.Background(), repo)
 		if err != nil || report.State != "configured" || len(report.Hooks) != 0 || report.ProjectDocMaxBytes == nil || *report.ProjectDocMaxBytes != 12345 {
 			t.Fatalf("config inspection depended on hook readiness: %+v %v", report, err)
 		}
-		if body, err := os.ReadFile(filepath.Join(account, "hooks.json")); err != nil || string(body) != hooks {
+		if body, err := os.ReadFile(filepath.Join(codexHome, "hooks.json")); err != nil || string(body) != hooks {
 			t.Fatalf("config inspection changed hooks: %q %v", body, err)
 		}
 	}

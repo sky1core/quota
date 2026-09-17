@@ -109,21 +109,6 @@ func TestPutOverwritesSameKey(t *testing.T) {
 	}
 }
 
-func TestDeleteRemovesOnlyRequestedKey(t *testing.T) {
-	isolate(t)
-	Put("claude:/a", "aa", time.Time{})
-	Put("codex:/b", "bb", time.Time{})
-
-	Delete("claude:/a")
-
-	if _, ok := Get("claude:/a", time.Minute); ok {
-		t.Fatal("deleted key should miss")
-	}
-	if got, ok := Get("codex:/b", time.Minute); !ok || got != "bb" {
-		t.Fatalf("unrelated key should remain: got %q ok=%v", got, ok)
-	}
-}
-
 // TestConcurrentPutsKeepAll is the reason the write path holds a lock: without
 // serializing the read-modify-write, two Puts that read the same file and each
 // add their key would clobber each other on save (lost update). With the lock,

@@ -16,11 +16,6 @@ import (
 	"github.com/sky1core/quota/internal/agenthooks"
 )
 
-type plannedSettingsFile struct {
-	Data   []byte
-	Remove bool
-}
-
 type settingsLayer struct {
 	path string
 	data map[string]any
@@ -38,31 +33,17 @@ type ClaudeSessionSettings struct {
 }
 
 func claudeSessionSettings(r repoContext) []ClaudeSessionSettings {
-	var result []ClaudeSessionSettings
 	user := filepath.Join(nativeConfigHome("CLAUDE_CONFIG_DIR", ".claude"), "settings.json")
-	for _, start := range instructionUniquePaths(append([]string{r.Start}, r.Checkouts()...)...) {
-		worktree := ""
-		for _, candidate := range r.Checkouts() {
-			if instructionPathWithin(start, candidate) {
-				worktree = candidate
-				break
-			}
-		}
-		if worktree == "" {
-			continue
-		}
-		root := r.Root
-		if r.Bare() {
-			root = worktree
-		}
-		paths := []string{user, filepath.Join(start, ".claude", "settings.json")}
-		if start != root {
-			paths = append(paths, filepath.Join(start, ".claude", "settings.local.json"))
-		}
-		paths = append(paths, filepath.Join(root, ".claude", "settings.local.json"))
-		result = append(result, ClaudeSessionSettings{Directory: start, Worktree: worktree, Paths: paths})
+	root := r.Top
+	if !r.Bare() {
+		root = r.Root
 	}
-	return result
+	paths := []string{user, filepath.Join(r.Start, ".claude", "settings.json")}
+	if r.Start != root {
+		paths = append(paths, filepath.Join(r.Start, ".claude", "settings.local.json"))
+	}
+	paths = append(paths, filepath.Join(root, ".claude", "settings.local.json"))
+	return []ClaudeSessionSettings{{Directory: r.Start, Worktree: r.Top, Paths: paths}}
 }
 
 func ClaudeSettingsLayers(ctx context.Context, dir string) ([]ClaudeSessionSettings, error) {
@@ -74,159 +55,6 @@ func ClaudeSettingsLayers(ctx context.Context, dir string) ([]ClaudeSessionSetti
 		return nil, err
 	}
 	return claudeSessionSettings(r), nil
-}
-
-func PlannedClaudeSettings(ctx context.Context, dir, agent, sharedSource string, localFiles ...string) (map[string]map[string]any, error) {
-	if !validRuntime(agent) {
-		return nil, fmt.Errorf("invalid agent %q", agent)
-	}
-	if err := ValidateGitEnvironment(ctx); err != nil {
-		return nil, err
-	}
-	r, err := resolveContext(ctx, dir)
-	if err != nil {
-		return nil, err
-	}
-	state, err := readState(r)
-	if err != nil {
-		return nil, err
-	}
-	if sharedSource != "" {
-		if sharedSource != "primary" && sharedSource != "checkout" {
-			return nil, fmt.Errorf("invalid shared source policy")
-		}
-		state.SharedSource = sharedSource
-	}
-	if err := registerLocalFiles(&state, localFiles); err != nil {
-		return nil, err
-	}
-	plans, err := r.planManagedFiles(agent, state)
-	if err != nil {
-		return nil, err
-	}
-	planned := make(map[string]plannedSettingsFile, len(plans))
-	for _, plan := range plans {
-		planned[plan.Path] = plannedSettingsFile{Data: plan.Data, Remove: plan.Remove}
-	}
-	expected := map[string]sharedRuleExpectation{}
-	for _, worktree := range r.Checkouts() {
-		expectation, err := r.sharedExpectation(worktree, state)
-		if err != nil {
-			return nil, err
-		}
-		expected[worktree] = expectation
-	}
-	var local *string
-	if exists(r.localSource()) {
-		text, err := readRule(r.localSource())
-		if err != nil {
-			return nil, err
-		}
-		local = &text
-	}
-	if err := r.completePlannedSettings(agent, state, expected, local, planned); err != nil {
-		return nil, err
-	}
-	settings := map[string]map[string]any{}
-	var problems []string
-	for _, session := range claudeSessionSettings(r) {
-		for _, path := range session.Paths {
-			if _, read := settings[path]; !read {
-				settings[path] = readJSONSettingsLayer(path, planned, &problems).data
-			}
-		}
-	}
-	if len(problems) > 0 {
-		return nil, fmt.Errorf("%s", strings.Join(problems, "; "))
-	}
-	return settings, nil
-}
-
-func (r repoContext) completePlannedSettings(agent string, state RepositoryState, expected map[string]sharedRuleExpectation, local *string, planned map[string]plannedSettingsFile) error {
-	bridge := func(path, marker string) error {
-		current, err := inspectBridgeWithOwnership(path, marker, state)
-		if err != nil {
-			return err
-		}
-		if current.Exists && !current.Normalizable {
-			return fmt.Errorf("%s contains content beyond the %s import", path, marker)
-		}
-		body := []byte(marker + "\n")
-		if current.Exact {
-			body = current.Data
-		}
-		planned[path] = plannedSettingsFile{Data: body}
-		return nil
-	}
-	for _, worktree := range r.Checkouts() {
-		expectation := expected[worktree]
-		if state.SharedSource == "primary" && worktree != r.Root && expectation.Present {
-			if _, err := r.inspectSharedCopy(expectation, state); err != nil {
-				return err
-			}
-			planned[expectation.Path] = plannedSettingsFile{Data: expectation.Data}
-		}
-		if agent == "claude" || agent == "all" {
-			if expectation.Present {
-				if err := bridge(filepath.Join(worktree, sharedBridge), "@AGENTS.md"); err != nil {
-					return err
-				}
-			}
-			if worktree == r.Root {
-				if local != nil {
-					if err := bridge(filepath.Join(worktree, localBridge), "@AGENTS.local.md"); err != nil {
-						return err
-					}
-				}
-			} else if local != nil {
-				path := filepath.Join(worktree, localBridge)
-				data := []byte(generatedLocal(*local))
-				if len(data) > maxRuleBytes {
-					return fmt.Errorf("%s exceeds %d-byte file size limit", path, maxRuleBytes)
-				}
-				planned[path] = plannedSettingsFile{Data: data}
-			} else if exists(filepath.Join(worktree, localBridge)) {
-				planned[filepath.Join(worktree, localBridge)] = plannedSettingsFile{Remove: true}
-			}
-		}
-	}
-	addIgnore := func(path, pattern string) error {
-		file, loaded := planned[path]
-		if !loaded {
-			data, err := readRegular(path)
-			if err != nil && !os.IsNotExist(err) {
-				return err
-			}
-			file.Data = data
-		}
-		if !utf8.Valid(file.Data) {
-			return fmt.Errorf("%s is not UTF-8", path)
-		}
-		file.Data = withIgnorePattern(file.Data, pattern)
-		planned[path] = file
-		return nil
-	}
-	for _, rel := range append(ignoreTargets(agent), state.LocalFiles...) {
-		if !r.Bare() && r.Top == r.Root && !contains(state.LocalFiles, rel) {
-			ignored, err := r.ignored(r.Root, rel)
-			if err != nil {
-				return err
-			}
-			if !ignored {
-				if err := addIgnore(filepath.Join(r.Root, ".gitignore"), rel); err != nil {
-					return err
-				}
-			}
-		}
-		pattern := rel
-		if contains(state.LocalFiles, rel) {
-			pattern = "/" + strings.ReplaceAll(rel, " ", "\\ ")
-		}
-		if err := addIgnore(filepath.Join(r.Common, "info", "exclude"), pattern); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func nativeConfigHome(env, directory string) string {
@@ -241,280 +69,14 @@ func nativeConfigHome(env, directory string) string {
 	return filepath.Join(home, directory)
 }
 
-func settingsFileExists(path string, plannedFiles map[string]plannedSettingsFile) bool {
-	if file, ok := plannedFiles[path]; ok {
-		return !file.Remove
-	}
-	if plannedFiles != nil {
-		target, err := plannedSettingsTarget(path, plannedFiles)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return exists(path)
-			}
-			return true
-		}
-		if file, ok := plannedFiles[target]; ok {
-			return !file.Remove
-		}
-		return plannedSettingsDirectory(target, plannedFiles) || exists(target)
-	}
-	return exists(path)
-}
-
-func plannedSettingsDirectory(path string, plannedFiles map[string]plannedSettingsFile) bool {
-	for plannedPath, plan := range plannedFiles {
-		if !plan.Remove && strings.HasPrefix(plannedPath, path+string(filepath.Separator)) {
-			return true
-		}
-	}
-	return false
-}
-
-type settingsPathPart struct {
-	name    string
-	linkEnd bool
-}
-
-func settingsPathParts(path string) []settingsPathPart {
-	var parts []settingsPathPart
-	for _, name := range strings.Split(path, string(filepath.Separator)) {
-		parts = append(parts, settingsPathPart{name: name})
-	}
-	return parts
-}
-
-func settingsPathHasSuffix(parts []settingsPathPart) bool {
-	for _, part := range parts {
-		if !part.linkEnd {
-			return true
-		}
-	}
-	return false
-}
-
-func plannedSettingsTarget(path string, plannedFiles map[string]plannedSettingsFile) (string, error) {
-	if !filepath.IsAbs(path) {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", err
-		}
-		path = cwd + string(filepath.Separator) + path
-	}
-	remaining := settingsPathParts(path)
-	resolved := string(filepath.Separator)
-	links, unresolvedLinks := 0, 0
-	for len(remaining) > 0 {
-		item := remaining[0]
-		remaining = remaining[1:]
-		if item.linkEnd {
-			unresolvedLinks--
-			continue
-		}
-		part := item.name
-		if part == "" || part == "." {
-			continue
-		}
-		if part == ".." {
-			resolved = filepath.Dir(resolved)
-			continue
-		}
-		next, err := plannedSettingsEntry(filepath.Join(resolved, part), plannedFiles)
-		if err != nil {
-			return "", err
-		}
-		if plan, ok := plannedFiles[next]; ok && plan.Remove && unresolvedLinks > 0 {
-			return "", fmt.Errorf("cannot resolve planned settings symlink %s: target %s will be removed", path, next)
-		}
-		info, err := os.Lstat(next)
-		if os.IsNotExist(err) {
-			future, filePlanned := plannedFiles[next]
-			directoryPlanned := plannedSettingsDirectory(next, plannedFiles)
-			if !(filePlanned && !future.Remove) && !directoryPlanned {
-				if unresolvedLinks > 0 {
-					return "", fmt.Errorf("cannot resolve planned settings symlink %s at %s: %v", path, next, err)
-				}
-				return "", err
-			}
-			if settingsPathHasSuffix(remaining) && !directoryPlanned {
-				return "", fmt.Errorf("%s is not a directory", next)
-			}
-			resolved = next
-			continue
-		}
-		if err != nil {
-			return "", err
-		}
-		if info.Mode()&os.ModeSymlink == 0 {
-			if settingsPathHasSuffix(remaining) && !info.IsDir() {
-				return "", fmt.Errorf("%s is not a directory", next)
-			}
-			resolved = next
-			continue
-		}
-		links++
-		unresolvedLinks++
-		if links > 255 {
-			return "", fmt.Errorf("too many symbolic links in settings path: %s", path)
-		}
-		target, err := os.Readlink(next)
-		if err != nil {
-			return "", err
-		}
-		if filepath.IsAbs(target) {
-			resolved = string(filepath.Separator)
-		}
-		targetParts := append(settingsPathParts(target), settingsPathPart{linkEnd: true})
-		remaining = append(targetParts, remaining...)
-	}
-	return resolved, nil
-}
-
-func plannedSettingsEntry(path string, plannedFiles map[string]plannedSettingsFile) (string, error) {
-	for plannedPath := range plannedFiles {
-		for candidate := plannedPath; candidate != filepath.Dir(candidate); candidate = filepath.Dir(candidate) {
-			if candidate == path {
-				return path, nil
-			}
-			sameEntry, known, err := sameExistingSettingsEntry(path, candidate)
-			if err != nil {
-				return "", err
-			}
-			if known {
-				if sameEntry {
-					return candidate, nil
-				}
-				continue
-			}
-			if !strings.EqualFold(candidate, path) {
-				continue
-			}
-			equivalent, err := settingsPathsCaseEquivalent(path, candidate)
-			if err != nil {
-				return "", err
-			}
-			if equivalent {
-				return candidate, nil
-			}
-			break
-		}
-	}
-	return path, nil
-}
-
-func sameExistingSettingsEntry(path, candidate string) (bool, bool, error) {
-	left, leftErr := os.Lstat(path)
-	right, rightErr := os.Lstat(candidate)
-	if leftErr != nil || rightErr != nil {
-		return false, false, nil
-	}
-	if !os.SameFile(left, right) {
-		return false, true, nil
-	}
-	leftParent, err := os.Stat(filepath.Dir(path))
+func readSettingsFile(path string) ([]byte, error) {
+	target, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return false, false, err
+		return nil, err
 	}
-	rightParent, err := os.Stat(filepath.Dir(candidate))
+	data, err := readRegular(target)
 	if err != nil {
-		return false, false, err
-	}
-	if !os.SameFile(leftParent, rightParent) {
-		return false, true, nil
-	}
-	if filepath.Base(path) == filepath.Base(candidate) {
-		return true, true, nil
-	}
-	entries, err := os.ReadDir(filepath.Dir(path))
-	if err != nil {
-		return false, false, err
-	}
-	leftExact, rightExact, matchingEntries := false, false, 0
-	for _, entry := range entries {
-		info, err := entry.Info()
-		if err != nil {
-			return false, false, err
-		}
-		if !os.SameFile(left, info) {
-			continue
-		}
-		matchingEntries++
-		leftExact = leftExact || entry.Name() == filepath.Base(path)
-		rightExact = rightExact || entry.Name() == filepath.Base(candidate)
-	}
-	if leftExact && rightExact {
-		return false, true, nil
-	}
-	if matchingEntries == 1 {
-		return true, true, nil
-	}
-	return false, false, fmt.Errorf("cannot distinguish settings aliases from separate hardlinks: %s and %s", path, candidate)
-}
-
-func settingsPathsShareEntry(path, candidate string) (bool, error) {
-	resolved, err := filepath.EvalSymlinks(path)
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	other, err := filepath.EvalSymlinks(candidate)
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	same, _, err := sameExistingSettingsEntry(resolved, other)
-	return same, err
-}
-
-func settingsPathsCaseEquivalent(path, candidate string) (bool, error) {
-	for path != candidate {
-		if filepath.Base(path) != filepath.Base(candidate) {
-			for _, name := range []string{filepath.Base(path), filepath.Base(candidate)} {
-				for _, char := range name {
-					if char > 127 {
-						return false, fmt.Errorf("cannot establish a future non-ASCII settings alias: %s", path)
-					}
-				}
-			}
-			insensitive, err := settingsDirectoryCaseInsensitive(filepath.Dir(path))
-			if err != nil || !insensitive {
-				return false, err
-			}
-		}
-		path, candidate = filepath.Dir(path), filepath.Dir(candidate)
-	}
-	return true, nil
-}
-
-func readSettingsFile(path string, plannedFiles map[string]plannedSettingsFile) ([]byte, error) {
-	var data []byte
-	if _, ok := plannedFiles[path]; !ok && plannedFiles != nil {
-		target, err := plannedSettingsTarget(path, plannedFiles)
-		if err != nil {
-			return nil, err
-		}
-		path = target
-	}
-	if file, ok := plannedFiles[path]; ok {
-		if file.Remove {
-			return nil, &os.PathError{Op: "read", Path: path, Err: os.ErrNotExist}
-		}
-		data = file.Data
-	} else {
-		if plannedSettingsDirectory(path, plannedFiles) {
-			return nil, fmt.Errorf("%s is planned as a directory, not a settings file", path)
-		}
-		target, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return nil, err
-		}
-		data, err = readRegular(target)
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 	if !utf8.Valid(data) {
 		return nil, fmt.Errorf("non-UTF-8 settings: %s", path)
@@ -522,9 +84,9 @@ func readSettingsFile(path string, plannedFiles map[string]plannedSettingsFile) 
 	return data, nil
 }
 
-func readJSONSettingsLayer(path string, plannedFiles map[string]plannedSettingsFile, problems *[]string) settingsLayer {
+func readJSONSettingsLayer(path string, problems *[]string) settingsLayer {
 	layer := settingsLayer{path: path}
-	data, err := readSettingsFile(path, plannedFiles)
+	data, err := readSettingsFile(path)
 	if os.IsNotExist(err) {
 		return layer
 	}
@@ -551,7 +113,7 @@ func readJSONSettingsLayer(path string, plannedFiles map[string]plannedSettingsF
 
 func ReadClaudeSettings(path string) (map[string]any, error) {
 	var problems []string
-	layer := readJSONSettingsLayer(path, nil, &problems)
+	layer := readJSONSettingsLayer(path, &problems)
 	if len(problems) != 0 {
 		return nil, fmt.Errorf("%s", strings.Join(problems, "; "))
 	}
@@ -559,23 +121,6 @@ func ReadClaudeSettings(path string) (map[string]any, error) {
 		return map[string]any{}, nil
 	}
 	return layer.data, nil
-}
-
-func instructionPathWithin(path, root string) bool {
-	rel, err := filepath.Rel(root, path)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-func instructionUniquePaths(paths ...string) []string {
-	seen := map[string]bool{}
-	var result []string
-	for _, path := range paths {
-		if !seen[path] {
-			seen[path] = true
-			result = append(result, path)
-		}
-	}
-	return result
 }
 
 func claudeExclusionPattern(pattern string) string {
@@ -612,22 +157,39 @@ func claudeExclusionPattern(pattern string) string {
 	return out.String()
 }
 
-func claudeSettingsFindings(r repoContext, planned ...map[string]sharedRuleExpectation) ([]string, []string) {
-	return claudeSettingsFindingsWithPlannedFiles(r, nil, planned...)
+func claudeExclusionFindings(patterns []string, bridge string) []string {
+	var problems []string
+	candidates := []string{filepath.ToSlash(bridge), filepath.ToSlash(resolvePath(bridge))}
+	for _, pattern := range patterns {
+		matched := pattern == candidates[0] || pattern == candidates[1]
+		if !matched && strings.ContainsAny(pattern, "{}[]()!") {
+			problems = append(problems, fmt.Sprintf("claudeMdExcludes pattern %q cannot evaluate whether %s still loads", pattern, bridge))
+			continue
+		}
+		expression, err := regexp.Compile(claudeExclusionPattern(pattern))
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("claudeMdExcludes pattern %q cannot evaluate: %v", pattern, err))
+			continue
+		}
+		if matched || expression.MatchString(candidates[0]) || expression.MatchString(candidates[1]) {
+			problems = append(problems, fmt.Sprintf("claudeMdExcludes matches %s; Claude will not load that bridge", bridge))
+		}
+	}
+	return problems
 }
 
-func claudeSettingsFindingsWithPlannedFiles(r repoContext, plannedFiles map[string]plannedSettingsFile, planned ...map[string]sharedRuleExpectation) ([]string, []string) {
+// claudeSettingsFindings reports Claude settings that block hook execution or
+// exclude native bridge files from loading.
+func claudeSettingsFindings(r repoContext) []string {
 	var problems []string
 	executable, err := os.Executable()
 	if err != nil {
-		return []string{err.Error()}, nil
+		return []string{err.Error()}
 	}
-	user := readJSONSettingsLayer(filepath.Join(nativeConfigHome("CLAUDE_CONFIG_DIR", ".claude"), "settings.json"), plannedFiles, &problems)
 	for _, session := range claudeSessionSettings(r) {
-		worktree := session.Worktree
-		layers := []settingsLayer{user}
-		for _, path := range session.Paths[1:] {
-			layers = append(layers, readJSONSettingsLayer(path, plannedFiles, &problems))
+		var layers []settingsLayer
+		for _, path := range session.Paths {
+			layers = append(layers, readJSONSettingsLayer(path, &problems))
 		}
 		var disabled sourcedSetting
 		var patterns []string
@@ -665,39 +227,20 @@ func claudeSettingsFindingsWithPlannedFiles(r repoContext, plannedFiles map[stri
 		if disabled.value == true {
 			problems = append(problems, disabled.path+": disableAllHooks is true; Claude instruction hooks are disabled")
 		}
-		for _, name := range []string{"CLAUDE.md", "CLAUDE.local.md"} {
-			bridge := filepath.Join(worktree, name)
-			sharedRequired := exists(filepath.Join(worktree, sharedRule))
-			if len(planned) > 0 {
-				sharedRequired = planned[0][worktree].Present
-			}
-			required := name == sharedBridge && sharedRequired || name == localBridge && exists(r.localSource())
-			if !settingsFileExists(bridge, plannedFiles) && !required {
-				continue
-			}
-			candidates := []string{filepath.ToSlash(bridge), filepath.ToSlash(resolvePath(bridge))}
-			for _, pattern := range patterns {
-				matched := pattern == candidates[0] || pattern == candidates[1]
-				if !matched && strings.ContainsAny(pattern, "{}[]()!") {
-					problems = append(problems, fmt.Sprintf("claudeMdExcludes pattern %q cannot evaluate whether %s still loads", pattern, bridge))
-					continue
-				}
-				expression, err := regexp.Compile(claudeExclusionPattern(pattern))
-				if err != nil {
-					problems = append(problems, fmt.Sprintf("claudeMdExcludes pattern %q cannot evaluate: %v", pattern, err))
-					continue
-				}
-				if matched || expression.MatchString(candidates[0]) || expression.MatchString(candidates[1]) {
-					problems = append(problems, fmt.Sprintf("claudeMdExcludes matches %s; Claude will not load that bridge", bridge))
-				}
-			}
+		sharedBridge := filepath.Join(session.Worktree, "CLAUDE.md")
+		if exists(sharedBridge) || exists(filepath.Join(session.Worktree, sharedRule)) {
+			problems = append(problems, claudeExclusionFindings(patterns, sharedBridge)...)
+		}
+		local := filepath.Join(session.Worktree, localBridge)
+		if exists(local) || exists(r.localSource()) {
+			problems = append(problems, claudeExclusionFindings(patterns, local)...)
 		}
 	}
-	return instructionUniquePaths(problems...), nil
+	return uniqueStrings(problems...)
 }
 
-func readCodexLayer(path string, plannedFiles map[string]plannedSettingsFile, problems *[]string) map[string]any {
-	data, err := readSettingsFile(path, plannedFiles)
+func readCodexLayer(path string, problems *[]string) map[string]any {
+	data, err := readSettingsFile(path)
 	var parsed map[string]any
 	if err == nil {
 		_, err = toml.Decode(string(data), &parsed)
@@ -708,27 +251,23 @@ func readCodexLayer(path string, plannedFiles map[string]plannedSettingsFile, pr
 	return parsed
 }
 
-func codexHookFeatures(data map[string]any, path string, problems *[]string) map[string]sourcedSetting {
-	settings := map[string]sourcedSetting{}
+func codexHookFeatures(data map[string]any, path string, problems *[]string) {
 	value, ok := data["features"]
 	if !ok {
-		return settings
+		return
 	}
 	features, ok := value.(map[string]any)
 	if !ok {
 		*problems = append(*problems, path+": features must be a table")
-		return settings
+		return
 	}
 	for _, key := range []string{"hooks", "codex_hooks"} {
 		if value, ok := features[key]; ok {
 			if _, valid := value.(bool); !valid {
 				*problems = append(*problems, path+": features."+key+" must be a boolean")
-			} else {
-				settings[key] = sourcedSetting{value, path}
 			}
 		}
 	}
-	return settings
 }
 
 func codexProjectTrust(data map[string]any, worktree string) string {
@@ -742,173 +281,124 @@ func codexProjectTrust(data map[string]any, worktree string) string {
 	return ""
 }
 
-func codexSettingsFindings(r repoContext, planned ...map[string]sharedRuleExpectation) ([]string, []string) {
-	return codexSettingsFindingsWithPlannedFiles(r, nil, planned...)
-}
-
-func codexSettingsFindingsWithPlannedFiles(r repoContext, plannedFiles map[string]plannedSettingsFile, planned ...map[string]sharedRuleExpectation) ([]string, []string) {
+// codexSettingsFindings reports Codex settings that change project-document
+// discovery, block hooks, or leave the effective instruction file over budget.
+func codexSettingsFindings(r repoContext, effectiveDocMaxBytes *int64) ([]string, []string) {
 	var problems, warnings []string
-	if r.NativeCodexSettings {
-		var paths []string
-		for _, files := range r.NativeCodexHookFiles {
-			paths = append(paths, files...)
-		}
-		return codexHookFileFindings(r, instructionUniquePaths(paths...), plannedFiles), nil
-	}
 	configPath := filepath.Join(nativeConfigHome("CODEX_HOME", ".codex"), "config.toml")
 	data := map[string]any{}
-	if settingsFileExists(configPath, plannedFiles) {
-		data = readCodexLayer(configPath, plannedFiles, &problems)
+	if exists(configPath) {
+		data = readCodexLayer(configPath, &problems)
 		if data == nil {
 			return problems, warnings
 		}
 	}
-	for _, worktree := range r.Checkouts() {
-		trust := codexProjectTrust(data, worktree)
-		if trust == "untrusted" {
-			problems = append(problems, worktree+" is untrusted in "+configPath+"; Codex does not load AGENTS.md")
-			continue
+	worktree := r.Top
+	trust := codexProjectTrust(data, worktree)
+	if trust == "untrusted" {
+		return append(problems, worktree+" is untrusted in "+configPath+"; Codex does not load AGENTS.md"), warnings
+	}
+	if trust != "trusted" {
+		warnings = append(warnings, worktree+" has no trusted entry in "+configPath+"; only user config was evaluated")
+	}
+	doc := map[string]sourcedSetting{}
+	merge := func(layer map[string]any, path string) {
+		codexHookFeatures(layer, path, &problems)
+		if _, ok := layer["project_root_markers"]; ok {
+			problems = append(problems, path+": project_root_markers changes Codex project-doc discovery")
 		}
-		if trust != "trusted" {
-			warnings = append(warnings, worktree+" has no trusted entry in "+configPath+"; only user config was evaluated")
-		}
-		starts := []string{worktree}
-		if r.Start != worktree && instructionPathWithin(r.Start, worktree) {
-			starts = append(starts, r.Start)
-		}
-		for _, start := range starts {
-			doc := map[string]sourcedSetting{}
-			merge := func(layer map[string]any, path string) {
-				codexHookFeatures(layer, path, &problems)
-				if _, ok := layer["project_root_markers"]; ok {
-					problems = append(problems, path+": project_root_markers changes Codex project-doc discovery")
-				}
-				for _, key := range []string{"project_doc_max_bytes", "project_doc_fallback_filenames"} {
-					if value, ok := layer[key]; ok {
-						doc[key] = sourcedSetting{value, path}
-					}
-				}
-			}
-			merge(data, configPath)
-			var projectConfigs []string
-			if trust == "trusted" {
-				for path := start; instructionPathWithin(path, worktree); path = filepath.Dir(path) {
-					projectConfigs = append(projectConfigs, filepath.Join(path, ".codex", "config.toml"))
-					if path == worktree {
-						break
-					}
-				}
-			}
-			for i := len(projectConfigs) - 1; i >= 0; i-- {
-				path := projectConfigs[i]
-				if settingsFileExists(path, plannedFiles) {
-					layer := readCodexLayer(path, plannedFiles, &problems)
-					merge(layer, path)
-					problems = append(problems, codexInstructionHookFindings(r, layer, path)...)
-				}
-				path = filepath.Join(filepath.Dir(path), "hooks.json")
-				if settingsFileExists(path, plannedFiles) {
-					problems = append(problems, codexInstructionHookFindings(r, readJSONSettingsLayer(path, plannedFiles, &problems).data, path)...)
-				}
-			}
-			if setting, ok := doc["project_doc_fallback_filenames"]; ok {
-				entries, valid := setting.value.([]any)
-				if !valid || len(entries) != 0 {
-					problems = append(problems, setting.path+": project_doc_fallback_filenames must be [] or absent")
-				}
-			}
-			maxBytes := int64(32768)
-			maxPath := configPath
-			if setting, ok := doc["project_doc_max_bytes"]; ok {
-				value, valid := setting.value.(int64)
-				if !valid || value <= 0 {
-					problems = append(problems, setting.path+": project_doc_max_bytes must be a positive integer")
-					continue
-				}
-				maxBytes, maxPath = value, setting.path
-			}
-			shared := filepath.Join(worktree, sharedRule)
-			var body []byte
-			if len(planned) > 0 {
-				body = planned[0][worktree].Data
-			} else {
-				body, _ = readRegular(shared)
-			}
-			if len(planned) > 0 && exists(r.localSource()) {
-				local, err := readRegular(r.localSource())
-				if err != nil {
-					problems = append(problems, err.Error())
-					continue
-				}
-				body = mergedCodexInstructions(body, local)
-				shared = filepath.Join(worktree, codexRule)
-			} else if len(planned) == 0 && exists(filepath.Join(worktree, codexRule)) {
-				shared = filepath.Join(worktree, codexRule)
-				var err error
-				body, err = readRegular(shared)
-				if err != nil {
-					problems = append(problems, err.Error())
-					continue
-				}
-			}
-			if int64(len(body)) > maxBytes {
-				problems = append(problems, fmt.Sprintf("%s is %d bytes, over Codex project_doc_max_bytes %d from %s", shared, len(body), maxBytes, maxPath))
+		for _, key := range []string{"project_doc_max_bytes", "project_doc_fallback_filenames"} {
+			if value, ok := layer[key]; ok {
+				doc[key] = sourcedSetting{value, path}
 			}
 		}
 	}
-	return instructionUniquePaths(problems...), instructionUniquePaths(warnings...)
+	merge(data, configPath)
+	var projectConfigs []string
+	if trust == "trusted" {
+		for path := r.Start; within(path, worktree); path = filepath.Dir(path) {
+			projectConfigs = append(projectConfigs, filepath.Join(path, ".codex", "config.toml"))
+			if path == worktree {
+				break
+			}
+		}
+	}
+	for i := len(projectConfigs) - 1; i >= 0; i-- {
+		path := projectConfigs[i]
+		if exists(path) {
+			layer := readCodexLayer(path, &problems)
+			merge(layer, path)
+			problems = append(problems, codexInstructionHookFindings(layer, path)...)
+		}
+		path = filepath.Join(filepath.Dir(path), "hooks.json")
+		if exists(path) {
+			problems = append(problems, codexInstructionHookFindings(readJSONSettingsLayer(path, &problems).data, path)...)
+		}
+	}
+	if setting, ok := doc["project_doc_fallback_filenames"]; ok {
+		entries, valid := setting.value.([]any)
+		if !valid || len(entries) != 0 {
+			problems = append(problems, setting.path+": project_doc_fallback_filenames must be [] or absent")
+		}
+	}
+	maxBytes := int64(32768)
+	maxPath := configPath
+	if effectiveDocMaxBytes != nil {
+		if *effectiveDocMaxBytes <= 0 {
+			return append(problems, "effective Codex project_doc_max_bytes must be positive"), warnings
+		}
+		maxBytes, maxPath = *effectiveDocMaxBytes, "the effective Codex config"
+	} else if setting, ok := doc["project_doc_max_bytes"]; ok {
+		value, valid := setting.value.(int64)
+		if !valid || value <= 0 {
+			return append(problems, setting.path+": project_doc_max_bytes must be a positive integer"), warnings
+		}
+		maxBytes, maxPath = value, setting.path
+	}
+	override := filepath.Join(worktree, codexRule)
+	shared := filepath.Join(worktree, sharedRule)
+	if exists(override) {
+		problems, warnings = appendCodexDocumentBudgetFinding(problems, warnings, override, true, maxBytes, maxPath)
+		problems, warnings = appendCodexDocumentBudgetFinding(problems, warnings, shared, false, maxBytes, maxPath)
+	} else {
+		problems, warnings = appendCodexDocumentBudgetFinding(problems, warnings, shared, true, maxBytes, maxPath)
+	}
+	return uniqueStrings(problems...), uniqueStrings(warnings...)
 }
 
-func codexInstructionHookFindings(r repoContext, data map[string]any, path string) []string {
-	var problems []string
+func appendCodexDocumentBudgetFinding(problems, warnings []string, document string, active bool, maxBytes int64, maxPath string) ([]string, []string) {
+	if !exists(document) {
+		return problems, warnings
+	}
+	body, err := readRegular(document)
+	if err != nil {
+		problems = append(problems, err.Error())
+		return problems, warnings
+	}
+	if int64(len(body)) <= maxBytes {
+		return problems, warnings
+	}
+	message := fmt.Sprintf("%s is %d bytes, over Codex project_doc_max_bytes %d from %s", document, len(body), maxBytes, maxPath)
+	if active {
+		problems = append(problems, message)
+	} else {
+		warnings = append(warnings, message+"; inactive while "+codexRule+" exists")
+	}
+	return problems, warnings
+}
+
+func codexInstructionHookFindings(data map[string]any, path string) []string {
 	executable, err := os.Executable()
 	if err != nil {
 		return []string{err.Error()}
 	}
 	hooks, err := agenthooks.CodexInstructionHooks(data, executable)
 	if err != nil {
-		problems = append(problems, fmt.Sprintf("%s: %v", path, err))
-		return problems
+		return []string{fmt.Sprintf("%s: %v", path, err)}
 	}
+	var problems []string
 	for _, hook := range hooks {
-		removing := false
-		if hook.Owned {
-			for _, accountPath := range r.CodexHookRemovals {
-				same, err := settingsPathsShareEntry(path, accountPath)
-				if err != nil {
-					problems = append(problems, fmt.Sprintf("%s: %v", path, err))
-					return problems
-				}
-				if same {
-					removing = true
-					break
-				}
-			}
-		}
-		if !removing {
-			problems = append(problems, fmt.Sprintf("%s: hooks.%s conflicts with native instruction delivery", path, hook.Event))
-		}
+		problems = append(problems, fmt.Sprintf("%s: hooks.%s conflicts with the fixed account installation", path, hook.Event))
 	}
 	return problems
-}
-
-func codexHookFileFindings(r repoContext, paths []string, planned map[string]plannedSettingsFile) []string {
-	var problems []string
-	for _, path := range paths {
-		if !settingsFileExists(path, planned) {
-			continue
-		}
-		var data map[string]any
-		switch filepath.Ext(path) {
-		case ".toml":
-			data = readCodexLayer(path, planned, &problems)
-		case ".json":
-			data = readJSONSettingsLayer(path, planned, &problems).data
-		default:
-			problems = append(problems, fmt.Sprintf("cannot reliably check native hook source %s", path))
-			continue
-		}
-		problems = append(problems, codexInstructionHookFindings(r, data, path)...)
-	}
-	return instructionUniquePaths(problems...)
 }

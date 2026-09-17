@@ -20,16 +20,6 @@ func (i *Installation) InspectClaudeRepositoryHooks(ctx context.Context, dir str
 	return i.inspectClaudeRepositoryHooks(ctx, dir, overlayruntime.ReadClaudeSettings)
 }
 
-func (i *Installation) InspectPlannedClaudeRepositoryHooks(ctx context.Context, dir string, settings map[string]map[string]any) ([]string, error) {
-	return i.inspectClaudeRepositoryHooks(ctx, dir, func(path string) (map[string]any, error) {
-		root, exists := settings[path]
-		if !exists {
-			return nil, fmt.Errorf("settings path is missing from the preparation plan: %s", path)
-		}
-		return root, nil
-	})
-}
-
 func (i *Installation) inspectClaudeRepositoryHooks(ctx context.Context, dir string, readSettings func(string) (map[string]any, error)) ([]string, error) {
 	sessions, err := overlayruntime.ClaudeSettingsLayers(ctx, dir)
 	if err != nil {

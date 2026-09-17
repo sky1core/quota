@@ -2,295 +2,313 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"errors"
+	"github.com/sky1core/quota/internal/agentinstructions"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
-func TestInstructionsRejectsGenericExecutionInputs(t *testing.T) {
+func instructionsHome(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "")
+	instructionsWrite(t, filepath.Join(home, ".gitconfig"), "[user]\n\tname = test\n\temail = test@example.invalid\n[init]\n\tdefaultBranch = main\n")
+	return home
+}
+
+func instructionsWrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func instructionsRepo(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "repo")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"init", "-q"}, {"add", "."}, {"commit", "-q", "--allow-empty", "-m", "init"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
+}
+
+func runInstructions(t *testing.T, stdin string, args ...string) (int, string, string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	code := runAgentInstructions(args, strings.NewReader(stdin), &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
+}
+
+func TestInstructionsRejectsRemovedAndGenericInputs(t *testing.T) {
 	for _, args := range [][]string{
+		{"setup", "."},
+		{"setup", "--shared-source=primary"},
+		{"setup", "--local-file=example"},
 		{"setup", "--spec=arbitrary.json"},
-		{"setup", "--command=echo"},
-		{"setup", "--local-file="},
-		{"status", "--local-file=example"},
 		{"setup", "--agent=all", "--agent=codex"},
-		{"status", "--shared-source=primary"},
-		{"uninstall"},
-		{"uninstall", "--scope=everything"},
-		{"verify", "--timeout=0"},
-		{"_hook", "--agent=claude", "--event=SubagentStart"},
-		{"_hook", "--agent=codex", "--event=WorktreeCreate"},
-		{"_hook", "--agent=codex", "--event=SessionStart", "arbitrary.md"},
-		{"_hook", "--agent=codex", "--event=SessionStart", "--command=echo"},
+		{"setup", "--agent=other"},
+		{"uninstall", "--scope=account"},
+		{"uninstall", "."},
+		{"status", ".", "extra"},
+		{"verify"},
+		{"local-file"},
+		{"local-file", "add"},
+		{"local-file", "add", "--command=echo"},
+		{"local-file", "copy", "x"},
+		{"local-file", "list", ".", "extra"},
+		{"_hook", "--agent=claude", "--event=SessionStart"},
+		{"_prepare", "--agent=claude", "--event=SubagentStart"},
+		{"_prepare", "--agent=codex", "--event=WorktreeCreate"},
+		{"_prepare", "--agent=codex", "--event=SessionStart", "arbitrary.md"},
+		{"_prepare", "--agent=codex", "--event=SessionStart", "--command=echo"},
 	} {
-		var out, stderr bytes.Buffer
-		if code := runAgentInstructions(args, nil, &out, &stderr); code != 2 {
-			t.Errorf("%q: exit=%d output=%q errors=%q", args, code, out.String(), stderr.String())
+		code, out, stderr := runInstructions(t, "{}", args...)
+		if code != 2 {
+			t.Errorf("%q: exit=%d output=%q errors=%q", args, code, out, stderr)
 		}
 	}
 }
 
-func TestInstructionsStandaloneBinaryNeedsNoPythonOrSpec(t *testing.T) {
-	git, err := exec.LookPath("git")
-	if err != nil {
-		t.Skip("git unavailable")
+func TestInstructionsSetupAndUninstallAccountOnly(t *testing.T) {
+	home := instructionsHome(t)
+	ignore := filepath.Join(home, ".config", "git", "ignore")
+	code, out, stderr := runInstructions(t, "", "setup", "--dry-run", "--json")
+	if code != 0 {
+		t.Fatalf("dry-run: %d %s %s", code, out, stderr)
 	}
-	dir := t.TempDir()
-	dir, err = filepath.EvalSymlinks(dir)
-	if err != nil {
+	var report instructionsReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatal(err)
 	}
-	binDir := filepath.Join(dir, "bin '한글'")
-	home := filepath.Join(dir, "home")
-	repo := filepath.Join(dir, "repo '한글'\nline")
-	for _, path := range []string{binDir, home, repo} {
-		if err := os.Mkdir(path, 0700); err != nil {
-			t.Fatal(err)
+	wantChanges := 3
+	if _, err := exec.LookPath("codex"); err == nil {
+		wantChanges = 4
+	}
+	if !report.DryRun || report.Plan == nil || len(report.Plan.Changes) != wantChanges || report.GlobalIgnore == nil || report.GlobalIgnore.Path != ignore || len(report.GlobalIgnore.Add) != 2 || report.Applied != nil {
+		t.Fatalf("dry-run report = %s", out)
+	}
+	for _, path := range []string{filepath.Join(home, ".claude", "settings.json"), filepath.Join(home, ".codex", "hooks.json"), ignore} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("dry-run wrote %s", path)
 		}
 	}
-	binary := filepath.Join(binDir, "quota-cli")
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	build := exec.CommandContext(ctx, "go", "build", "-o", binary, ".")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, out)
+	code, out, stderr = runInstructions(t, "", "setup", "--json")
+	if code != 0 {
+		t.Fatalf("setup: %d %s %s", code, out, stderr)
 	}
-	for name, target := range map[string]string{"git": git, "sh": "/bin/sh"} {
-		if err := os.Symlink(target, filepath.Join(binDir, name)); err != nil {
-			t.Fatal(err)
-		}
+	settings, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil || !strings.Contains(string(settings), "_prepare") || !strings.Contains(string(settings), "WorktreeRemove") {
+		t.Fatalf("Claude settings = %s (%v)", settings, err)
 	}
-	env := []string{"HOME=" + home, "PATH=" + binDir, "CLAUDE_CONFIG_DIR=" + filepath.Join(home, ".claude"), "CODEX_HOME=" + filepath.Join(home, ".codex")}
-	call := func(input string, want int, args ...string) []byte {
-		t.Helper()
-		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-		cmd.Env, cmd.Dir, cmd.Stdin = env, repo, strings.NewReader(input)
-		var out, stderr bytes.Buffer
-		cmd.Stdout, cmd.Stderr = &out, &stderr
-		err := cmd.Run()
-		code := 0
-		if err != nil {
-			var exit *exec.ExitError
-			if !errors.As(err, &exit) {
-				t.Fatalf("%q: %v", args, err)
-			}
-			code = exit.ExitCode()
-		}
-		if code != want {
-			t.Fatalf("%q: exit=%d want=%d stdout=%s stderr=%s", args, code, want, out.String(), stderr.String())
-		}
-		return out.Bytes()
+	hooks, err := os.ReadFile(filepath.Join(home, ".codex", "hooks.json"))
+	if err != nil || !strings.Contains(string(hooks), "'--agent=codex' '--event=SessionStart'") || strings.Contains(string(hooks), "SubagentStart") {
+		t.Fatalf("Codex hooks = %s (%v)", hooks, err)
 	}
-	call("", 0, git, "init", "-q")
-	for name, body := range map[string]string{"AGENTS.md": "shared rule marker\n", "AGENTS.local.md": "private rule marker\n"} {
-		if err := os.WriteFile(filepath.Join(repo, name), []byte(body), 0600); err != nil {
-			t.Fatal(err)
-		}
+	if got, _ := os.ReadFile(ignore); string(got) != agentinstructions.GlobalIgnoreMarker+"\nAGENTS.override.md\nCLAUDE.local.md\n" {
+		t.Fatalf("global ignore = %q", got)
 	}
-	config := filepath.Join(home, ".claude", "settings.json")
-	if err := os.Mkdir(filepath.Dir(config), 0700); err != nil {
+	settingsInfo, _ := os.Stat(filepath.Join(home, ".claude", "settings.json"))
+	code, out, _ = runInstructions(t, "", "setup", "--json")
+	if code != 0 {
+		t.Fatalf("second setup: %d %s", code, out)
+	}
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatal(err)
 	}
-	const original = `{"keep":{"n":9007199254740993},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"printf harmless"}]}]}}`
-	if err := os.WriteFile(config, []byte(original), 0600); err != nil {
+	if len(report.Applied.Applied) != 0 || report.GlobalIgnore.Changed {
+		t.Fatalf("second setup rewrote files: %s", out)
+	}
+	if again, _ := os.Stat(filepath.Join(home, ".claude", "settings.json")); !again.ModTime().Equal(settingsInfo.ModTime()) {
+		t.Fatal("second setup rewrote Claude settings")
+	}
+	if backups, _ := filepath.Glob(filepath.Join(home, ".claude", "settings.json.bak.*")); len(backups) != 0 {
+		t.Fatalf("setup of a new file created backups: %v", backups)
+	}
+	code, out, _ = runInstructions(t, "", "status", t.TempDir(), "--agent=claude", "--json")
+	if code == 0 || !strings.Contains(out, `"state": "blocked"`) || strings.Count(out, "not inside a Git worktree") != 1 {
+		t.Fatalf("status outside a repository: %d %s", code, out)
+	}
+	code, out, stderr = runInstructions(t, "", "uninstall", "--agent=claude", "--remove-global-ignore", "--json")
+	if code == 0 || !strings.Contains(out, "--remove-global-ignore requires --agent=all") {
+		t.Fatalf("single-agent --remove-global-ignore accepted: %d %s %s", code, out, stderr)
+	}
+	if settings, _ = os.ReadFile(filepath.Join(home, ".claude", "settings.json")); !strings.Contains(string(settings), "_prepare") {
+		t.Fatal("rejected uninstall changed Claude settings")
+	}
+	code, out, stderr = runInstructions(t, "", "uninstall", "--agent=claude", "--json")
+	if code != 0 {
+		t.Fatalf("uninstall claude: %d %s %s", code, out, stderr)
+	}
+	if got, _ := os.ReadFile(ignore); string(got) != agentinstructions.GlobalIgnoreMarker+"\nAGENTS.override.md\nCLAUDE.local.md\n" {
+		t.Fatalf("single-agent uninstall changed global ignore: %q", got)
+	}
+	code, out, stderr = runInstructions(t, "", "uninstall", "--json")
+	if code != 0 {
+		t.Fatalf("uninstall: %d %s %s", code, out, stderr)
+	}
+	settings, _ = os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	hooks, _ = os.ReadFile(filepath.Join(home, ".codex", "hooks.json"))
+	if strings.Contains(string(settings), "_prepare") || strings.Contains(string(hooks), "_prepare") {
+		t.Fatalf("uninstall left hooks: %s %s", settings, hooks)
+	}
+	report = instructionsReport{}
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatal(err)
 	}
-	projectConfig := filepath.Join(repo, ".claude", "settings.json")
-	if err := os.Mkdir(filepath.Dir(projectConfig), 0700); err != nil {
+	if report.GlobalIgnore != nil {
+		t.Fatalf("default uninstall touched the global ignore plan: %s", out)
+	}
+	if got, _ := os.ReadFile(ignore); string(got) != agentinstructions.GlobalIgnoreMarker+"\nAGENTS.override.md\nCLAUDE.local.md\n" {
+		t.Fatalf("default uninstall changed global ignore: %q", got)
+	}
+	code, out, _ = runInstructions(t, "", "uninstall", "--remove-global-ignore", "--json")
+	if code != 0 {
+		t.Fatalf("uninstall with ignore removal: %d %s", code, out)
+	}
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatal(err)
 	}
-	conflict, _ := json.Marshal(map[string]any{"hooks": map[string]any{"SessionStart": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": `sh "$HOME/.local/bin/agents-overlay-context" json SessionStart CLAUDE.md CLAUDE.local.md . claude-session`}}}}}})
-	if err := os.WriteFile(projectConfig, conflict, 0600); err != nil {
+	if len(report.Applied.Applied) != 0 || report.GlobalIgnore == nil || !report.GlobalIgnore.Changed {
+		t.Fatalf("ignore removal report = %s", out)
+	}
+	if got, _ := os.ReadFile(ignore); string(got) != "" {
+		t.Fatalf("global ignore after removal = %q", got)
+	}
+	code, out, _ = runInstructions(t, "", "uninstall", "--remove-global-ignore", "--json")
+	if code != 0 {
+		t.Fatalf("second uninstall: %d %s", code, out)
+	}
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatal(err)
 	}
-	for _, extra := range [][]string{{}, {"--dry-run"}} {
-		args := append([]string{binary, "agent", "instructions", "setup", repo, "--agent=claude", "--json"}, extra...)
-		out := call("", 1, args...)
-		if !bytes.Contains(out, []byte("conflicts with the fixed account installation")) {
-			t.Fatalf("project hook conflict not diagnosed: %s", out)
-		}
-		if got, _ := os.ReadFile(config); string(got) != original {
-			t.Fatal("conflicting project hook allowed account mutation")
-		}
-		for _, path := range []string{filepath.Join(repo, "CLAUDE.md"), filepath.Join(repo, ".git", "quota-instructions.json")} {
-			if _, err := os.Lstat(path); !os.IsNotExist(err) {
-				t.Fatalf("conflicting project hook allowed repository mutation: %s", path)
-			}
-		}
+	if len(report.Applied.Applied) != 0 || report.GlobalIgnore.Changed {
+		t.Fatalf("second uninstall rewrote files: %s", out)
 	}
-	if err := os.WriteFile(projectConfig, []byte("{}"), 0600); err != nil {
-		t.Fatal(err)
+}
+
+func TestCodexHookInstallChangedDoesNotDependOnFilename(t *testing.T) {
+	plan := agentinstructions.InstallPlan{Changes: []agentinstructions.InstallChange{
+		{Agent: "codex", Path: "/tmp/shared/codex-hooks-target.json", Changed: true, Operation: "install"},
+	}}
+	if !codexHookInstallChanged(plan) {
+		t.Fatal("codex hook install change was missed for a non-hooks.json target")
 	}
-	call("", 0, binary, "agent", "instructions", "setup", repo, "--agent=claude", "--dry-run")
-	if got, _ := os.ReadFile(config); string(got) != original {
-		t.Fatal("dry-run modified account")
+}
+
+func TestInstructionsSetupNoGlobalIgnore(t *testing.T) {
+	home := instructionsHome(t)
+	code, out, stderr := runInstructions(t, "", "setup", "--agent=claude", "--no-global-ignore", "--json")
+	if code != 0 {
+		t.Fatalf("setup: %d %s %s", code, out, stderr)
 	}
-	if _, err := os.Lstat(filepath.Join(repo, "CLAUDE.md")); !os.IsNotExist(err) {
-		t.Fatal("dry-run created bridge")
-	}
-	call("", 0, binary, "agent", "instructions", "setup", repo, "--agent=claude")
-	call("", 0, binary, "agent", "instructions", "status", "--agent=claude", repo)
-	before, err := os.Stat(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	backupsBefore, _ := filepath.Glob(config + ".bak.*")
-	call("", 0, binary, "agent", "instructions", "setup", "--agent=claude", repo)
-	after, _ := os.Stat(config)
-	backupsAfter, _ := filepath.Glob(config + ".bak.*")
-	if !before.ModTime().Equal(after.ModTime()) || len(backupsBefore) != len(backupsAfter) {
-		t.Fatal("repeat setup changed account or created backup")
-	}
-	contents, _ := os.ReadFile(config)
-	if !bytes.Contains(contents, []byte("9007199254740993")) || !bytes.Contains(contents, []byte("printf harmless")) {
-		t.Fatalf("user configuration not preserved: %s", contents)
-	}
-	for name, want := range map[string]string{"CLAUDE.md": "@AGENTS.md\n", "CLAUDE.local.md": "@AGENTS.local.md\n"} {
-		if got, err := os.ReadFile(filepath.Join(repo, name)); err != nil || string(got) != want {
-			t.Fatalf("%s: %q, %v", name, got, err)
-		}
-	}
-	payload, _ := json.Marshal(map[string]string{"cwd": repo, "session_id": "test-session", "source": "startup"})
-	readHookCommand := func(path, event string) string {
-		t.Helper()
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var result struct {
-			Hooks map[string][]struct {
-				Hooks []struct {
-					Command string `json:"command"`
-				} `json:"hooks"`
-			} `json:"hooks"`
-		}
-		if err := json.Unmarshal(data, &result); err != nil {
-			t.Fatal(err)
-		}
-		groups := result.Hooks[event]
-		if len(groups) != 1 || len(groups[0].Hooks) != 1 {
-			t.Fatalf("unexpected %s hook count: %s", event, data)
-		}
-		return groups[0].Hooks[0].Command
-	}
-	if out := call(string(payload), 0, "/bin/sh", "-c", readHookCommand(config, "SessionStart")); len(bytes.TrimSpace(out)) != 0 {
-		t.Fatalf("Claude duplicated native rules: %s", out)
-	}
-	for _, name := range []string{"AGENTS.md", "AGENTS.local.md"} {
-		if err := os.Rename(filepath.Join(repo, name), filepath.Join(repo, name+".saved")); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, operation := range []string{"status", "verify"} {
-		out := call("", 1, binary, "agent", "instructions", operation, repo, "--agent=claude", "--json")
-		var result instructionsReport
-		if err := json.Unmarshal(out, &result); err != nil {
-			t.Fatal(err)
-		}
-		if len(result.Agents) != 1 || result.Agents[0].State != "blocked" || result.Agents[0].Delivery != "not-verified" || !strings.Contains(result.Agents[0].Repository, "instruction sources are missing") {
-			t.Fatalf("missing sources did not block %s before delivery: %s", operation, out)
-		}
-	}
-	for _, name := range []string{"AGENTS.md", "AGENTS.local.md"} {
-		if err := os.Rename(filepath.Join(repo, name+".saved"), filepath.Join(repo, name)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, rel := range []string{"first.local.json", "second.local.json"} {
-		if err := os.WriteFile(filepath.Join(repo, rel), []byte(`{"value":"example"}`), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(repo, ".git", "info", "exclude"), []byte("*.local.json\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	stateBefore, err := os.ReadFile(filepath.Join(repo, ".git", "quota-instructions.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	allResult := call("", 1, binary, "agent", "instructions", "setup", repo, "--local-file=first.local.json", "--agent=all", "--local-file", "second.local.json", "--local-file=first.local.json", "--json")
-	var missing instructionsReport
-	if err := json.Unmarshal(allResult, &missing); err != nil || !strings.Contains(missing.Error, "start Codex native inspection") || missing.Applied != nil {
-		t.Fatalf("missing native CLI was not rejected before writes: %s %v", allResult, err)
-	}
-	if current, err := os.ReadFile(filepath.Join(repo, ".git", "quota-instructions.json")); err != nil || !bytes.Equal(current, stateBefore) {
-		t.Fatal("missing native CLI changed repository state")
-	}
-	if _, err := os.Stat(filepath.Join(repo, "AGENTS.override.md")); !os.IsNotExist(err) {
-		t.Fatal("missing native CLI created merged instructions")
-	}
-	codex, err := exec.LookPath("codex")
-	if err != nil {
-		t.Skip("remaining native setup checks require real Codex CLI")
-	}
-	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if node, err := exec.LookPath("node"); err == nil {
-		if err := os.Symlink(node, filepath.Join(binDir, "node")); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Symlink(codex, filepath.Join(binDir, "codex")); err != nil {
-		t.Fatal(err)
-	}
-	allResult = call("", 0, binary, "agent", "instructions", "setup", repo, "--local-file=first.local.json", "--agent=all", "--local-file", "second.local.json", "--local-file=first.local.json", "--json")
-	stateBytes, err := os.ReadFile(filepath.Join(repo, ".git", "quota-instructions.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var state struct {
-		LocalFiles []string `json:"local_files"`
-	}
-	if err := json.Unmarshal(stateBytes, &state); err != nil || strings.Join(state.LocalFiles, ",") != "first.local.json,second.local.json" {
-		t.Fatalf("repeatable local files were not registered: %+v %v", state, err)
-	}
-	var all struct {
-		Agents []struct{ Agent, State string } `json:"agents"`
-		Error  string                          `json:"error"`
-	}
-	if err := json.Unmarshal(allResult, &all); err != nil {
-		t.Fatal(err)
-	}
-	if all.Error != "" || len(all.Agents) != 2 || all.Agents[0].State != "configured" || all.Agents[1].State != "configured" {
-		t.Fatalf("native CLI setup failed: %s", allResult)
+	if _, err := os.Stat(filepath.Join(home, ".config", "git", "ignore")); !os.IsNotExist(err) {
+		t.Fatal("--no-global-ignore wrote the global ignore file")
 	}
 	if _, err := os.Stat(filepath.Join(home, ".codex", "hooks.json")); !os.IsNotExist(err) {
-		t.Fatal("native Codex setup installed instruction hooks")
+		t.Fatal("--agent=claude touched the Codex account")
 	}
-	merged, err := os.ReadFile(filepath.Join(repo, "AGENTS.override.md"))
-	if err != nil {
+}
+
+func TestInstructionsLocalFileCommands(t *testing.T) {
+	instructionsHome(t)
+	repo := instructionsRepo(t)
+	instructionsWrite(t, filepath.Join(repo, ".gitignore"), "/config/\n")
+	instructionsWrite(t, filepath.Join(repo, "config", "app.json"), "{}\n")
+	code, out, stderr := runInstructions(t, "", "local-file", "list", repo)
+	if code != 0 || !strings.Contains(out, "no registered local files") {
+		t.Fatalf("list: %d %s %s", code, out, stderr)
+	}
+	code, out, stderr = runInstructions(t, "", "local-file", "add", repo, "config/app.json", "--json")
+	if code != 0 {
+		t.Fatalf("add: %d %s %s", code, out, stderr)
+	}
+	var report instructionsReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(merged), "shared rule marker") != 1 || strings.Count(string(merged), "private rule marker") != 1 {
-		t.Fatalf("wrong native instruction content: %q", merged)
+	if report.Operation != "local-file add" || strings.Join(report.LocalFiles, ",") != "config/app.json" {
+		t.Fatalf("add report = %s", out)
 	}
-	for _, event := range []string{"SessionStart", "SubagentStart"} {
-		if out := call(string(payload), 0, binary, "agent", "instructions", "_hook", "--agent=codex", "--event="+event); len(bytes.TrimSpace(out)) != 0 {
-			t.Fatalf("legacy hook duplicated native instructions: %s", out)
-		}
+	if code, out, _ := runInstructions(t, "", "local-file", "add", repo, "config/missing.json"); code == 0 || !strings.Contains(out, "error:") {
+		t.Fatalf("missing source accepted: %d %s", code, out)
 	}
-	call("", 0, binary, "agent", "instructions", "uninstall", repo, "--agent=codex", "--scope=repository")
-	if out := call(string(payload), 0, binary, "agent", "instructions", "_hook", "--agent=codex", "--event=SessionStart"); len(bytes.TrimSpace(out)) != 0 {
-		t.Fatalf("disabled repository still injected: %s", out)
+	if code, out, _ := runInstructions(t, "", "local-file", "add", repo, ".gitignore"); code == 0 {
+		t.Fatalf(".gitignore accepted: %d %s", code, out)
 	}
-	call("", 0, binary, "agent", "instructions", "uninstall", "--scope=account", "--agent=claude")
-	contents, _ = os.ReadFile(config)
-	if bytes.Contains(contents, []byte("instructions")) || !bytes.Contains(contents, []byte("printf harmless")) {
-		t.Fatalf("uninstall ownership: %s", contents)
+	code, out, _ = runInstructions(t, "", "local-file", "list", repo)
+	if code != 0 || !strings.Contains(out, "local file: config/app.json") {
+		t.Fatalf("list after add: %d %s", code, out)
 	}
-	for _, name := range []string{"AGENTS.md", "AGENTS.local.md"} {
-		if _, err := os.Stat(filepath.Join(repo, name)); err != nil {
-			t.Fatalf("source lost: %s: %v", name, err)
-		}
+	code, out, _ = runInstructions(t, "", "local-file", "remove", repo, "config/app.json")
+	if code != 0 || !strings.Contains(out, "no registered local files") {
+		t.Fatalf("remove: %d %s", code, out)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".config", "quota", "agent-overlay.json")); !os.IsNotExist(err) {
-		t.Fatal("dedicated setup generated a generic spec")
+	if _, err := os.Stat(filepath.Join(repo, "config", "app.json")); err != nil {
+		t.Fatal("source file removed")
 	}
+	if entries, _ := filepath.Glob(filepath.Join(repo, ".git", "quota-instructions*")); len(entries) != 0 {
+		t.Fatalf("registration wrote into .git: %v", entries)
+	}
+}
+
+func TestInstructionsPrepareEntryDeliversOnStartup(t *testing.T) {
+	home := instructionsHome(t)
+	instructionsWrite(t, filepath.Join(home, ".config", "git", "ignore"), "AGENTS.override.md\nCLAUDE.local.md\n")
+	repo := instructionsRepo(t)
+	instructionsWrite(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	input := `{"cwd":` + string(mustJSON(repo)) + `,"source":"startup","session_id":"x"}`
+	code, out, stderr := runInstructions(t, input, "_prepare", "--agent=claude", "--event=SessionStart")
+	if code != 0 || stderr != "" || !strings.Contains(out, `"additionalContext":"private body"`) {
+		t.Fatalf("startup: %d %q %q", code, out, stderr)
+	}
+	code, out, stderr = runInstructions(t, input, "_prepare", "--agent=claude", "--event=SessionStart")
+	if code != 0 || out != "" || stderr != "" {
+		t.Fatalf("second startup: %d %q %q", code, out, stderr)
+	}
+	code, out, _ = runInstructions(t, "", "status", repo, "--agent=claude", "--json")
+	var report instructionsReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Agents) != 1 || report.Agents[0].Repository == nil || len(report.Agents[0].Repository.Problems) != 0 || report.Agents[0].State != "blocked" {
+		t.Fatalf("status without account hooks = %s", out)
+	}
+	if !strings.Contains(strings.Join(report.Agents[0].Repository.Generated, "\n"), "CLAUDE.local.md") {
+		t.Fatalf("status did not report remaining generated files = %s", out)
+	}
+	if code == 0 {
+		t.Fatal("status reported success without the account connection")
+	}
+}
+
+func mustJSON(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }

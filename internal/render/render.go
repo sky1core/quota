@@ -55,6 +55,21 @@ func formatError(e any) string {
 	}
 }
 
+func WindowWarnings(data map[string]any) []string {
+	errs, _ := data["windowErrors"].([]string)
+	warnings := append([]string(nil), errs...)
+	modelErrors, _ := data["modelWindowErrors"].(map[string]string)
+	labels := make([]string, 0, len(modelErrors))
+	for label := range modelErrors {
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+	for _, label := range labels {
+		warnings = append(warnings, modelErrors[label])
+	}
+	return warnings
+}
+
 func Text(payload map[string]any) string {
 	errs, _ := payload["errors"].([]any)
 
@@ -89,6 +104,9 @@ func Text(payload map[string]any) string {
 		}
 		if rc, ok := m["resetCredits"].(map[string]any); ok {
 			b.WriteString(fmtResetCredits(rc))
+		}
+		for _, warning := range WindowWarnings(m) {
+			b.WriteString("  Warning: " + warning + "\n")
 		}
 	}
 

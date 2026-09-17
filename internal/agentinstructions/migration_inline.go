@@ -54,12 +54,20 @@ func (r *installTOMLReader) stringEnd() error {
 			continue
 		}
 		if r.b[r.pos] == quote {
-			if !triple {
-				r.pos++
+			if triple {
+				run := 0
+				for r.pos+run < len(r.b) && r.b[r.pos+run] == quote {
+					run++
+				}
+				if run < 3 {
+					r.pos += run
+					continue
+				}
+				r.pos += run
 				return nil
 			}
-			if r.pos+2 < len(r.b) && r.b[r.pos+1] == quote && r.b[r.pos+2] == quote {
-				r.pos += 3
+			if !triple {
+				r.pos++
 				return nil
 			}
 		}

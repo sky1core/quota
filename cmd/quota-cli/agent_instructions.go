@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -12,53 +12,42 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/sky1core/quota/internal/agentinstructions"
 	"github.com/sky1core/quota/internal/overlayruntime"
 )
 
 type instructionAgentReport struct {
-	Agent      string                          `json:"agent"`
-	State      string                          `json:"state"`
-	Delivery   string                          `json:"delivery"`
-	Issues     []string                        `json:"issues,omitempty"`
-	Repository string                          `json:"repositoryCheck,omitempty"`
-	Native     *agentinstructions.NativeReport `json:"native,omitempty"`
+	Agent      string                           `json:"agent"`
+	State      string                           `json:"state"`
+	Delivery   string                           `json:"delivery"`
+	Issues     []string                         `json:"issues,omitempty"`
+	Repository *overlayruntime.RepositoryStatus `json:"repository,omitempty"`
+	Native     *agentinstructions.NativeReport  `json:"native,omitempty"`
 }
 
 type instructionsReport struct {
-	Operation  string                           `json:"operation"`
-	Directory  string                           `json:"directory,omitempty"`
-	Scope      string                           `json:"scope,omitempty"`
-	DryRun     bool                             `json:"dryRun,omitempty"`
-	Plan       *agentinstructions.InstallPlan   `json:"plan,omitempty"`
-	Repository []string                         `json:"repositoryChanges,omitempty"`
-	Applied    *agentinstructions.InstallResult `json:"accountChanges,omitempty"`
-	Agents     []instructionAgentReport         `json:"agents,omitempty"`
-	Error      string                           `json:"error,omitempty"`
+	Operation    string                              `json:"operation"`
+	Directory    string                              `json:"directory,omitempty"`
+	DryRun       bool                                `json:"dryRun,omitempty"`
+	Plan         *agentinstructions.InstallPlan      `json:"plan,omitempty"`
+	GlobalIgnore *agentinstructions.GlobalIgnorePlan `json:"globalIgnore,omitempty"`
+	Applied      *agentinstructions.InstallResult    `json:"accountChanges,omitempty"`
+	LocalFiles   []string                            `json:"localFiles,omitempty"`
+	Agents       []instructionAgentReport            `json:"agents,omitempty"`
+	Error        string                              `json:"error,omitempty"`
 }
 
 func printAgentInstructionsUsage(out io.Writer) {
 	fmt.Fprint(out, `usage:
-  quota-cli agent instructions setup [dir] [--agent=all|claude|codex] [--shared-source=checkout|primary] [--local-file=PATH ...] [--dry-run] [--json]
+  quota-cli agent instructions setup [--agent=all|claude|codex] [--dry-run] [--no-global-ignore] [--json]
+  quota-cli agent instructions uninstall [--agent=all|claude|codex] [--dry-run] [--remove-global-ignore] [--json]
   quota-cli agent instructions status [dir] [--agent=all|claude|codex] [--json]
-  quota-cli agent instructions verify [dir] [--agent=all|claude|codex] [--timeout=10m] [--json]
-  quota-cli agent instructions uninstall [dir] --scope=account|repository [--agent=all|claude|codex] [--dry-run] [--json]
+  quota-cli agent instructions local-file add|remove|list [dir] [PATH ...] [--json]
 
-Manage delivery of AGENTS.md and AGENTS.local.md. verify uses paid CLI model calls.
+Deliver AGENTS.md and AGENTS.local.md to Claude Code and Codex CLI. Repositories are
+prepared automatically at session start.
 `)
-}
-
-type instructionLocalFiles []string
-
-func (files *instructionLocalFiles) String() string { return strings.Join(*files, ", ") }
-func (files *instructionLocalFiles) Set(path string) error {
-	if path == "" {
-		return fmt.Errorf("local-file requires a nonempty relative path")
-	}
-	*files = append(*files, path)
-	return nil
 }
 
 func instructionFlagOrder(fs *flag.FlagSet, args []string) ([]string, error) {
@@ -82,7 +71,7 @@ func instructionFlagOrder(fs *flag.FlagSet, args []string) ([]string, error) {
 		if entry == nil {
 			return nil, fmt.Errorf("unknown option: %s", arg)
 		}
-		if seen[name] && name != "local-file" {
+		if seen[name] {
 			return nil, fmt.Errorf("option repeated: --%s", name)
 		}
 		seen[name] = true
@@ -106,15 +95,15 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	if args[0] == "_hook" {
-		return runInstructionsHook(ctx, args[1:], stdin, stdout, stderr)
-	}
 	operation := args[0]
-	if operation != "setup" && operation != "status" && operation != "verify" && operation != "uninstall" {
-		if operation == "--help" || operation == "-h" {
-			printAgentInstructionsUsage(stdout)
-			return 0
-		}
+	switch operation {
+	case "_prepare":
+		return runInstructionsPrepare(ctx, args[1:], stdin, stdout, stderr)
+	case "--help", "-h":
+		printAgentInstructionsUsage(stdout)
+		return 0
+	case "setup", "uninstall", "status", "local-file":
+	default:
 		fmt.Fprintf(stderr, "unknown agent instructions command: %q\n", operation)
 		printAgentInstructionsUsage(stderr)
 		return 2
@@ -122,24 +111,20 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 	fs := flag.NewFlagSet("quota-cli agent instructions "+operation, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() { printAgentInstructionsUsage(stderr) }
-	agent := fs.String("agent", "all", "Current CLI account: all, claude or codex")
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	var dryRun bool
-	var scope, sharedSource string
-	var localFiles instructionLocalFiles
-	timeout := 10 * time.Minute
-	if operation == "setup" || operation == "uninstall" {
-		fs.BoolVar(&dryRun, "dry-run", false, "Inspect changes without saving")
-	}
-	if operation == "setup" {
-		fs.StringVar(&sharedSource, "shared-source", "", "Shared source: checkout or primary (omitted: keep repository policy)")
-		fs.Var(&localFiles, "local-file", "Register an ignored primary-relative file to copy to linked worktrees; repeat for more files")
-	}
-	if operation == "uninstall" {
-		fs.StringVar(&scope, "scope", "", "Required: account or repository")
-	}
-	if operation == "verify" {
-		fs.DurationVar(&timeout, "timeout", timeout, "Total live verification timeout")
+	agent := "all"
+	var dryRun, noGlobalIgnore, removeGlobalIgnore bool
+	switch operation {
+	case "setup":
+		fs.StringVar(&agent, "agent", "all", "Current CLI account: all, claude or codex")
+		fs.BoolVar(&dryRun, "dry-run", false, "Print the plan without saving")
+		fs.BoolVar(&noGlobalIgnore, "no-global-ignore", false, "Do not add generated file names to the global git ignore file")
+	case "uninstall":
+		fs.StringVar(&agent, "agent", "all", "Current CLI account: all, claude or codex")
+		fs.BoolVar(&dryRun, "dry-run", false, "Print the plan without saving")
+		fs.BoolVar(&removeGlobalIgnore, "remove-global-ignore", false, "Also remove the quota-managed lines from the global git ignore file (requires --agent=all)")
+	case "status":
+		fs.StringVar(&agent, "agent", "all", "Current CLI account: all, claude or codex")
 	}
 	ordered, err := instructionFlagOrder(fs, args[1:])
 	if err == nil {
@@ -152,20 +137,11 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 		fmt.Fprintln(stderr, err)
 		return 2
 	}
-	if fs.NArg() > 1 || (*agent != "all" && *agent != "claude" && *agent != "codex") || timeout <= 0 || (sharedSource != "" && sharedSource != "checkout" && sharedSource != "primary") || (operation == "uninstall" && scope != "account" && scope != "repository") {
+	if agent != "all" && agent != "claude" && agent != "codex" {
 		printAgentInstructionsUsage(stderr)
 		return 2
 	}
-	dir := "."
-	if fs.NArg() == 1 {
-		dir = fs.Arg(0)
-	}
-	dir, err = filepath.Abs(dir)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	report := instructionsReport{Operation: operation, Directory: dir, Scope: scope, DryRun: dryRun}
+	report := instructionsReport{Operation: operation, DryRun: dryRun}
 	finish := func(err error, failed bool) int {
 		if err != nil {
 			report.Error = err.Error()
@@ -179,6 +155,28 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 			return 1
 		}
 		return 0
+	}
+	if operation == "local-file" {
+		return runInstructionsLocalFile(ctx, fs.Args(), &report, finish, stderr)
+	}
+	dir := ""
+	if operation == "status" {
+		if fs.NArg() > 1 {
+			printAgentInstructionsUsage(stderr)
+			return 2
+		}
+		dir = "."
+		if fs.NArg() == 1 {
+			dir = fs.Arg(0)
+		}
+		dir, err = filepath.Abs(dir)
+		if err != nil {
+			return finish(err, true)
+		}
+		report.Directory = dir
+	} else if fs.NArg() != 0 {
+		printAgentInstructionsUsage(stderr)
+		return 2
 	}
 	if err := overlayruntime.ValidateGitEnvironment(ctx); err != nil {
 		return finish(err, true)
@@ -195,56 +193,45 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 	if err != nil {
 		return finish(err, true)
 	}
-	agents := []string{*agent}
-	if *agent == "all" {
+	agents := []string{agent}
+	if agent == "all" {
 		agents = []string{"claude", "codex"}
 	}
 	switch operation {
-	case "setup":
-		if *agent == "all" || *agent == "claude" {
-			settings, err := overlayruntime.PlannedClaudeSettings(ctx, dir, *agent, sharedSource, localFiles...)
-			if err != nil {
-				return finish(err, true)
-			}
-			problems, err := installation.InspectPlannedClaudeRepositoryHooks(ctx, dir, settings)
-			if err != nil {
-				return finish(err, true)
-			}
-			if len(problems) > 0 {
-				return finish(fmt.Errorf("%s", strings.Join(problems, "; ")), true)
-			}
-		}
-		plan, err := installation.Plan(agents, false)
+	case "setup", "uninstall":
+		uninstall := operation == "uninstall"
+		plan, err := installation.Plan(agents, uninstall)
 		report.Plan = &plan
 		if err != nil {
 			return finish(err, true)
 		}
-		var hookRemovals []string
-		for _, change := range plan.Changes {
-			if change.Agent == "codex" && change.Changed {
-				hookRemovals = append(hookRemovals, change.Path)
+		if !uninstall && instructionAgentsInclude(agents, "codex") {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return finish(err, true)
+			}
+			trustChange, err := installation.PlanCodexHookTrust(ctx, cwd, codexHookInstallChanged(plan))
+			if err != nil {
+				return finish(err, true)
+			}
+			if trustChange != nil {
+				plan.Changes = append(plan.Changes, *trustChange)
 			}
 		}
-		accountPaths := make([]string, 0, len(plan.Changes))
-		for _, change := range plan.Changes {
-			accountPaths = append(accountPaths, change.Path)
+		if removeGlobalIgnore && agent != "all" {
+			return finish(fmt.Errorf("--remove-global-ignore requires --agent=all"), true)
 		}
-		var documents overlayruntime.CodexSetupPlan
-		var validated overlayruntime.ValidatedCodexSetup
-		nativeCodex := *agent == "all" || *agent == "codex"
-		if nativeCodex {
-			documents, report.Repository, err = overlayruntime.PlanNativeCodexRepository(ctx, dir, *agent, sharedSource, hookRemovals, accountPaths, localFiles...)
-		} else {
-			report.Repository, err = overlayruntime.PlanRepositoryWithCodexHookRemovals(ctx, dir, *agent, sharedSource, hookRemovals, localFiles...)
+		manageIgnore := !noGlobalIgnore
+		if uninstall {
+			manageIgnore = removeGlobalIgnore
 		}
-		if err != nil {
-			return finish(err, true)
-		}
-		if err := overlayruntime.CheckRepositoryAccountDestinations(ctx, dir, *agent, sharedSource, accountPaths, localFiles...); err != nil {
-			return finish(err, true)
-		}
-		if nativeCodex {
-			validated, err = agentinstructions.PreflightNativeCodex(ctx, documents)
+		if manageIgnore {
+			ignorePath, err := agentinstructions.GlobalIgnorePath(ctx)
+			if err != nil {
+				return finish(err, true)
+			}
+			ignorePlan, err := agentinstructions.PlanGlobalIgnore(ignorePath, uninstall)
+			report.GlobalIgnore = &ignorePlan
 			if err != nil {
 				return finish(err, true)
 			}
@@ -252,69 +239,138 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 		if dryRun {
 			return finish(nil, false)
 		}
-		applyAccount := func() error {
-			result, err := installation.Apply(plan)
-			report.Applied = &result
-			return err
-		}
-		if nativeCodex {
-			err = validated.Apply(ctx, applyAccount)
-		} else {
-			err = overlayruntime.SetupRepositoryWithCodexHookRemovals(ctx, dir, *agent, sharedSource, hookRemovals, localFiles...)
-			if err == nil {
-				err = applyAccount()
-			}
-		}
+		result, err := installation.Apply(plan)
+		report.Applied = &result
 		if err != nil {
 			return finish(err, true)
 		}
-	case "uninstall":
-		if scope == "account" {
-			plan, err := installation.Plan(agents, true)
-			report.Plan = &plan
+		if !uninstall && instructionAgentsInclude(agents, "codex") {
+			cwd, err := os.Getwd()
 			if err != nil {
 				return finish(err, true)
 			}
-			if dryRun {
-				return finish(nil, false)
-			}
-			result, err := installation.Apply(plan)
-			report.Applied = &result
-			return finish(err, err != nil)
-		}
-		if _, err := overlayruntime.ReadRepositoryState(ctx, dir); err != nil {
-			return finish(err, true)
-		}
-		if dryRun {
-			report.Repository = []string{"Disable instruction delivery for " + *agent + " in this Git worktree group; preserve source and user changes"}
-			if err := overlayruntime.ValidateRepositoryUninstall(ctx, dir, *agent); err != nil {
+			trust, err := installation.SyncCodexHookTrust(ctx, cwd)
+			if err != nil {
+				report.Applied.FailedPath = trust.Path
 				return finish(err, true)
 			}
-			return finish(nil, false)
+			if trust.Changed {
+				report.Applied.Unchanged = removePath(report.Applied.Unchanged, trust.Path)
+				report.Applied.Applied = appendUniquePath(report.Applied.Applied, trust.Path)
+			} else if !trust.Skipped && !hasPath(report.Applied.Applied, trust.Path) {
+				report.Applied.Unchanged = appendUniquePath(report.Applied.Unchanged, trust.Path)
+			}
 		}
-		if err := overlayruntime.UninstallRepository(ctx, dir, *agent); err != nil {
-			return finish(err, true)
+		if manageIgnore {
+			if err := report.GlobalIgnore.Apply(); err != nil {
+				return finish(err, true)
+			}
 		}
 		return finish(nil, false)
 	}
 	statuses, failed := inspectInstructions(ctx, installation, dir, agents)
 	report.Agents = statuses
-	if operation != "verify" || failed {
-		return finish(nil, failed)
-	}
-	ctx, deadline := context.WithTimeout(ctx, timeout)
-	defer deadline()
-	for n := range report.Agents {
-		entry := &report.Agents[n]
-		if err := agentinstructions.VerifyCanary(ctx, entry.Agent); err != nil {
-			entry.Delivery = "failed"
-			entry.Issues = append(entry.Issues, err.Error())
-			failed = true
-		} else {
-			entry.Delivery = "verified-new-main-session"
+	return finish(nil, failed)
+}
+
+func instructionAgentsInclude(agents []string, target string) bool {
+	for _, agent := range agents {
+		if agent == target {
+			return true
 		}
 	}
-	return finish(nil, failed)
+	return false
+}
+
+func appendUniquePath(paths []string, path string) []string {
+	if hasPath(paths, path) {
+		return paths
+	}
+	return append(paths, path)
+}
+
+func hasPath(paths []string, path string) bool {
+	for _, existing := range paths {
+		if existing == path {
+			return true
+		}
+	}
+	return false
+}
+
+func removePath(paths []string, path string) []string {
+	out := paths[:0]
+	for _, existing := range paths {
+		if existing != path {
+			out = append(out, existing)
+		}
+	}
+	return out
+}
+
+func codexHookInstallChanged(plan agentinstructions.InstallPlan) bool {
+	for _, change := range plan.Changes {
+		if change.Agent == "codex" && change.Operation == "install" && change.Changed {
+			return true
+		}
+	}
+	return false
+}
+
+func runInstructionsLocalFile(ctx context.Context, operands []string, report *instructionsReport, finish func(error, bool) int, stderr io.Writer) int {
+	if len(operands) == 0 {
+		printAgentInstructionsUsage(stderr)
+		return 2
+	}
+	action, operands := operands[0], operands[1:]
+	report.Operation = "local-file " + action
+	dir := "."
+	switch action {
+	case "list":
+		if len(operands) > 1 {
+			printAgentInstructionsUsage(stderr)
+			return 2
+		}
+		if len(operands) == 1 {
+			dir = operands[0]
+		}
+	case "add", "remove":
+		if len(operands) >= 2 {
+			if info, err := os.Stat(operands[0]); err == nil && info.IsDir() {
+				dir, operands = operands[0], operands[1:]
+			}
+		}
+		if len(operands) == 0 {
+			fmt.Fprintln(stderr, "local-file "+action+" requires at least one PATH")
+			return 2
+		}
+		for _, path := range operands {
+			if path == "" || strings.HasPrefix(path, "-") {
+				fmt.Fprintf(stderr, "invalid local file path %q\n", path)
+				return 2
+			}
+		}
+	default:
+		fmt.Fprintf(stderr, "unknown local-file action: %q\n", action)
+		printAgentInstructionsUsage(stderr)
+		return 2
+	}
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return finish(err, true)
+	}
+	report.Directory = dir
+	var files []string
+	switch action {
+	case "list":
+		files, err = overlayruntime.ListLocalFiles(ctx, dir)
+	case "add":
+		files, err = overlayruntime.AddLocalFiles(ctx, dir, operands)
+	case "remove":
+		files, err = overlayruntime.RemoveLocalFiles(ctx, dir, operands)
+	}
+	report.LocalFiles = files
+	return finish(err, err != nil)
 }
 
 func inspectInstructions(ctx context.Context, installation *agentinstructions.Installation, dir string, agents []string) ([]instructionAgentReport, bool) {
@@ -324,65 +380,37 @@ func inspectInstructions(ctx context.Context, installation *agentinstructions.In
 		return []instructionAgentReport{{State: "unknown", Delivery: "not-verified", Issues: []string{err.Error()}}}, true
 	}
 	failed := false
-	state, stateErr := overlayruntime.ReadRepositoryState(ctx, dir)
 	for _, status := range statuses {
 		r := instructionAgentReport{Agent: status.Agent, State: "configured", Delivery: "not-verified", Issues: append([]string(nil), status.Problems...)}
 		if !status.Configured {
 			r.State = "blocked"
 		}
-		if stateErr != nil {
-			r.State = "blocked"
-			r.Issues = append(r.Issues, stateErr.Error())
-		} else if state.Disabled[status.Agent] {
-			r.State = "disabled"
-			r.Issues = append(r.Issues, "Instruction delivery is disabled for this repository")
-		}
-		var activeHookFiles map[string][]string
+		var options overlayruntime.CheckOptions
 		if status.Agent == "codex" {
 			native, err := agentinstructions.InspectNativeCodex(ctx, dir, installation.ExpectedCodexHooks())
 			r.Native = &native
-			if r.State == "configured" && (err != nil || native.State != "configured") {
-				r.State = native.State
-			}
 			if err != nil {
 				r.Issues = append(r.Issues, err.Error())
+				if r.State == "configured" {
+					r.State = "unknown"
+				}
 			} else {
-				documents, planErr := overlayruntime.PlanCodexDocuments(ctx, dir, "codex", "")
-				if planErr == nil {
-					var validated overlayruntime.ValidatedCodexSetup
-					validated, planErr = agentinstructions.PreflightNativeCodex(ctx, documents)
-					activeHookFiles = validated.ActiveHookFiles
-				}
-				if planErr != nil {
-					var discoveryErr *agentinstructions.NativeCodexDiscoveryError
-					if errors.As(planErr, &discoveryErr) {
-						r.Native.State = "unknown"
-						if r.State != "blocked" && r.State != "disabled" {
-							r.State = "unknown"
-						}
-					} else {
-						r.State = "blocked"
-					}
-					r.Issues = append(r.Issues, planErr.Error())
+				options.CodexProjectDocMaxBytes = native.ProjectDocMaxBytes
+				if r.State == "configured" && native.State != "configured" {
+					r.State = native.State
 				}
 			}
 		}
-		var output bytes.Buffer
-		var code int
-		if status.Agent == "codex" {
-			var err error
-			code, err = overlayruntime.CheckRepositoryWithNativeCodexSettings(ctx, dir, activeHookFiles, &output)
-			if err != nil {
-				fmt.Fprintln(&output, err)
-			}
-		} else {
-			code = overlayruntime.Run(ctx, []string{"check", "--runtime=" + status.Agent, dir}, nil, &output, &output)
-		}
-		if code != 0 {
+		repository, err := overlayruntime.CheckRepository(ctx, dir, status.Agent, options)
+		if err != nil {
 			r.State = "blocked"
-			r.Issues = append(r.Issues, "Repository instruction checks failed")
+			r.Issues = append(r.Issues, err.Error())
+		} else {
+			r.Repository = &repository
+			if len(repository.Problems) > 0 {
+				r.State = "blocked"
+			}
 		}
-		r.Repository = strings.TrimSpace(output.String())
 		if status.Agent == "claude" {
 			problems, err := installation.InspectClaudeRepositoryHooks(ctx, dir)
 			if err != nil {
@@ -393,7 +421,7 @@ func inspectInstructions(ctx context.Context, installation *agentinstructions.In
 				r.Issues = append(r.Issues, problems...)
 			}
 		}
-
+		r.Issues = uniqueIssues(r.Issues)
 		if r.State != "configured" {
 			failed = true
 		}
@@ -402,25 +430,53 @@ func inspectInstructions(ctx context.Context, installation *agentinstructions.In
 	return reports, failed
 }
 
-func printInstructionsReport(out io.Writer, r instructionsReport) {
-	fmt.Fprintf(out, "instructions %s: %s\n", r.Operation, r.Directory)
-	if r.Scope != "" {
-		fmt.Fprintf(out, "scope: %s\n", r.Scope)
+func uniqueIssues(issues []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, issue := range issues {
+		if !seen[issue] {
+			seen[issue] = true
+			out = append(out, issue)
+		}
 	}
+	return out
+}
+
+func printInstructionsReport(out io.Writer, r instructionsReport) {
+	fmt.Fprintf(out, "instructions %s", r.Operation)
+	if r.Directory != "" {
+		fmt.Fprintf(out, ": %s", r.Directory)
+	}
+	fmt.Fprintln(out)
 	if r.DryRun {
-		fmt.Fprintln(out, "dry-run: no source, managed, or account configuration files changed; provider startup may update runtime caches")
+		fmt.Fprintln(out, "dry-run: no account configuration or ignore files changed")
 	}
 	if r.Plan != nil {
 		for _, change := range r.Plan.Changes {
 			fmt.Fprintf(out, "%s: %s: %s (change=%t)\n", change.Agent, change.Operation, change.Path, change.Changed)
 		}
 	}
-	for _, change := range r.Repository {
-		fmt.Fprintln(out, change)
+	if r.GlobalIgnore != nil {
+		fmt.Fprintf(out, "global ignore: %s (change=%t", r.GlobalIgnore.Path, r.GlobalIgnore.Changed)
+		if len(r.GlobalIgnore.Add) > 0 {
+			fmt.Fprintf(out, "; add %s", strings.Join(r.GlobalIgnore.Add, ", "))
+		}
+		if len(r.GlobalIgnore.Remove) > 0 {
+			fmt.Fprintf(out, "; remove %s", strings.Join(r.GlobalIgnore.Remove, ", "))
+		}
+		fmt.Fprintln(out, ")")
 	}
 	if r.Applied != nil {
 		for _, path := range r.Applied.Applied {
 			fmt.Fprintln(out, "saved:", path)
+		}
+	}
+	if strings.HasPrefix(r.Operation, "local-file") && r.Error == "" {
+		if len(r.LocalFiles) == 0 {
+			fmt.Fprintln(out, "no registered local files")
+		}
+		for _, path := range r.LocalFiles {
+			fmt.Fprintln(out, "local file:", path)
 		}
 	}
 	for _, agent := range r.Agents {
@@ -428,8 +484,16 @@ func printInstructionsReport(out io.Writer, r instructionsReport) {
 		for _, issue := range agent.Issues {
 			fmt.Fprintln(out, "  "+issue)
 		}
-		if agent.Repository != "" {
-			fmt.Fprintln(out, agent.Repository)
+		if agent.Repository != nil {
+			for _, path := range agent.Repository.Generated {
+				fmt.Fprintln(out, "  generated: "+path)
+			}
+			for _, problem := range agent.Repository.Problems {
+				fmt.Fprintln(out, "  FAIL: "+problem)
+			}
+			for _, warning := range agent.Repository.Warnings {
+				fmt.Fprintln(out, "  WARN: "+warning)
+			}
 		}
 		if agent.Native != nil {
 			for _, issue := range agent.Native.Issues {
@@ -442,8 +506,8 @@ func printInstructionsReport(out io.Writer, r instructionsReport) {
 	}
 }
 
-func runInstructionsHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("quota-cli agent instructions _hook", flag.ContinueOnError)
+func runInstructionsPrepare(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("quota-cli agent instructions _prepare", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	agent := fs.String("agent", "", "Agent")
 	event := fs.String("event", "", "Event")
@@ -462,27 +526,28 @@ func runInstructionsHook(ctx context.Context, args []string, stdin io.Reader, st
 		fmt.Fprintln(stderr, "instruction hooks do not accept positional arguments")
 		return 2
 	}
-	var command []string
-	switch {
-	case *agent == "claude" && *event == "SessionStart":
-		command = []string{"json", *event, "CLAUDE.md", "CLAUDE.local.md", ".", "claude-session"}
-	case *agent == "claude" && *event == "WorktreeCreate":
-		if err := overlayruntime.CreateWorktreeWithNativeCodexPreflight(ctx, stdin, stdout, agentinstructions.PreflightNativeCodex); err != nil {
-			fmt.Fprintf(stderr, "quota-cli agent instructions: %v\n", err)
-			return 1
-		}
-		return 0
-	case *agent == "claude" && *event == "WorktreeRemove":
-		command = []string{"claude-worktree-remove"}
-	case *agent == "codex" && (*event == "SessionStart" || *event == "SubagentStart"):
-		policy := "codex-session"
-		if *event == "SubagentStart" {
-			policy = "codex-subagent"
-		}
-		command = []string{"json", *event, "AGENTS.md", "-", ".", policy}
-	default:
-		fmt.Fprintln(stderr, "unsupported instruction agent/event combination")
-		return 2
+	input, err := io.ReadAll(io.LimitReader(stdin, 1<<20+1))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
-	return overlayruntime.Run(ctx, command, stdin, stdout, stderr)
+	options := prepareHookOptions(ctx, *agent, *event, input)
+	return overlayruntime.RunPrepareHookWithOptions(ctx, *agent, *event, bytes.NewReader(input), stdout, stderr, options)
+}
+
+func prepareHookOptions(ctx context.Context, agent, event string, input []byte) overlayruntime.PrepareHookOptions {
+	if agent != "codex" || event != "SessionStart" {
+		return overlayruntime.PrepareHookOptions{}
+	}
+	var h struct {
+		CWD string `json:"cwd"`
+	}
+	if err := json.Unmarshal(input, &h); err != nil || h.CWD == "" {
+		return overlayruntime.PrepareHookOptions{}
+	}
+	native, err := agentinstructions.InspectNativeCodexConfig(ctx, h.CWD)
+	if err != nil {
+		return overlayruntime.PrepareHookOptions{CodexNativeIssues: []string{"could not inspect effective Codex config: " + err.Error()}}
+	}
+	return overlayruntime.PrepareHookOptions{CodexProjectDocMaxBytes: native.ProjectDocMaxBytes, CodexNativeIssues: native.Issues}
 }

@@ -332,8 +332,8 @@ func (d quotaData) hasWindows(prefix string) bool {
 
 func (d quotaData) applyResult(provider string, claude bool, data map[string]any) {
 	d.applyWindows(provider, data)
-	if we, ok := data["windowErrors"].([]string); ok && len(we) > 0 {
-		d.warns[provider] = strings.Join(we, "; ")
+	if warnings := render.WindowWarnings(data); len(warnings) > 0 {
+		d.warns[provider] = strings.Join(warnings, "; ")
 	}
 	if !claude {
 		if rc, ok := data["resetCredits"].(map[string]any); ok {
@@ -350,6 +350,15 @@ func refreshAccepted(d quotaData, p string) bool {
 		return false
 	}
 	return true
+}
+
+func quotaDiagnosticText(label, msg string) (title, tooltip string) {
+	tooltip = label + ": " + msg
+	runes := []rune(msg)
+	if len(runes) > 120 {
+		msg = string(runes[:120]) + "…"
+	}
+	return "  " + label + ": " + msg, tooltip
 }
 
 func acceptFetch(data quotaData, lastOK *quotaData, lastSuccessAt map[string]time.Time, providers, allKeys, codexKeys []string, now time.Time) {
@@ -972,12 +981,12 @@ func onReady() {
 				label, msg = "Warning", w
 			}
 			if msg != "" {
-				if len(msg) > 120 {
-					msg = msg[:120] + "…"
-				}
-				item.SetTitle("  " + label + ": " + msg)
+				title, tooltip := quotaDiagnosticText(label, msg)
+				item.SetTitle(title)
+				item.SetTooltip(tooltip)
 				item.Show()
 			} else {
+				item.SetTooltip("")
 				item.Hide()
 			}
 		}

@@ -100,10 +100,6 @@ func GetQuotaForConfigDir(timeout time.Duration, configDir string, maxAge time.D
 	return result, nil
 }
 
-func InvalidateCacheForConfigDir(configDir string) {
-	quotacache.Delete(claudeCacheKey(configDir))
-}
-
 // earliestReset returns the soonest reset instant among a parsed result's
 // windows, or the zero time when none carry one. It bounds the shared-cache
 // entry: once the soonest window has reset, the cached raw is pre-reset and must

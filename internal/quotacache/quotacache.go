@@ -73,24 +73,6 @@ func Put(key, raw string, validUntil time.Time) {
 	save(m)
 }
 
-func Delete(key string) {
-	p := path()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return
-	}
-	unlock, err := lock(p + ".lock")
-	if err != nil {
-		return
-	}
-	defer unlock()
-	m := load()
-	if _, ok := m[key]; !ok {
-		return
-	}
-	delete(m, key)
-	save(m)
-}
-
 func load() map[string]entry {
 	b, err := os.ReadFile(path())
 	if err != nil {

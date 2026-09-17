@@ -214,10 +214,6 @@ func GetQuotaForHome(timeout time.Duration, codexHome string, maxAge time.Durati
 	return out, nil
 }
 
-func InvalidateCacheForHome(codexHome string) {
-	quotacache.Delete(codexCacheKey(codexHome))
-}
-
 func parseCachedQuota(raw string) (map[string]any, error) {
 	var rr rateLimitsResponse
 	if err := json.Unmarshal([]byte(raw), &rr); err != nil {

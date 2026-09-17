@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -34,6 +35,17 @@ func TestAgentHooksInitListVerifyEval(t *testing.T) {
 	if !strings.Contains(stdout.String(), "github-history-guard enabled=true") {
 		t.Fatalf("list stdout = %q", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "groups=2") {
+		t.Fatalf("list stdout missing groups: %q", stdout.String())
+	}
+	for _, want := range []string{
+		"group remote-code-ref-mutation:",
+		"group github-collaboration-metadata:",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("list stdout missing %q: %q", want, stdout.String())
+		}
+	}
 
 	stdout.Reset()
 	stderr.Reset()
@@ -43,6 +55,25 @@ func TestAgentHooksInitListVerifyEval(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "FAIL") {
 		t.Fatalf("verify stdout contains failure:\n%s", stdout.String())
+	}
+	for _, want := range []string{
+		"github-history-guard/remote-code-ref-mutation/deny git push",
+		"github-history-guard/remote-code-ref-mutation/deny git bisect run",
+		"github-history-guard/remote-code-ref-mutation/deny gh pr close delete branch",
+		"github-history-guard/remote-code-ref-mutation/deny gh repo create",
+		"github-history-guard/remote-code-ref-mutation/deny gh workflow run",
+		"github-history-guard/remote-code-ref-mutation/deny gh agent task create",
+		"github-history-guard/remote-code-ref-mutation/deny gh codespace ssh",
+		"github-history-guard/remote-code-ref-mutation/deny gh pr merge",
+		"github-history-guard/github-collaboration-metadata/allow pr close without branch delete",
+		"github-history-guard/github-collaboration-metadata/allow pr comment",
+		"github-history-guard/github-collaboration-metadata/allow issue edit",
+		"github-history-guard/github-collaboration-metadata/allow issue view",
+		"github-history-guard/github-collaboration-metadata/allow gh stack link ints",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("verify stdout missing %q:\n%s", want, stdout.String())
+		}
 	}
 
 	stdout.Reset()
@@ -497,5 +528,90 @@ func TestAgentHooksApplyAllPreservesPartialDiagnostics(t *testing.T) {
 	}
 	if !agenthooks.Detect("codex", binary, policyDir).Present {
 		t.Fatal("Codex was not installed")
+	}
+}
+
+func TestAgentHooksEvalWrapperOptionTablesFailClosed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	policyDir := filepath.Join(home, "policies")
+	policy, err := agenthooks.Preset(agenthooks.PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agenthooks.SavePolicy(policyDir, policy, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		command string
+		code    int
+	}{
+		{"exec -a quota git push", 2},
+		{"exec -aquota git push", 2},
+		{"exec -caquota git push", 2},
+		{"exec -cc -l bash -c true", 2},
+		{"exec -l git status", 0},
+		{"command -pp git push", 2},
+		{"command -p git status", 0},
+		{`bash +c -e "git push"`, 2},
+		{`bash -c -e "git push"`, 2},
+		{`bash -h script.sh`, 2},
+		{`bash -c "if"`, 2},
+		{`env -S "'unterminated"`, 2},
+		{`bash -c "git status"`, 0},
+	} {
+		t.Run(tt.command, func(t *testing.T) {
+			input := `{"tool_input":{"command":` + strconv.Quote(tt.command) + `}}`
+			var stdout, stderr bytes.Buffer
+			code := agentHooksEval([]string{"--policy-dir", policyDir}, strings.NewReader(input), &stdout, &stderr)
+			if code != tt.code {
+				t.Fatalf("eval code = %d want %d stderr=%s", code, tt.code, stderr.String())
+			}
+		})
+	}
+}
+
+func TestAgentHooksEvalUndecidableWrappersWithAllowOnlyPolicy(t *testing.T) {
+	policyDir := t.TempDir()
+	policy := agenthooks.Policy{
+		Version: agenthooks.PolicyVersion,
+		ID:      "allow-only",
+		Enabled: true,
+		Rules: []agenthooks.Rule{{
+			ID:     "allow-git-status",
+			Effect: agenthooks.EffectAllow,
+			Match: agenthooks.Match{Argv: []agenthooks.ArgPattern{
+				{Exact: "git"}, {Exact: "status"},
+			}},
+		}},
+	}
+	if _, err := agenthooks.SavePolicy(policyDir, policy, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		command string
+		code    int
+	}{
+		{`env --unknown git status`, 2},
+		{`git --unknown status`, 2},
+		{`git commit --unknown`, 2},
+		{`git tag -m`, 2},
+		{`git branch --format`, 2},
+		{`git unknown-helper`, 2},
+		{`git "$subcommand"`, 2},
+		{`sudo --unknown git status`, 2},
+		{`bash --unknown -c "git status"`, 2},
+		{`bash -c "if"`, 2},
+		{`env -S "'unterminated"`, 2},
+		{`bash -c "git status"`, 0},
+	} {
+		t.Run(tt.command, func(t *testing.T) {
+			input := `{"tool_input":{"command":` + strconv.Quote(tt.command) + `}}`
+			var stdout, stderr bytes.Buffer
+			code := agentHooksEval([]string{"--policy-dir", policyDir}, strings.NewReader(input), &stdout, &stderr)
+			if code != tt.code {
+				t.Fatalf("eval code = %d want %d stderr=%s", code, tt.code, stderr.String())
+			}
+		})
 	}
 }

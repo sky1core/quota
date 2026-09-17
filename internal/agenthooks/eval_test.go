@@ -20,6 +20,64 @@ func TestGitHubHistoryGuardPresetTestsPass(t *testing.T) {
 	}
 }
 
+func TestGitHubHistoryGuardPresetGroups(t *testing.T) {
+	policy, err := Preset(PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := map[string]bool{}
+	for _, group := range policy.Groups {
+		groups[group.ID] = true
+	}
+	for _, group := range []string{PolicyGroupRemoteCodeRefMutation, PolicyGroupGitHubCollaborationMetadata} {
+		if !groups[group] {
+			t.Fatalf("missing group %s", group)
+		}
+	}
+	for _, rule := range policy.Rules {
+		if rule.Group != PolicyGroupRemoteCodeRefMutation {
+			t.Fatalf("rule %s group = %q, want %q", rule.ID, rule.Group, PolicyGroupRemoteCodeRefMutation)
+		}
+	}
+	wantTests := map[string]string{
+		"deny git push":                        PolicyGroupRemoteCodeRefMutation,
+		"deny git bisect run":                  PolicyGroupRemoteCodeRefMutation,
+		"deny git submodule foreach":           PolicyGroupRemoteCodeRefMutation,
+		"deny gh pr merge":                     PolicyGroupRemoteCodeRefMutation,
+		"deny gh pr update branch":             PolicyGroupRemoteCodeRefMutation,
+		"deny gh issue develop":                PolicyGroupRemoteCodeRefMutation,
+		"deny gh pr revert":                    PolicyGroupRemoteCodeRefMutation,
+		"deny gh pr close delete branch":       PolicyGroupRemoteCodeRefMutation,
+		"deny gh repo create":                  PolicyGroupRemoteCodeRefMutation,
+		"deny gh repo fork":                    PolicyGroupRemoteCodeRefMutation,
+		"deny gh repo delete":                  PolicyGroupRemoteCodeRefMutation,
+		"deny gh repo deploy key add write":    PolicyGroupRemoteCodeRefMutation,
+		"deny gh workflow run":                 PolicyGroupRemoteCodeRefMutation,
+		"deny gh run rerun":                    PolicyGroupRemoteCodeRefMutation,
+		"deny gh agent task create":            PolicyGroupRemoteCodeRefMutation,
+		"deny gh codespace ssh":                PolicyGroupRemoteCodeRefMutation,
+		"deny gh stack other":                  PolicyGroupRemoteCodeRefMutation,
+		"allow pr create":                      PolicyGroupGitHubCollaborationMetadata,
+		"allow pr close without branch delete": PolicyGroupGitHubCollaborationMetadata,
+		"allow pr comment":                     PolicyGroupGitHubCollaborationMetadata,
+		"allow issue comment":                  PolicyGroupGitHubCollaborationMetadata,
+		"allow issue edit":                     PolicyGroupGitHubCollaborationMetadata,
+		"allow issue view":                     PolicyGroupGitHubCollaborationMetadata,
+		"allow gh stack link ints":             PolicyGroupGitHubCollaborationMetadata,
+	}
+	for _, test := range policy.Tests {
+		if want, ok := wantTests[test.Name]; ok {
+			if test.Group != want {
+				t.Fatalf("test %s group = %q, want %q", test.Name, test.Group, want)
+			}
+			delete(wantTests, test.Name)
+		}
+	}
+	if len(wantTests) > 0 {
+		t.Fatalf("missing grouped tests: %+v", wantTests)
+	}
+}
+
 func TestRunPolicyTestsSkipsDisabledPolicies(t *testing.T) {
 	policy, err := Preset(PresetGitHubHistoryGuard)
 	if err != nil {
@@ -105,9 +163,9 @@ func TestGhConfigWrapperCanChangeCommandDispatch(t *testing.T) {
 }
 
 func TestNormalizeEnvSudoWrapper(t *testing.T) {
-	norm, _, _ := normalizeArgv([]string{"env", "FOO=bar", "sudo", "--preserve-env=GH_CONFIG_DIR", "gh", "pr", "view", "12"})
-	if !reflect.DeepEqual(norm, []string{"gh", "pr", "view", "12"}) {
-		t.Fatalf("norm = %q", norm)
+	invocations, err := ParseShellInvocations("env FOO=bar sudo --preserve-env=GH_CONFIG_DIR gh pr view 12")
+	if err != nil || len(invocations) != 1 || !reflect.DeepEqual(invocations[0].Argv, []string{"gh", "pr", "view", "12"}) {
+		t.Fatalf("invocations = %v, err = %v", invocations, err)
 	}
 }
 
@@ -233,6 +291,58 @@ func TestEvaluateAllowRuleDoesNotShortCircuitCompound(t *testing.T) {
 	}
 }
 
+func TestLiteralProtectedCommandDeny(t *testing.T) {
+	policy, err := Preset(PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		`echo git push`,
+		`echo 'git push'`,
+		`rg "git push"`,
+		`custom-tool git push`,
+		`git status; foo git push origin main`,
+		`gh pr view 12; echo 'git push origin main'`,
+		`bash -n -c 'git push'`,
+	} {
+		decision, err := EvaluateCommand([]Policy{policy}, command)
+		if err != nil || decision.Allowed || decision.RuleID != "deny-git-push" {
+			t.Fatalf("%s: decision = %+v err=%v, want deny-git-push", command, decision, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		command string
+		ruleID  string
+	}{
+		{`echo 'git commit --amend'`, "deny-git-commit-amend"},
+		{`echo 'gh pr close 23 --delete-branch'`, "deny-gh-pr-close-delete-branch"},
+		{`rg 'gh repo create --push'`, "deny-gh-repo-create"},
+		{`echo 'gh repo deploy-key add --allow-write'`, "deny-gh-repo-deploy-key-add-write"},
+		{`echo 'gh stack unlink 123 456'`, "deny-gh-stack-except-link-two-ints"},
+		{`echo 'gh stack link 123 456' 'gh stack unlink 123 456'`, "deny-gh-stack-except-link-two-ints"},
+	} {
+		decision, err := EvaluateCommand([]Policy{policy}, tc.command)
+		if err != nil || decision.Allowed || decision.RuleID != tc.ruleID {
+			t.Fatalf("%s: decision = %+v err=%v, want %s", tc.command, decision, err, tc.ruleID)
+		}
+	}
+
+	for _, command := range []string{
+		`echo git pushy`,
+		`echo notgit push`,
+		`echo gitpush`,
+		`echo 'gh pr close 23 --comment ok'`,
+		`echo 'gh stack link 123 456'`,
+		`gh pr create --title ok --body 'git push origin main'`,
+	} {
+		decision, err := EvaluateCommand([]Policy{policy}, command)
+		if err != nil || !decision.Allowed {
+			t.Fatalf("%s: decision = %+v err=%v, want allow", command, decision, err)
+		}
+	}
+}
+
 func TestGitCommitFlagValuesThroughHookEvent(t *testing.T) {
 	policy, err := Preset(PresetGitHubHistoryGuard)
 	if err != nil {
@@ -347,18 +457,18 @@ func TestEvaluateCommandEmptyCommitArgs(t *testing.T) {
 		{`git commit --trailer '' --amend`, false},
 		{`git commit -F '' --amend`, false},
 		{`sh -c 'git commit -m "" --amend'`, false},
-		{`sh -c '' 'git commit --amend'`, true},
+		{`sh -c '' 'git commit --amend'`, false},
 		{`env -S 'git commit -m' '' --amend`, false},
 		{`env -S 'git commit --allow-empty-message -m' ''`, true},
 		{`env -S 'git commit -m' 'message --amend'`, true},
 		{`command env -S 'git commit -m' '' --amend`, false},
 		{`eval 'git commit -m' '' --amend`, true},
 		{`command eval 'git commit -m' '' --amend`, true},
-		{`'' git commit --amend`, true},
-		{`command '' git commit --amend`, true},
-		{`env '' git commit --amend`, true},
-		{`exec -a '' '' git commit --amend`, true},
-		{`sudo -p '' '' git commit --amend`, true},
+		{`'' git commit --amend`, false},
+		{`command '' git commit --amend`, false},
+		{`env '' git commit --amend`, false},
+		{`exec -a '' '' git commit --amend`, false},
+		{`sudo -p '' '' git commit --amend`, false},
 	} {
 		t.Run(tt.command, func(t *testing.T) {
 			decision, err := EvaluateCommand([]Policy{policy}, tt.command)
@@ -458,5 +568,256 @@ func TestRecursiveShellParsingPreservesStartupEnvironment(t *testing.T) {
 				t.Fatalf("decision=%+v error=%v, want allowed=%v", got, err, tc.allowed)
 			}
 		})
+	}
+}
+
+func TestWrapperFamilyOptionTables(t *testing.T) {
+	policy, err := Preset(PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type row struct {
+		command string
+		allowed bool
+	}
+	families := map[string][]row{
+		"command": {
+			{`command git status`, true},
+			{`command -p git status`, true},
+			{`command -- git status`, true},
+			{`command -- git push`, false},
+			{`command -pp git push`, false},
+			{`command -pp git status`, false},
+			{`command -x git status`, false},
+		},
+		"builtin": {
+			{`builtin git status`, true},
+			{`builtin git push`, false},
+			{`builtin -- echo ok`, true},
+			{`builtin -- git push`, false},
+			{`builtin -x git status`, false},
+		},
+		"exec": {
+			{`exec git status`, true},
+			{`exec -l git status`, true},
+			{`exec -cl git status`, true},
+			{`exec -a quota git status`, true},
+			{`exec -aquota git status`, true},
+			{`exec -- git status`, true},
+			{`exec -- git push`, false},
+			{`exec -a quota git push`, false},
+			{`exec -aquota git push`, false},
+			{`exec -caquota git push`, false},
+			{`exec -cc -l bash -c true`, false},
+			{`exec -a -bash bash -c true`, false},
+			{`exec -z git status`, false},
+			{`exec --clean git status`, false},
+			{`exec -a`, false},
+		},
+		"env": {
+			{`env git status`, true},
+			{`env -i git status`, true},
+			{`env -iu EXAMPLE git status`, true},
+			{`env EXAMPLE=value -- git status`, true},
+			{`env -- git status`, true},
+			{`env -- git push`, false},
+			{`env -q git status`, false},
+			{`env --unknown git status`, false},
+			{`git --unknown status`, false},
+			{`gh --unknown pr view 123`, false},
+			{`bash -c "$SCRIPT"`, false},
+			{`env -u`, false},
+			{`env -S`, false},
+		},
+		"sudo": {
+			{`sudo git status`, true},
+			{`sudo -n git status`, true},
+			{`sudo -h`, true},
+			{`sudo -u nobody git status`, true},
+			{`sudo -nu nobody git status`, true},
+			{`sudo -- git status`, true},
+			{`sudo -- git push`, false},
+			{`sudo -h host git push`, false},
+			{`sudo -Z git status`, false},
+			{`sudo --unknown git status`, false},
+			{`sudo -u`, false},
+			{`sudo -E git status`, false},
+			{`sudo -i bash -c true`, false},
+			{`sudo -s "git push"`, false},
+			{`sudo -i "git push"`, false},
+			{`sudo --shell "git push"`, false},
+			{`sudo --login "git push"`, false},
+		},
+		"nohup": {
+			{`nohup git status`, true},
+			{`nohup -- git status`, true},
+			{`nohup -- git push`, false},
+			{`nohup --unknown git status`, false},
+		},
+		"nice": {
+			{`nice -n 5 git status`, true},
+			{`nice -n 5 -- git status`, true},
+			{`nice -n 5 -- git push`, false},
+			{`nice --unknown git status`, false},
+			{`nice -n`, false},
+		},
+		"timeout": {
+			{`timeout 5 git status`, true},
+			{`timeout -- 5 git status`, true},
+			{`timeout -- 5 git push`, false},
+			{`timeout --unknown 5 git status`, false},
+		},
+		"eval": {
+			{`eval 'git status'`, true},
+			{`eval 'git push'`, false},
+			{`eval -- 'git push'`, false},
+			{`eval -- 'git status'`, true},
+			{`eval --unknown 'git status'`, false},
+			{`eval 'exec -z git status'`, false},
+		},
+		"shell": {
+			{`bash +c -e "git push"`, false},
+			{`bash -c -e "git push"`, false},
+			{`bash -h script.sh`, false},
+			{`bash -n script.sh`, false},
+			{`dash -n script.sh`, false},
+			{`bash -n -c 'git push'`, false},
+			{`bash -o noexec -c 'git push'`, false},
+			{`bash -D -c 'git push'`, false},
+			{`bash +D -c 'git push'`, false},
+			{`bash -D +n -c 'git push'`, false},
+			{`ksh -D -c 'git push'`, false},
+			{`bash --dump-strings -c 'git push'`, false},
+			{`bash --dump-po-strings -c 'git push'`, false},
+			{`bash -n +n -c 'git push'`, false},
+			{`bash -n +o noexec script.sh`, false},
+			{`bash -c 'git push' -n`, false},
+			{`bash -c "if"`, false},
+			{`env -S "'unterminated"`, false},
+			{`bash -c "git status"`, true},
+			{`sh -c 'git status'`, true},
+			{`zsh -D -c 'git status'`, true},
+			{`dash -I -c 'git status'`, true},
+			{`bash -e -c 'git status'`, true},
+			{`bash -eo pipefail -c 'git status'`, true},
+			{`bash --norc -c 'git status'`, true},
+			{`sh -c 'git push'`, false},
+			{`zsh -D -c 'git push'`, false},
+			{`dash -I -c 'git push'`, false},
+			{`bash -- -c 'git status'`, false},
+			{`bash -z -c 'git status'`, false},
+			{`bash --unknown -c 'git status'`, false},
+			{`bash -c`, false},
+			{`bash -l -c true`, false},
+			{`bash -i -c true`, false},
+			{`bash --rcfile x -c true`, false},
+			{`bash script.sh`, false},
+		},
+	}
+	for family, rows := range families {
+		for _, tt := range rows {
+			t.Run(family+"/"+tt.command, func(t *testing.T) {
+				decision, err := EvaluateCommand([]Policy{policy}, tt.command)
+				if err != nil || decision.Allowed != tt.allowed {
+					t.Fatalf("decision = %+v, err = %v, want allowed=%v", decision, err, tt.allowed)
+				}
+			})
+		}
+	}
+}
+
+func TestEvaluateUndecidableWrappersWithAllowOnlyPolicy(t *testing.T) {
+	policies := []Policy{{
+		Version: PolicyVersion,
+		ID:      "allow-only",
+		Enabled: true,
+		Rules: []Rule{{
+			ID:     "allow-git-status",
+			Effect: EffectAllow,
+			Match:  Match{Argv: exactArgs("git", "status")},
+		}},
+	}}
+	for _, tt := range []struct {
+		command string
+		allowed bool
+	}{
+		{`env --unknown git status`, false},
+		{`git --unknown status`, false},
+		{`git status --future-option`, false},
+		{`gh --unknown pr view 123`, false},
+		{`bash -c "$SCRIPT"`, false},
+		{`sudo --unknown git status`, false},
+		{`bash --unknown -c "git status"`, false},
+		{`bash -c "if"`, false},
+		{`env -S "'unterminated"`, false},
+		{`bash -c "git status"`, true},
+	} {
+		t.Run(tt.command, func(t *testing.T) {
+			decision, err := EvaluateCommand(policies, tt.command)
+			if err != nil || decision.Allowed != tt.allowed {
+				t.Fatalf("decision = %+v, err = %v, want allowed=%v", decision, err, tt.allowed)
+			}
+		})
+	}
+}
+
+func TestCommandInterpretationDoesNotDependOnPolicy(t *testing.T) {
+	allow := Policy{Version: PolicyVersion, ID: "allow", Enabled: true,
+		Rules: []Rule{{ID: "allow-all", Effect: EffectAllow, Match: Match{Argv: []ArgPattern{{Type: "nonempty"}}}}}}
+	disabled := allow
+	disabled.Enabled = false
+	preset, err := Preset(PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, policies := range [][]Policy{nil, {allow}, {disabled}, {allow, preset}, {preset}} {
+		for _, key := range []string{"command", "cmd"} {
+			for _, command := range []string{
+				"git commit --unknown", "git tag -m", "git branch --format",
+				"git switch --create", "git checkout --conflict", "git reset --unknown",
+				"git status --future-option", "gh pr view --unknown", "gh repo edit --description", "git unknown-helper",
+				`git "$subcommand"`, `gh pr view "$number"`,
+			} {
+				input, err := json.Marshal(map[string]any{"tool_input": map[string]string{key: command}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				decision, err := EvaluateHookEvent(policies, input)
+				if err != nil || decision.Allowed || decision.RuleID != "" || decision.Reason == "" {
+					t.Fatalf("%s policies=%v: %+v err=%v", command, policies, decision, err)
+				}
+			}
+			for _, command := range []string{`git status`, `git tag -mfeature example`, `gh pr view 7`} {
+				input, err := json.Marshal(map[string]any{"tool_input": map[string]string{key: command}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				decision, err := EvaluateHookEvent(policies, input)
+				if err != nil || !decision.Allowed {
+					t.Fatalf("%s: %+v err=%v", command, decision, err)
+				}
+			}
+		}
+	}
+}
+
+func TestShellOptionSigns(t *testing.T) {
+	policy, err := Preset(PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, options := range []string{"+i", "-i +i"} {
+		for _, command := range []string{"git status", "git push"} {
+			decision, err := EvaluateCommand([]Policy{policy}, "bash -c "+options+" '"+command+"'")
+			if err != nil || decision.Allowed != (command == "git status") {
+				t.Fatalf("%s %s: %+v err=%v", options, command, decision, err)
+			}
+		}
+	}
+	for _, options := range []string{"-i", "-l", "+l", "-l +l", "+i -i", "+l -l"} {
+		decision, err := EvaluateCommand([]Policy{policy}, "bash -c "+options+" 'git status'")
+		if err != nil || decision.Allowed {
+			t.Fatalf("%s: %+v err=%v", options, decision, err)
+		}
 	}
 }

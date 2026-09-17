@@ -136,6 +136,11 @@ func TestCommandOptionValuesThroughHookEvent(t *testing.T) {
 		{`gh pr checkout 123 --force=false --detach=true`, ""},
 		{`gh pr co 123 --force=false`, ""},
 		{`gh co 123 -f=false`, ""},
+		{`gh pr close 12 --delete-branch=false`, ""},
+		{`gh pr close 12 --delete-branch=true`, "deny-gh-pr-close-delete-branch"},
+		{`gh pr close 12 -d=false`, ""},
+		{`gh pr close 12 -d --delete-branch=false`, ""},
+		{`gh pr close 12 --delete-branch=false -d`, "deny-gh-pr-close-delete-branch"},
 		{`git commit --no-t --dry-run --allow-empty -m example`, ""},
 		{`git commit --no-tem --dry-run --allow-empty -m example`, ""},
 		{`git commit --no-t --amend`, "deny-git-commit-amend"},
@@ -158,6 +163,15 @@ func TestCommandOptionValuesThroughHookEvent(t *testing.T) {
 		{`command git -C . tag -amfeature audit-tag`, ""},
 		{`sh -c 'git tag -m -- --delete audit-tag'`, "deny-git-tag-delete-long"},
 		{`git tag -amfeature audit-tag && git push`, "deny-git-push"},
+		{`git diff -M`, ""},
+		{`git diff -C`, ""},
+		{`git diff -B`, ""},
+		{`git diff -U`, ""},
+		{`git diff --unified`, ""},
+		{`git diff --relative`, ""},
+		{`git diff --relative=subdir`, ""},
+		{`git diff --color=never --color-words`, ""},
+		{`git diff --color-words='[[:alnum:]]+'`, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.command, func(t *testing.T) {
@@ -189,6 +203,7 @@ func TestCommandOptionParsingFailsClosed(t *testing.T) {
 		`git switch --unknown -- -Cfeature`, `git checkout -b`,
 		`git checkout --conflict`, `git checkout --unknown -- -Bfeature`,
 		`git reset --pathspec-from-file`, `git reset --hard=true`, `git reset --unknown -- --hard`,
+		`git status --future-option`,
 		`gh pr checkout --branch`, `gh pr checkout --for`, `gh pr checkout --force=`,
 		`gh pr checkout -f=invalid`, `gh pr checkout --unknown -- --force`,
 		`gh pr co --branch`, `gh co --unknown`, `gh pr checkout --end-of-options`, `gh repo edit --description`,
@@ -323,7 +338,7 @@ func TestCustomPolicyFlagValuesAndExceptions(t *testing.T) {
 	}
 	policy.Enabled = false
 	decision, err := EvaluateCommand([]Policy{policy}, `git tag --unknown`)
-	if err != nil || !decision.Allowed {
-		t.Fatalf("disabled policy: decision = %+v, err = %v", decision, err)
+	if err != nil || decision.Allowed || decision.RuleID != "" {
+		t.Fatalf("unsupported syntax must be denied independently of disabled policy: decision = %+v, err = %v", decision, err)
 	}
 }

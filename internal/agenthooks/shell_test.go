@@ -1,7 +1,7 @@
 package agenthooks
 
 import (
-	"reflect"
+	"encoding/json"
 	"testing"
 )
 
@@ -55,7 +55,9 @@ func TestParseShellInvocationsPreservesEmptyArgs(t *testing.T) {
 			for _, argv := range tt.want {
 				want = append(want, Invocation{Argv: argv})
 			}
-			if !reflect.DeepEqual(got, want) {
+			gotJSON, _ := json.Marshal(got)
+			wantJSON, _ := json.Marshal(want)
+			if string(gotJSON) != string(wantJSON) {
 				t.Fatalf("invocations = %#v, want %#v", got, want)
 			}
 		})

@@ -11,7 +11,7 @@ var ghLeadingOptions = optionValues(
 	optionGroup{optionRequiredValue, `-R --repo --hostname --git-protocol --editor --browser`},
 )
 
-func parseGhCommand(argv []string) ([]string, []commandFlag, error) {
+func parseGhCommand(argv []string) (parsedCommand, error) {
 	args := append([]string(nil), argv[1:]...)
 	indices := make([]int, len(args))
 	for i := range indices {
@@ -31,7 +31,7 @@ func parseGhCommand(argv []string) ([]string, []commandFlag, error) {
 		}
 		if _, ok := ghCommandOptions[child]; !ok || strings.ContainsAny(args[index], " \t\r\n") {
 			if len(command) == 0 || ghCommandHasChildren(command) {
-				return nil, nil, fmt.Errorf("unsupported gh command %q", child)
+				return parsedCommand{}, fmt.Errorf("unsupported gh command %q", child)
 			}
 			break
 		}
@@ -62,8 +62,10 @@ func parseGhCommand(argv []string) ([]string, []commandFlag, error) {
 	path := strings.Join(command, " ")
 	out := append([]string{"gh"}, command...)
 	out = append(out, args...)
+	parsed := parsedCommand{argv: out}
 	if path == "extension exec" {
-		return out, nil, nil
+		parsed.flags = literalCommandFlags(args)
+		return parsed, nil
 	}
 	options := maps.Clone(ghCommandOptions[path])
 	if _, hasShorthand := options["-h"]; !hasShorthand {
@@ -71,7 +73,7 @@ func parseGhCommand(argv []string) ([]string, []commandFlag, error) {
 	}
 	flags, err := parseCommandFlags("gh "+path, args, options, false)
 	if err != nil {
-		return nil, nil, err
+		return parsedCommand{}, err
 	}
 	if len(command) == 0 || ghCommandHasChildren(command) {
 		for i := 0; i < len(args); {
@@ -80,12 +82,13 @@ func parseGhCommand(argv []string) ([]string, []commandFlag, error) {
 			}
 			end, ok := ghOptionEnd(args, i, options)
 			if !ok {
-				return nil, nil, fmt.Errorf("unsupported gh command arguments")
+				return parsedCommand{}, fmt.Errorf("unsupported gh command arguments")
 			}
 			i = end
 		}
 	}
-	return out, flags, nil
+	parsed.flags = flags
+	return parsed, nil
 }
 
 func ghCommandIndex(args []string, options map[string]optionValue) int {

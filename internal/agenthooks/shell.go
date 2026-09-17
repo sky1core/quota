@@ -14,6 +14,9 @@ type Invocation struct {
 	Dynamic        bool     `json:"dynamic,omitempty"`
 	DynamicCommand bool     `json:"dynamicCommand,omitempty"`
 	DynamicReason  string   `json:"dynamicReason,omitempty"`
+	command        parsedCommand
+	literalArgv    []string
+	source         string
 }
 
 func ParseShellInvocations(command string) ([]Invocation, error) {
@@ -63,105 +66,82 @@ func parseShellInvocations(command string, depth int, inheritedShellStartup stri
 		if len(inv.Argv) == 0 && !inv.Dynamic {
 			return true
 		}
-		gitConfigDispatch, gitConfigReason := gitConfigAssignmentCanChangeCommandDispatch(call.Assigns)
-		if envDispatch, envReason := gitConfigEnvArgsCanChangeCommandDispatch(inv.Argv); envDispatch {
-			gitConfigDispatch = true
-			gitConfigReason = envReason
+		wrappers := parseWrapperChain(inv.Argv)
+		if wrappers.undecidable != "" {
+			invocations = append(invocations, undecidableInvocation(wrappers.argv, wrappers.undecidable))
+			return true
 		}
-		if wrapperDispatch, wrapperReason := gitConfigWrapperCanChangeCommandDispatch(inv.Argv); wrapperDispatch {
-			gitConfigDispatch = true
-			gitConfigReason = wrapperReason
+		gitConfigDispatch, gitConfigReason := gitConfigAssignmentCanChangeCommandDispatch(call.Assigns)
+		if wrappers.gitEnvironment {
+			gitConfigDispatch, gitConfigReason = true, "git environment can change command dispatch"
 		}
 		ghConfigDispatch, ghConfigReason := ghConfigAssignmentCanChangeCommandDispatch(call.Assigns)
-		if envDispatch, envReason := ghConfigEnvArgsCanChangeCommandDispatch(inv.Argv); envDispatch {
-			ghConfigDispatch = true
-			ghConfigReason = envReason
-		}
-		if sudoDispatch, sudoReason := ghConfigSudoArgsCanChangeCommandDispatch(inv.Argv); sudoDispatch {
-			ghConfigDispatch = true
-			ghConfigReason = sudoReason
-		}
-		if wrapperDispatch, wrapperReason := ghConfigWrapperCanChangeCommandDispatch(inv.Argv); wrapperDispatch {
-			ghConfigDispatch = true
-			ghConfigReason = wrapperReason
+		if wrappers.ghEnvironment {
+			ghConfigDispatch, ghConfigReason = true, "gh configuration directory can change command dispatch"
 		}
 		if inv.Dynamic && len(inv.Argv) > 0 && isCommandWrapper(inv.Argv[0]) {
 			inv.DynamicCommand = true
 		}
-		shellStartupDispatch, shellStartupReason := shellStartupAssignmentCanExecuteHiddenScript(call.Assigns, inv.Argv)
+		shellStartupDispatch, shellStartupReason := shellStartupAssignmentCanExecuteHiddenScript(call.Assigns)
+		if wrappers.shellEnvironment {
+			shellStartupDispatch, shellStartupReason = true, "shell startup environment can execute hidden script content"
+		}
 		if inheritedShellStartup != "" {
 			shellStartupDispatch, shellStartupReason = true, inheritedShellStartup
 		}
-		norm, dynamicCommand, dynamicReason := normalizeArgv(inv.Argv)
+		parsed := parseCommand(wrappers.argv)
+		norm := parsed.argv
+		dynamicCommand, dynamicReason := parsed.dynamic, parsed.undecidable
+		inv.command = parsed
+		inv.literalArgv = literalCommandArgv(call, wrappers)
+		inv.source = nodeSource(command, call)
 		if gitConfigDispatch && len(norm) > 0 && commandName(norm[0]) == "git" {
-			dynamicCommand = true
-			dynamicReason = gitConfigReason
+			dynamicCommand, dynamicReason = true, gitConfigReason
 		}
 		if ghConfigDispatch && len(norm) > 0 && commandName(norm[0]) == "gh" {
-			dynamicCommand = true
-			dynamicReason = ghConfigReason
+			dynamicCommand, dynamicReason = true, ghConfigReason
 		}
-		if !inv.Dynamic {
-			if script, ok := evalScript(norm); ok {
-				nested, err := parseShellInvocations(script, depth+1, shellStartupReason)
-				if err != nil {
-					invocations = append(invocations, Invocation{Argv: inv.Argv, Dynamic: true, DynamicCommand: true, DynamicReason: "eval script is not statically parseable"})
-					return false
-				}
-				nested = markInvocationsDynamicForCommand(nested, "git", gitConfigDispatch, gitConfigReason)
-				nested = markInvocationsDynamicForCommand(nested, "gh", ghConfigDispatch, ghConfigReason)
-				invocations = append(invocations, nested...)
-				return true
-			}
-		}
-		if !inv.Dynamic {
-			if script, ok := envSplitStringScript(norm); ok {
-				nested, err := parseShellInvocations(script, depth+1, shellStartupReason)
-				if err != nil {
-					invocations = append(invocations, Invocation{Argv: inv.Argv, Dynamic: true, DynamicReason: "env split string is not statically parseable"})
-					return false
-				}
-				nested = markInvocationsDynamicForCommand(nested, "git", gitConfigDispatch, gitConfigReason)
-				nested = markInvocationsDynamicForCommand(nested, "gh", ghConfigDispatch, ghConfigReason)
-				invocations = append(invocations, nested...)
-				return true
-			}
-		}
+		script, hasScript := wrappers.script, wrappers.hasScript
 		if len(norm) > 0 && isShellCommand(norm[0]) {
-			if shellStartupDispatch && shellCanExecuteScript(norm) {
-				invocations = append(invocations, Invocation{Argv: norm, Dynamic: true, DynamicCommand: true, DynamicReason: shellStartupReason})
+			shell := parseShellInterpreter(norm)
+			canExecute := shell.canExecute()
+			hidden := ""
+			switch {
+			case shell.undecidable != "":
+				hidden = shell.undecidable
+			case !canExecute:
+			case shellStartupDispatch:
+				hidden = shellStartupReason
+			case shell.interactive:
+				hidden = "interactive shell startup files can execute hidden script content"
+			case shell.login:
+				hidden = "login shell startup files can execute hidden script content"
+			case wrappers.loginShell:
+				hidden = "wrapper login shell startup files can execute hidden script content"
+			case shell.startupFile:
+				hidden = "shell startup file can execute hidden script content"
+			case shell.hiddenScript():
+				hidden = "shell interpreter script is not visible to policy evaluator"
+			}
+			if hidden != "" {
+				invocations = append(invocations, undecidableInvocation(norm, hidden))
 				return true
 			}
-			if shellInteractiveOption(norm) && shellCanExecuteScript(norm) {
-				invocations = append(invocations, Invocation{Argv: norm, Dynamic: true, DynamicCommand: true, DynamicReason: "interactive shell startup files can execute hidden script content"})
-				return true
-			}
-			if shellLoginOption(norm) && shellCanExecuteScript(norm) {
-				invocations = append(invocations, Invocation{Argv: norm, Dynamic: true, DynamicCommand: true, DynamicReason: "login shell startup files can execute hidden script content"})
-				return true
-			}
-			if wrapperLoginShellStartupCanExecuteHiddenScript(inv.Argv) && shellCanExecuteScript(norm) {
-				invocations = append(invocations, Invocation{Argv: norm, Dynamic: true, DynamicCommand: true, DynamicReason: "wrapper login shell startup files can execute hidden script content"})
-				return true
-			}
-			if shellStartupFileOption(norm) && shellCanExecuteScript(norm) {
-				invocations = append(invocations, Invocation{Argv: norm, Dynamic: true, DynamicCommand: true, DynamicReason: "shell startup file can execute hidden script content"})
-				return true
+			if canExecute {
+				script, hasScript = shell.command, shell.hasCommand
+			} else {
+				script, hasScript = "", false
 			}
 		}
-		if scriptIndex, ok := shellScriptArgIndex(norm); ok && !inv.Dynamic {
-			nested, err := parseShellInvocations(norm[scriptIndex], depth+1, shellStartupReason)
+		if hasScript && !inv.Dynamic {
+			nested, err := parseShellInvocations(script, depth+1, shellStartupReason)
 			if err != nil {
-				invocations = append(invocations, Invocation{Argv: norm, Dynamic: true, DynamicReason: "nested shell command is not statically parseable"})
-				return false
+				invocations = append(invocations, undecidableInvocation(norm, "nested command: "+err.Error()))
+				return true
 			}
 			nested = markInvocationsDynamicForCommand(nested, "git", gitConfigDispatch, gitConfigReason)
 			nested = markInvocationsDynamicForCommand(nested, "gh", ghConfigDispatch, ghConfigReason)
 			invocations = append(invocations, nested...)
-			return true
-		}
-		if shellInterpreterWithoutVisibleScript(norm) {
-			invocations = append(invocations, Invocation{Argv: norm, Dynamic: true, DynamicCommand: true, DynamicReason: "shell interpreter script is not visible to policy evaluator"})
 			return true
 		}
 		inv.Argv = norm
@@ -176,6 +156,60 @@ func parseShellInvocations(command string, depth int, inheritedShellStartup stri
 		return true
 	})
 	return invocations, nil
+}
+
+func nodeSource(source string, node syntax.Node) string {
+	start, end := int(node.Pos().Offset()), int(node.End().Offset())
+	if start < 0 || end < start || end > len(source) {
+		return ""
+	}
+	return source[start:end]
+}
+
+func undecidableInvocation(argv []string, reason string) Invocation {
+	return Invocation{Argv: argv, Dynamic: true, DynamicCommand: true, DynamicReason: reason}
+}
+
+func literalCommandArgv(call *syntax.CallExpr, wrappers wrapperChain) []string {
+	if wrappers.undecidable != "" || wrappers.hasScript || len(wrappers.argv) == 0 {
+		return nil
+	}
+	start := len(call.Args) - len(wrappers.argv)
+	var argv []string
+	for i, word := range call.Args {
+		value, literal := staticWord(word)
+		if i >= start {
+			if !literal {
+				return nil
+			}
+			argv = append(argv, value)
+		} else if !literal && !quotedScalarWord(word) {
+			return nil
+		}
+	}
+	return argv
+}
+
+func quotedScalarWord(word *syntax.Word) bool {
+	if len(word.Parts) != 1 {
+		return false
+	}
+	quoted, ok := word.Parts[0].(*syntax.DblQuoted)
+	if !ok {
+		return false
+	}
+	for _, part := range quoted.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+		case *syntax.ParamExp:
+			if p.Param == nil || p.Param.Value == "@" || p.Index != nil || p.Excl || p.Names != 0 || p.Slice != nil || p.Repl != nil || p.Exp != nil {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func callInvocation(call *syntax.CallExpr) Invocation {
@@ -370,7 +404,7 @@ func assignmentNameCanChangeGhCommandDispatch(name string) bool {
 	return name == "GH_CONFIG_DIR"
 }
 
-func shellStartupAssignmentCanExecuteHiddenScript(assigns []*syntax.Assign, argv []string) (bool, string) {
+func shellStartupAssignmentCanExecuteHiddenScript(assigns []*syntax.Assign) (bool, string) {
 	for _, assign := range assigns {
 		if assign.Name == nil {
 			continue
@@ -379,82 +413,114 @@ func shellStartupAssignmentCanExecuteHiddenScript(assigns []*syntax.Assign, argv
 			return true, "shell startup environment can execute hidden script content"
 		}
 	}
-	return wrapperEnvCanSetShellStartup(argv)
-}
-
-func wrapperEnvCanSetShellStartup(argv []string) (bool, string) {
-	out := argv
-	for {
-		if len(out) == 0 {
-			return false, ""
-		}
-		switch commandName(out[0]) {
-		case "command":
-			next := normalizeCommandArgv(out)
-			if len(next) == len(out) {
-				return false, ""
-			}
-			out = next
-		case "builtin":
-			if len(out) == 1 {
-				return false, ""
-			}
-			out = out[1:]
-		case "exec":
-			next := normalizeExecArgv(out)
-			if len(next) == len(out) {
-				return false, ""
-			}
-			out = next
-		case "env":
-			if ok, reason := envArgsCanSetShellStartup(out); ok {
-				return true, reason
-			}
-			next := normalizeEnvArgv(out)
-			if len(next) == len(out) {
-				return false, ""
-			}
-			out = next
-		case "sudo":
-			if ok, reason := sudoArgsCanSetShellStartup(out); ok {
-				return true, reason
-			}
-			next := normalizeSudoArgv(out)
-			if len(next) == len(out) {
-				return false, ""
-			}
-			out = next
-		case "nohup", "nice", "timeout":
-			next, err := normalizeProcessWrapperArgv(out)
-			if err != nil || len(next) == len(out) {
-				return false, ""
-			}
-			out = next
-		default:
-			return false, ""
-		}
-	}
-}
-
-func envArgsCanSetShellStartup(argv []string) (bool, string) {
-	i := envAssignmentStart(argv)
-	if i < 0 {
-		return false, ""
-	}
-	for ; i < len(argv); i++ {
-		name, _, ok := strings.Cut(argv[i], "=")
-		if !ok {
-			return false, ""
-		}
-		if shellStartupEnvName(name) {
-			return true, "shell startup environment can execute hidden script content"
-		}
-	}
 	return false, ""
 }
 
-func sudoArgsCanSetShellStartup(argv []string) (bool, string) {
-	return sudoEnvCanExpose(argv, shellStartupEnvName, "shell startup environment can execute hidden script content")
+// wrapperParse is the single interpretation of one wrapper layer. Option
+// grammar for each family lives only in its parse function; protection checks
+// read these fields and never re-walk the arguments.
+type wrapperParse struct {
+	rest        []string
+	undecidable string
+	loginShell  bool // the wrapped program starts as a login shell
+	assigns     []assignment
+	preserveAll bool     // sudo keeps the whole caller environment
+	preserve    []string // sudo keeps these named variables
+	script      string   // eval / env -S script text
+	hasScript   bool
+}
+
+type assignment struct{ name, value string }
+
+func undecidableWrapper(family, arg string) wrapperParse {
+	return wrapperParse{undecidable: "unsupported or incomplete " + family + " option " + arg}
+}
+
+func wrapperCommand(p wrapperParse, argv []string, i int) wrapperParse {
+	if i < len(argv) {
+		p.rest = argv[i:]
+	}
+	return p
+}
+
+func parseWrapper(argv []string) (wrapperParse, bool) {
+	if len(argv) == 0 {
+		return wrapperParse{}, false
+	}
+	switch commandName(argv[0]) {
+	case "command":
+		return parseCommandWrapper(argv), true
+	case "builtin":
+		return parseBuiltinWrapper(argv), true
+	case "exec":
+		return parseExecWrapper(argv), true
+	case "env":
+		return parseEnvWrapper(argv), true
+	case "sudo":
+		return parseSudoWrapper(argv), true
+	case "nohup", "nice", "timeout":
+		return parseProcessWrapper(argv), true
+	case "eval":
+		return parseEvalWrapper(argv), true
+	}
+	return wrapperParse{}, false
+}
+
+type wrapperChain struct {
+	argv             []string
+	undecidable      string
+	loginShell       bool
+	gitEnvironment   bool
+	ghEnvironment    bool
+	shellEnvironment bool
+	script           string
+	hasScript        bool
+}
+
+func parseWrapperChain(argv []string) wrapperChain {
+	chain := wrapperChain{argv: argv}
+	for {
+		p, ok := parseWrapper(chain.argv)
+		if !ok {
+			return chain
+		}
+		if p.undecidable != "" {
+			chain.undecidable = p.undecidable
+			if p.rest != nil {
+				chain.argv = p.rest
+			}
+			return chain
+		}
+		chain.loginShell = chain.loginShell || p.loginShell
+		chain.gitEnvironment = chain.gitEnvironment || p.exposesEnv(gitConfigEnvNameCanChangeCommandDispatch, gitConfigEnvPairCanChangeCommandDispatch)
+		chain.ghEnvironment = chain.ghEnvironment || p.exposesEnv(assignmentNameCanChangeGhCommandDispatch, func(name, _ string) bool { return assignmentNameCanChangeGhCommandDispatch(name) })
+		chain.shellEnvironment = chain.shellEnvironment || p.exposesEnv(shellStartupEnvName, func(name, _ string) bool { return shellStartupEnvName(name) })
+		if p.hasScript {
+			chain.script, chain.hasScript = p.script, true
+			return chain
+		}
+		if p.rest == nil {
+			return chain
+		}
+		chain.argv = p.rest
+	}
+}
+
+func (p wrapperParse) exposesEnv(name func(string) bool, pair func(string, string) bool) bool {
+	if p.preserveAll {
+		return true
+	}
+	for _, n := range p.preserve {
+		if name(n) {
+			return true
+		}
+	}
+	for _, a := range p.assigns {
+		if pair(a.name, a.value) {
+			return true
+		}
+	}
+	return false
 }
 
 func shellStartupEnvName(name string) bool {
@@ -463,152 +529,6 @@ func shellStartupEnvName(name string) bool {
 		return true
 	default:
 		return false
-	}
-}
-
-func gitConfigEnvArgsCanChangeCommandDispatch(argv []string) (bool, string) {
-	i := envAssignmentStart(argv)
-	if i < 0 {
-		return false, ""
-	}
-	for ; i < len(argv); i++ {
-		name, value, ok := strings.Cut(argv[i], "=")
-		if !ok {
-			return false, ""
-		}
-		if gitConfigEnvPairCanChangeCommandDispatch(name, value) {
-			return true, "git environment can change command dispatch"
-		}
-	}
-	return false, ""
-}
-
-func ghConfigEnvArgsCanChangeCommandDispatch(argv []string) (bool, string) {
-	i := envAssignmentStart(argv)
-	if i < 0 {
-		return false, ""
-	}
-	for ; i < len(argv); i++ {
-		name, _, ok := strings.Cut(argv[i], "=")
-		if !ok {
-			return false, ""
-		}
-		if assignmentNameCanChangeGhCommandDispatch(name) {
-			return true, "gh configuration directory can change command dispatch"
-		}
-	}
-	return false, ""
-}
-
-func ghConfigSudoArgsCanChangeCommandDispatch(argv []string) (bool, string) {
-	return sudoEnvCanExpose(argv, assignmentNameCanChangeGhCommandDispatch, "gh configuration directory can change command dispatch")
-}
-
-func gitConfigWrapperCanChangeCommandDispatch(argv []string) (bool, string) {
-	out := argv
-	for {
-		if len(out) == 0 {
-			return false, ""
-		}
-		switch commandName(out[0]) {
-		case "command":
-			next := normalizeCommandArgv(out)
-			if len(next) == len(out) {
-				return false, ""
-			}
-			out = next
-		case "builtin":
-			if len(out) == 1 {
-				return false, ""
-			}
-			out = out[1:]
-		case "exec":
-			next := normalizeExecArgv(out)
-			if len(next) == len(out) {
-				return false, ""
-			}
-			out = next
-		case "env":
-			if ok, reason := gitConfigEnvArgsCanChangeCommandDispatch(out); ok {
-				return true, reason
-			}
-			next := normalizeEnvArgv(out)
-			if len(next) == len(out) {
-				return false, ""
-			}
-			out = next
-		case "sudo":
-			if ok, reason := sudoEnvCanExpose(out, gitConfigEnvNameCanChangeCommandDispatch, "git environment can change command dispatch"); ok {
-				return true, reason
-			}
-			next := normalizeSudoArgv(out)
-			if len(next) == len(out) {
-				return false, ""
-			}
-			out = next
-		case "nohup", "nice", "timeout":
-			next, err := normalizeProcessWrapperArgv(out)
-			if err != nil || len(next) == len(out) {
-				return false, ""
-			}
-			out = next
-		default:
-			return false, ""
-		}
-	}
-}
-
-func ghConfigWrapperCanChangeCommandDispatch(argv []string) (bool, string) {
-	out := argv
-	for {
-		if len(out) == 0 {
-			return false, ""
-		}
-		switch commandName(out[0]) {
-		case "command":
-			next := normalizeCommandArgv(out)
-			if len(next) == len(out) {
-				return false, ""
-			}
-			out = next
-		case "builtin":
-			if len(out) == 1 {
-				return false, ""
-			}
-			out = out[1:]
-		case "exec":
-			next := normalizeExecArgv(out)
-			if len(next) == len(out) {
-				return false, ""
-			}
-			out = next
-		case "env":
-			if ok, reason := ghConfigEnvArgsCanChangeCommandDispatch(out); ok {
-				return true, reason
-			}
-			next := normalizeEnvArgv(out)
-			if len(next) == len(out) {
-				return false, ""
-			}
-			out = next
-		case "sudo":
-			if ok, reason := ghConfigSudoArgsCanChangeCommandDispatch(out); ok {
-				return true, reason
-			}
-			next := normalizeSudoArgv(out)
-			if len(next) == len(out) {
-				return false, ""
-			}
-			out = next
-		case "nohup", "nice", "timeout":
-			next, err := normalizeProcessWrapperArgv(out)
-			if err != nil || len(next) == len(out) {
-				return false, ""
-			}
-			out = next
-		default:
-			return false, ""
-		}
 	}
 }
 
@@ -644,62 +564,6 @@ func markInvocationsDynamicForCommand(invocations []Invocation, command string, 
 	return invocations
 }
 
-func normalizeArgv(argv []string) ([]string, bool, string) {
-	out := argv
-	for {
-		if len(out) == 0 {
-			return out, false, ""
-		}
-		switch commandName(out[0]) {
-		case "command":
-			next := normalizeCommandArgv(out)
-			if len(next) == len(out) {
-				return normalizeFirst(next)
-			}
-			out = next
-		case "builtin":
-			if len(out) == 1 {
-				return out, false, ""
-			}
-			out = out[1:]
-		case "exec":
-			next := normalizeExecArgv(out)
-			if len(next) == len(out) {
-				return normalizeFirst(next)
-			}
-			out = next
-		case "env":
-			if len(out) > 1 && envAssignmentStart(out) < 0 {
-				if _, split := envSplitStringScript(out); !split {
-					return out, true, "unsupported or incomplete env options"
-				}
-			}
-			next := normalizeEnvArgv(out)
-			if len(next) == len(out) {
-				return normalizeFirst(next)
-			}
-			out = next
-		case "sudo":
-			next := normalizeSudoArgv(out)
-			if len(next) == len(out) {
-				return normalizeFirst(next)
-			}
-			out = next
-		case "nohup", "nice", "timeout":
-			next, err := normalizeProcessWrapperArgv(out)
-			if err != nil {
-				return out, true, err.Error()
-			}
-			if len(next) == len(out) {
-				return normalizeFirst(next)
-			}
-			out = next
-		default:
-			return normalizeFirst(out)
-		}
-	}
-}
-
 func isCommandWrapper(cmd string) bool {
 	switch commandName(cmd) {
 	case "command", "builtin", "exec", "env", "sudo", "nohup", "nice", "timeout", "eval", "sh", "bash", "zsh", "dash", "ksh":
@@ -709,10 +573,8 @@ func isCommandWrapper(cmd string) bool {
 	}
 }
 
-func normalizeCommandArgv(argv []string) []string {
-	if len(argv) < 2 || commandName(argv[0]) != "command" {
-		return argv
-	}
+// command [-p] [--] name ...; -v/-V describe instead of running.
+func parseCommandWrapper(argv []string) wrapperParse {
 	i := 1
 	for i < len(argv) {
 		arg := argv[i]
@@ -725,23 +587,33 @@ func normalizeCommandArgv(argv []string) []string {
 			i++
 			continue
 		case "-v", "-V":
-			return argv
+			return wrapperParse{}
 		}
 		if strings.HasPrefix(arg, "-") {
-			return argv
+			return undecidableWrapper("command", arg)
 		}
 		break
 	}
-	if i >= len(argv) {
-		return argv
-	}
-	return argv[i:]
+	return wrapperCommand(wrapperParse{}, argv, i)
 }
 
-func normalizeExecArgv(argv []string) []string {
-	if len(argv) < 2 || commandName(argv[0]) != "exec" {
-		return argv
+// builtin [--] name ...; it takes no options besides the end marker.
+func parseBuiltinWrapper(argv []string) wrapperParse {
+	i := 1
+	if len(argv) > i && argv[i] == "--" {
+		i++
 	}
+	if len(argv) > i && strings.HasPrefix(argv[i], "-") {
+		return undecidableWrapper("builtin", argv[i])
+	}
+	return wrapperCommand(wrapperParse{}, argv, i)
+}
+
+// exec [-cl] [-a name] [--] command ...; short options combine and -a takes
+// the rest of its group or the next argument. A name starting with "-" makes
+// the program start as a login shell.
+func parseExecWrapper(argv []string) wrapperParse {
+	var p wrapperParse
 	i := 1
 	for i < len(argv) {
 		arg := argv[i]
@@ -749,58 +621,270 @@ func normalizeExecArgv(argv []string) []string {
 			i++
 			break
 		}
-		if arg == "-a" {
-			if i+1 >= len(argv) {
-				return argv
-			}
-			i += 2
-			continue
+		if !strings.HasPrefix(arg, "-") {
+			break
 		}
-		if arg == "-c" || arg == "-l" || isExecShortOptionGroup(arg) {
+		if len(arg) < 2 || strings.HasPrefix(arg, "--") {
+			return undecidableWrapper("exec", arg)
+		}
+		body := arg[1:]
+		for j := 0; j < len(body); j++ {
+			switch body[j] {
+			case 'c':
+			case 'l':
+				p.loginShell = true
+			case 'a':
+				name := body[j+1:]
+				if name == "" {
+					i++
+					if i >= len(argv) {
+						return undecidableWrapper("exec", arg)
+					}
+					name = argv[i]
+				}
+				if strings.HasPrefix(name, "-") {
+					p.loginShell = true
+				}
+				j = len(body)
+			default:
+				return undecidableWrapper("exec", arg)
+			}
+		}
+		i++
+	}
+	return wrapperCommand(p, argv, i)
+}
+
+// env [-iv0] [-u NAME] [-C DIR] [-P PATH] [-S STRING] [--] [NAME=VALUE ...]
+// [command ...]. Option parsing stops at the first NAME=VALUE; every later
+// argument containing "=" is an assignment.
+func parseEnvWrapper(argv []string) wrapperParse {
+	var p wrapperParse
+	i := 1
+	for i < len(argv) {
+		arg := argv[i]
+		if arg == "--" {
+			i++
+			if i < len(argv) && argv[i] == "-" {
+				i++
+			}
+			break
+		}
+		if arg == "--help" || arg == "--version" {
+			return wrapperParse{}
+		}
+		if !strings.HasPrefix(arg, "-") {
+			break
+		}
+		if arg == "-" || arg == "--ignore-environment" {
 			i++
 			continue
 		}
-		if strings.HasPrefix(arg, "-") {
-			return argv
+		if value, ok := strings.CutPrefix(arg, "--split-string="); ok {
+			return envSplitString(value, argv[i+1:])
 		}
-		break
+		switch arg {
+		case "--unset", "--chdir", "--path":
+			if i+1 >= len(argv) {
+				return undecidableWrapper("env", arg)
+			}
+			i += 2
+			continue
+		case "--split-string":
+			if i+1 >= len(argv) {
+				return undecidableWrapper("env", arg)
+			}
+			return envSplitString(argv[i+1], argv[i+2:])
+		}
+		if strings.HasPrefix(arg, "--unset=") || strings.HasPrefix(arg, "--chdir=") || strings.HasPrefix(arg, "--path=") {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--") {
+			return undecidableWrapper("env", arg)
+		}
+		body := arg[1:]
+		consumed := false
+		for j := 0; j < len(body) && !consumed; j++ {
+			switch body[j] {
+			case 'i', 'v', '0':
+			case 'u', 'C', 'P':
+				if j+1 < len(body) {
+					consumed = true
+					break
+				}
+				if i+1 >= len(argv) {
+					return undecidableWrapper("env", arg)
+				}
+				i++
+				consumed = true
+			case 'S':
+				if j+1 < len(body) {
+					return envSplitString(body[j+1:], argv[i+1:])
+				}
+				if i+1 >= len(argv) {
+					return undecidableWrapper("env", arg)
+				}
+				return envSplitString(argv[i+1], argv[i+2:])
+			default:
+				return undecidableWrapper("env", arg)
+			}
+		}
+		i++
 	}
-	if i >= len(argv) {
-		return argv
+	for i < len(argv) {
+		name, value, ok := strings.Cut(argv[i], "=")
+		if !ok {
+			break
+		}
+		p.assigns = append(p.assigns, assignment{name, value})
+		i++
 	}
-	return argv[i:]
+	return wrapperCommand(p, argv, i)
 }
 
-func isExecShortOptionGroup(arg string) bool {
-	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") || len(arg) < 3 {
-		return false
+func envSplitString(value string, rest []string) wrapperParse {
+	script := "env " + value
+	if len(rest) > 0 {
+		script += " " + quoteLiteralArgs(rest)
 	}
-	for _, ch := range arg[1:] {
-		if ch != 'c' && ch != 'l' {
-			return false
-		}
-	}
-	return true
+	return wrapperParse{script: script, hasScript: true}
 }
 
-func normalizeFirst(argv []string) ([]string, bool, string) {
-	if len(argv) == 0 {
-		return argv, false, ""
+func quoteLiteralArgs(args []string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
 	}
-	out := append([]string(nil), argv...)
-	name := commandName(out[0])
-	if subcommand, ok := gitDashedSubcommand(name); ok {
-		return append([]string{"git", subcommand}, out[1:]...), false, ""
+	return strings.Join(quoted, " ")
+}
+
+const (
+	sudoShortNoValue = "ABbEeHiKklnPSsVv"
+	sudoShortValue   = "CcDghpRrTtUu"
+)
+
+var sudoLongNoValue = map[string]bool{
+	"--askpass": true, "--background": true, "--bell": true, "--edit": true, "--help": true, "--list": true,
+	"--login": true, "--non-interactive": true, "--preserve-env": true, "--reset-timestamp": true,
+	"--remove-timestamp": true, "--set-home": true, "--shell": true, "--stdin": true, "--validate": true,
+	"--version": true,
+}
+
+var sudoLongValue = map[string]bool{
+	"--chdir": true, "--chroot": true, "--close-from": true, "--command-timeout": true, "--group": true,
+	"--host": true, "--login-class": true, "--other-user": true, "--prompt": true, "--role": true,
+	"--type": true, "--user": true,
+}
+
+// sudo [options] [NAME=VALUE ...] [--] [command ...]; short options combine
+// and a value option takes the rest of its group or the next argument.
+func parseSudoWrapper(argv []string) wrapperParse {
+	var p wrapperParse
+	i := 1
+	for i < len(argv) {
+		arg := argv[i]
+		if arg == "--" {
+			i++
+			break
+		}
+		if !strings.HasPrefix(arg, "-") {
+			name, value, ok := splitAssignmentArg(arg)
+			if !ok {
+				break
+			}
+			p.assigns = append(p.assigns, assignment{name, value})
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--") {
+			name, value, attached := strings.Cut(arg, "=")
+			switch {
+			case name == "--preserve-env" && attached:
+				if value == "" {
+					p.preserveAll = true
+				}
+				for _, n := range strings.Split(value, ",") {
+					p.preserve = append(p.preserve, strings.TrimSpace(n))
+				}
+			case name == "--preserve-env":
+				p.preserveAll = true
+			case (name == "--login" || name == "--shell") && !attached:
+				p.undecidable = "sudo shell mode can execute hidden script content"
+			case sudoLongNoValue[name] && !attached:
+			case sudoLongValue[name] && attached:
+			case sudoLongValue[name]:
+				if i+1 >= len(argv) {
+					return undecidableWrapper("sudo", arg)
+				}
+				i++
+			default:
+				return undecidableWrapper("sudo", arg)
+			}
+			i++
+			continue
+		}
+		body := arg[1:]
+		if body == "" {
+			return undecidableWrapper("sudo", arg)
+		}
+		for j := 0; j < len(body); j++ {
+			ch := body[j]
+			switch {
+			case ch == 'E':
+				p.preserveAll = true
+			case ch == 'i' || ch == 's':
+				p.undecidable = "sudo shell mode can execute hidden script content"
+			case ch == 'h' && j+1 == len(body) && (i+1 >= len(argv) || strings.HasPrefix(argv[i+1], "-")):
+				return wrapperParse{}
+			case strings.IndexByte(sudoShortNoValue, ch) >= 0:
+			case strings.IndexByte(sudoShortValue, ch) >= 0:
+				if j+1 == len(body) {
+					if i+1 >= len(argv) {
+						return undecidableWrapper("sudo", arg)
+					}
+					i++
+				}
+				j = len(body)
+			default:
+				return undecidableWrapper("sudo", arg)
+			}
+		}
+		i++
 	}
-	switch name {
-	case "git":
-		out[0] = "git"
-		return normalizeGitGlobalOptions(out)
-	case "gh":
-		out[0] = "gh"
-		return normalizeGhGlobalOptions(out)
+	for i < len(argv) {
+		name, value, ok := splitAssignmentArg(argv[i])
+		if !ok {
+			break
+		}
+		p.assigns = append(p.assigns, assignment{name, value})
+		i++
 	}
-	return out, false, ""
+	return wrapperCommand(p, argv, i)
+}
+
+func parseProcessWrapper(argv []string) wrapperParse {
+	next, err := normalizeProcessWrapperArgv(argv)
+	if err != nil {
+		return wrapperParse{undecidable: err.Error()}
+	}
+	if len(next) == len(argv) {
+		return wrapperParse{}
+	}
+	return wrapperParse{rest: next}
+}
+
+func parseEvalWrapper(argv []string) wrapperParse {
+	i := 1
+	if i < len(argv) && argv[i] == "--" {
+		i++
+	} else if i < len(argv) && strings.HasPrefix(argv[i], "-") {
+		return undecidableWrapper("eval", argv[i])
+	}
+	if i == len(argv) {
+		return wrapperParse{}
+	}
+	return wrapperParse{script: strings.Join(argv[i:], " "), hasScript: true}
 }
 
 func gitDashedSubcommand(name string) (string, bool) {
@@ -838,723 +922,104 @@ func splitAssignmentArg(arg string) (string, string, bool) {
 	return name, value, true
 }
 
-func envAssignmentStart(argv []string) int {
-	if len(argv) < 2 || commandName(argv[0]) != "env" {
-		return -1
-	}
+// shellParse is the single interpretation of a shell interpreter invocation.
+type shellParse struct {
+	undecidable string
+	hasCommand  bool   // -c seen
+	command     string // the -c script text
+	interactive bool
+	login       bool
+	startupFile bool // --rcfile / --init-file
+	noScript    bool // --help or --version
+}
+
+// canExecute reports whether the shell may run script content at all.
+func (s shellParse) canExecute() bool { return s.hasCommand || !s.noScript }
+
+// hiddenScript reports whether the shell runs content the evaluator cannot see.
+func (s shellParse) hiddenScript() bool { return !s.hasCommand && !s.noScript }
+
+const shellShortLetters = "abefhkmnprstuvxBCDEHIPT"
+
+var shellLongNoValue = map[string]bool{
+	"--debugger": true, "--dump-po-strings": true, "--dump-strings": true, "--noediting": true,
+	"--noprofile": true, "--norc": true, "--posix": true, "--pretty-print": true, "--restricted": true,
+	"--verbose": true,
+}
+
+// sh|bash|zsh|dash|ksh [options] [-c string | file] ...; short options combine
+// with either "-" or "+", -o/+o/-O/+O take the next argument.
+func parseShellInterpreter(argv []string) shellParse {
+	var s shellParse
 	i := 1
 	for i < len(argv) {
 		arg := argv[i]
-		if arg == "--" {
+		if arg == "--" || arg == "-" {
 			i++
-			if i < len(argv) && argv[i] == "-" {
-				i++
-			}
 			break
 		}
-		if arg == "--help" || arg == "--version" {
-			return len(argv)
-		}
-		if strings.Contains(arg, "=") && !strings.HasPrefix(arg, "-") {
+		if !strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "+") {
 			break
 		}
-		if envFlagNoValue(arg) {
-			i++
-			continue
-		}
-		if envFlagTakesValue(arg) {
-			if i+1 >= len(argv) {
-				return -1
-			}
-			i += 2
-			continue
-		}
-		if envShortFlagHasInlineValue(arg) || envFlagHasInlineValue(arg) {
-			i++
-			continue
-		}
-		if strings.HasPrefix(arg, "-") {
-			return -1
-		}
-		break
-	}
-	return i
-}
-
-func normalizeEnvArgv(argv []string) []string {
-	i := envAssignmentStart(argv)
-	if i < 0 {
-		return argv
-	}
-	for i < len(argv) && strings.Contains(argv[i], "=") {
-		i++
-	}
-	if i >= len(argv) {
-		return argv
-	}
-	return argv[i:]
-}
-
-func evalScript(argv []string) (string, bool) {
-	if len(argv) < 2 || commandName(argv[0]) != "eval" {
-		return "", false
-	}
-	return strings.Join(argv[1:], " "), true
-}
-
-func envSplitStringScript(argv []string) (string, bool) {
-	if len(argv) < 2 || commandName(argv[0]) != "env" {
-		return "", false
-	}
-	for i := 1; i < len(argv); i++ {
-		arg := argv[i]
-		if arg == "--" {
-			return "", false
-		}
-		if strings.Contains(arg, "=") && !strings.HasPrefix(arg, "-") {
-			continue
-		}
-		if arg == "-S" || arg == "--split-string" {
-			if i+1 >= len(argv) {
-				return "", false
-			}
-			return "env " + argv[i+1] + " " + quoteLiteralArgs(argv[i+2:]), true
-		}
-		if strings.HasPrefix(arg, "--split-string=") {
-			script := strings.TrimPrefix(arg, "--split-string=")
-			if i+1 < len(argv) {
-				script += " " + quoteLiteralArgs(argv[i+1:])
-			}
-			return "env " + script, true
-		}
-		if script, ok := envShortSplitStringScript(arg); ok {
-			if script == "" {
+		if strings.HasPrefix(arg, "--") {
+			name, _, attached := strings.Cut(arg, "=")
+			switch {
+			case (name == "--rcfile" || name == "--init-file") && attached:
+				s.startupFile = true
+			case name == "--rcfile" || name == "--init-file":
 				if i+1 >= len(argv) {
-					return "", false
+					s.undecidable = "unsupported or incomplete shell option " + arg
+					return s
 				}
-				return "env " + argv[i+1] + " " + quoteLiteralArgs(argv[i+2:]), true
-			}
-			if i+1 < len(argv) {
-				script += " " + quoteLiteralArgs(argv[i+1:])
-			}
-			return "env " + script, true
-		}
-		if envFlagNoValue(arg) {
-			continue
-		}
-		if envFlagTakesValue(arg) {
-			i++
-			if i >= len(argv) {
-				return "", false
-			}
-			continue
-		}
-		if envShortFlagHasInlineValue(arg) || envFlagHasInlineValue(arg) {
-			continue
-		}
-		return "", false
-	}
-	return "", false
-}
-
-func quoteLiteralArgs(args []string) string {
-	quoted := make([]string, len(args))
-	for i, arg := range args {
-		quoted[i] = "'" + strings.ReplaceAll(arg, "'", "'\\''") + "'"
-	}
-	return strings.Join(quoted, " ")
-}
-
-func envShortSplitStringScript(arg string) (string, bool) {
-	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") || len(arg) < 2 {
-		return "", false
-	}
-	body := arg[1:]
-	for i, ch := range body {
-		switch ch {
-		case 'i', 'v', '0':
-			continue
-		case 'S':
-			return body[i+1:], true
-		default:
-			return "", false
-		}
-	}
-	return "", false
-}
-
-func envFlagNoValue(arg string) bool {
-	return arg == "-" || arg == "-i" || arg == "--ignore-environment" || isEnvNoValueShortOptionGroup(arg)
-}
-
-func isEnvNoValueShortOptionGroup(arg string) bool {
-	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") || len(arg) < 2 {
-		return false
-	}
-	for _, ch := range arg[1:] {
-		if ch != 'i' && ch != 'v' && ch != '0' {
-			return false
-		}
-	}
-	return true
-}
-
-func envFlagTakesValue(arg string) bool {
-	switch arg {
-	case "-u", "--unset", "-C", "--chdir", "-P", "--path":
-		return true
-	default:
-		return false
-	}
-}
-
-func envShortFlagHasInlineValue(arg string) bool {
-	if len(arg) <= 2 || !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") {
-		return false
-	}
-	for i, ch := range arg[1:] {
-		switch ch {
-		case 'i', 'v', '0':
-			continue
-		case 'u', 'C', 'P':
-			return i+2 < len(arg)
-		default:
-			return false
-		}
-	}
-	return false
-}
-
-func envFlagHasInlineValue(arg string) bool {
-	return strings.HasPrefix(arg, "--unset=") || strings.HasPrefix(arg, "--chdir=") || strings.HasPrefix(arg, "--path=")
-}
-
-func normalizeSudoArgv(argv []string) []string {
-	if len(argv) < 2 || commandName(argv[0]) != "sudo" {
-		return argv
-	}
-	i := 1
-	for i < len(argv) {
-		arg := argv[i]
-		if arg == "--" {
-			i++
-			break
-		}
-		if !strings.HasPrefix(arg, "-") {
-			if _, _, ok := splitAssignmentArg(arg); ok {
+				s.startupFile = true
 				i++
-				continue
+			case name == "--login" && !attached:
+				s.login = true
+			case (name == "--help" || name == "--version") && !attached:
+				s.noScript = true
+			case shellLongNoValue[name] && !attached:
+			default:
+				s.undecidable = "unsupported or incomplete shell option " + arg
+				return s
 			}
-			break
-		}
-		if sudoFlagTakesValue(arg) || sudoShortFlagTakesSeparateValue(arg) {
-			if i+1 >= len(argv) {
-				return argv
-			}
-			i += 2
-			continue
-		}
-		if sudoFlagHasInlineValue(arg) || sudoShortFlagHasInlineValue(arg) || sudoFlagNoValue(arg) {
 			i++
 			continue
+		}
+		body := arg[1:]
+		if body == "" {
+			s.undecidable = "unsupported or incomplete shell option " + arg
+			return s
+		}
+		for j := 0; j < len(body); j++ {
+			ch := body[j]
+			switch {
+			case ch == 'c':
+				s.hasCommand = true
+			case ch == 'i':
+				s.interactive = arg[0] == '-'
+			case ch == 'l':
+				s.login = true
+			case ch == 'o' || ch == 'O':
+				if j+1 != len(body) || i+1 >= len(argv) {
+					s.undecidable = "unsupported or incomplete shell option " + arg
+					return s
+				}
+				i++
+			case strings.IndexByte(shellShortLetters, ch) < 0:
+				s.undecidable = "unsupported or incomplete shell option " + arg
+				return s
+			}
 		}
 		i++
 	}
-	for i < len(argv) {
-		if _, _, ok := splitAssignmentArg(argv[i]); ok {
-			i++
-			continue
+	if s.hasCommand {
+		if i >= len(argv) {
+			s.undecidable = "shell command option requires script text"
+			return s
 		}
-		break
+		s.command = argv[i]
 	}
-	if i >= len(argv) {
-		return argv
-	}
-	return argv[i:]
-}
-
-func sudoEnvCanExpose(argv []string, match func(string) bool, reason string) (bool, string) {
-	if len(argv) < 2 || commandName(argv[0]) != "sudo" {
-		return false, ""
-	}
-	i := 1
-	for i < len(argv) {
-		arg := argv[i]
-		if arg == "--" {
-			i++
-			break
-		}
-		if sudoPreserveEnvCanExpose(arg, match) {
-			return true, reason
-		}
-		if sudoFlagTakesValue(arg) || sudoShortFlagTakesSeparateValue(arg) {
-			if i+1 >= len(argv) {
-				return false, ""
-			}
-			i += 2
-			continue
-		}
-		if sudoFlagHasInlineValue(arg) || sudoShortFlagHasInlineValue(arg) || sudoFlagNoValue(arg) {
-			i++
-			continue
-		}
-		if strings.HasPrefix(arg, "-") {
-			i++
-			continue
-		}
-		break
-	}
-	for i < len(argv) {
-		name, _, ok := splitAssignmentArg(argv[i])
-		if !ok {
-			return false, ""
-		}
-		if match(name) {
-			return true, reason
-		}
-		i++
-	}
-	return false, ""
-}
-
-func sudoPreserveEnvCanExpose(arg string, match func(string) bool) bool {
-	if arg == "-E" || arg == "--preserve-env" {
-		return true
-	}
-	if strings.HasPrefix(arg, "--preserve-env=") {
-		names := strings.TrimPrefix(arg, "--preserve-env=")
-		if names == "" {
-			return true
-		}
-		for _, name := range strings.Split(names, ",") {
-			if match(strings.TrimSpace(name)) {
-				return true
-			}
-		}
-		return false
-	}
-	return sudoShortFlagPreservesEnv(arg)
-}
-
-func sudoShortFlagPreservesEnv(arg string) bool {
-	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") || len(arg) < 2 {
-		return false
-	}
-	body := arg[1:]
-	for i := 0; i < len(body); i++ {
-		ch := body[i]
-		if ch == 'E' {
-			return true
-		}
-		if sudoShortFlagTakesValue(ch) {
-			return false
-		}
-	}
-	return false
-}
-
-func sudoFlagNoValue(arg string) bool {
-	switch arg {
-	case "-A", "-B", "-b", "-E", "-e", "-H", "-i", "-K", "-k", "-l", "-n", "-P", "-S", "-s", "-V", "-v",
-		"--askpass", "--background", "--bell", "--edit", "--help", "--list", "--login", "--non-interactive",
-		"--preserve-env", "--reset-timestamp", "--remove-timestamp", "--set-home", "--shell", "--stdin",
-		"--validate", "--version":
-		return true
-	default:
-		return false
-	}
-}
-
-func sudoFlagTakesValue(arg string) bool {
-	switch arg {
-	case "-C", "-c", "-D", "-g", "-h", "-p", "-R", "-r", "-T", "-t", "-U", "-u",
-		"--chdir", "--chroot", "--close-from", "--command-timeout", "--group", "--host",
-		"--login-class", "--other-user", "--prompt", "--role", "--type", "--user":
-		return true
-	default:
-		return false
-	}
-}
-
-func sudoFlagHasInlineValue(arg string) bool {
-	for _, prefix := range []string{
-		"--chdir=", "--chroot=", "--close-from=", "--command-timeout=", "--group=", "--host=",
-		"--login-class=", "--other-user=", "--prompt=", "--role=", "--type=", "--user=",
-		"--preserve-env=",
-	} {
-		if strings.HasPrefix(arg, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-func sudoShortFlagTakesSeparateValue(arg string) bool {
-	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") || len(arg) < 2 {
-		return false
-	}
-	body := arg[1:]
-	for i := 0; i < len(body); i++ {
-		if sudoShortFlagTakesValue(body[i]) {
-			return i == len(body)-1
-		}
-	}
-	return false
-}
-
-func sudoShortFlagHasInlineValue(arg string) bool {
-	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") || len(arg) < 3 {
-		return false
-	}
-	body := arg[1:]
-	for i := 0; i < len(body); i++ {
-		if sudoShortFlagTakesValue(body[i]) {
-			return i < len(body)-1
-		}
-	}
-	return false
-}
-
-func sudoShortFlagTakesValue(ch byte) bool {
-	switch ch {
-	case 'C', 'c', 'D', 'g', 'h', 'p', 'R', 'r', 'T', 't', 'U', 'u':
-		return true
-	default:
-		return false
-	}
-}
-
-func shellScriptArgIndex(argv []string) (int, bool) {
-	if len(argv) < 3 || !isShellCommand(argv[0]) {
-		return 0, false
-	}
-	for i := 1; i < len(argv); i++ {
-		arg := argv[i]
-		if arg == "--" {
-			continue
-		}
-		if arg == "-c" {
-			return i + 1, i+1 < len(argv)
-		}
-		if shellOptionTakesValue(arg) {
-			i++
-			if i >= len(argv) {
-				return 0, false
-			}
-			continue
-		}
-		if shellShortOptionHasCommand(arg) {
-			return i + 1, i+1 < len(argv)
-		}
-		if !strings.HasPrefix(arg, "-") {
-			return 0, false
-		}
-	}
-	return 0, false
-}
-
-func shellCanExecuteScript(argv []string) bool {
-	if _, ok := shellScriptArgIndex(argv); ok {
-		return true
-	}
-	return shellInterpreterWithoutVisibleScript(argv)
-}
-
-func shellInteractiveOption(argv []string) bool {
-	if len(argv) == 0 || !isShellCommand(argv[0]) {
-		return false
-	}
-	for i := 1; i < len(argv); i++ {
-		arg := argv[i]
-		if arg == "--" {
-			return false
-		}
-		if arg == "-c" {
-			return false
-		}
-		if shellOptionTakesValue(arg) {
-			i++
-			continue
-		}
-		if !strings.HasPrefix(arg, "-") {
-			return false
-		}
-		if strings.HasPrefix(arg, "--") {
-			continue
-		}
-		if strings.Contains(arg[1:], "i") {
-			return true
-		}
-		if shellShortOptionHasCommand(arg) {
-			return false
-		}
-	}
-	return false
-}
-
-func shellLoginOption(argv []string) bool {
-	if len(argv) == 0 || !isShellCommand(argv[0]) {
-		return false
-	}
-	for i := 1; i < len(argv); i++ {
-		arg := argv[i]
-		if arg == "--" {
-			return false
-		}
-		if arg == "-c" {
-			return false
-		}
-		if arg == "--login" {
-			return true
-		}
-		if shellOptionTakesValue(arg) {
-			i++
-			continue
-		}
-		if !strings.HasPrefix(arg, "-") {
-			return false
-		}
-		if strings.HasPrefix(arg, "--") {
-			continue
-		}
-		if strings.Contains(arg[1:], "l") {
-			return true
-		}
-		if shellShortOptionHasCommand(arg) {
-			return false
-		}
-	}
-	return false
-}
-
-func wrapperLoginShellStartupCanExecuteHiddenScript(argv []string) bool {
-	out := argv
-	for {
-		if len(out) == 0 {
-			return false
-		}
-		switch commandName(out[0]) {
-		case "command":
-			next := normalizeCommandArgv(out)
-			if len(next) == len(out) {
-				return false
-			}
-			out = next
-		case "builtin":
-			if len(out) == 1 {
-				return false
-			}
-			out = out[1:]
-		case "exec":
-			if execLoginShellOption(out) {
-				return true
-			}
-			next := normalizeExecArgv(out)
-			if len(next) == len(out) {
-				return false
-			}
-			out = next
-		case "env":
-			next := normalizeEnvArgv(out)
-			if len(next) == len(out) {
-				return false
-			}
-			out = next
-		case "sudo":
-			if sudoLoginShellOption(out) {
-				return true
-			}
-			next := normalizeSudoArgv(out)
-			if len(next) == len(out) {
-				return false
-			}
-			out = next
-		case "nohup", "nice", "timeout":
-			next, err := normalizeProcessWrapperArgv(out)
-			if err != nil || len(next) == len(out) {
-				return false
-			}
-			out = next
-		default:
-			return false
-		}
-	}
-}
-
-func execLoginShellOption(argv []string) bool {
-	if len(argv) < 2 || commandName(argv[0]) != "exec" {
-		return false
-	}
-	for i := 1; i < len(argv); i++ {
-		arg := argv[i]
-		if arg == "--" {
-			return false
-		}
-		if arg == "-l" || execShortFlagHasLogin(arg) {
-			return true
-		}
-		if arg == "-a" {
-			if i+1 >= len(argv) {
-				return false
-			}
-			if strings.HasPrefix(argv[i+1], "-") {
-				return true
-			}
-			i++
-			continue
-		}
-		if arg == "-c" {
-			continue
-		}
-		if strings.HasPrefix(arg, "-") {
-			return false
-		}
-		return false
-	}
-	return false
-}
-
-func execShortFlagHasLogin(arg string) bool {
-	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") || len(arg) < 3 {
-		return false
-	}
-	for _, ch := range arg[1:] {
-		if ch == 'l' {
-			return true
-		}
-		if ch != 'c' {
-			return false
-		}
-	}
-	return false
-}
-
-func sudoLoginShellOption(argv []string) bool {
-	if len(argv) < 2 || commandName(argv[0]) != "sudo" {
-		return false
-	}
-	for i := 1; i < len(argv); i++ {
-		arg := argv[i]
-		if arg == "--" {
-			return false
-		}
-		if arg == "-i" || arg == "--login" || sudoShortFlagHasLogin(arg) {
-			return true
-		}
-		if sudoFlagTakesValue(arg) || sudoShortFlagTakesSeparateValue(arg) {
-			i++
-			continue
-		}
-		if sudoFlagHasInlineValue(arg) || sudoShortFlagHasInlineValue(arg) || sudoFlagNoValue(arg) {
-			continue
-		}
-		if strings.HasPrefix(arg, "-") {
-			continue
-		}
-		return false
-	}
-	return false
-}
-
-func sudoShortFlagHasLogin(arg string) bool {
-	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") || len(arg) < 2 {
-		return false
-	}
-	body := arg[1:]
-	for i := 0; i < len(body); i++ {
-		ch := body[i]
-		if ch == 'i' {
-			return true
-		}
-		if sudoShortFlagTakesValue(ch) {
-			return false
-		}
-	}
-	return false
-}
-
-func shellStartupFileOption(argv []string) bool {
-	if len(argv) == 0 || !isShellCommand(argv[0]) {
-		return false
-	}
-	for i := 1; i < len(argv); i++ {
-		arg := argv[i]
-		if arg == "--" || arg == "-c" {
-			return false
-		}
-		if arg == "--rcfile" || arg == "--init-file" || strings.HasPrefix(arg, "--rcfile=") || strings.HasPrefix(arg, "--init-file=") {
-			return true
-		}
-		if shellOptionTakesValue(arg) {
-			i++
-			continue
-		}
-		if shellShortOptionHasCommand(arg) {
-			return false
-		}
-		if !strings.HasPrefix(arg, "-") {
-			return false
-		}
-	}
-	return false
-}
-
-func shellOptionTakesValue(arg string) bool {
-	switch arg {
-	case "-O", "+O", "-o", "+o", "--rcfile", "--init-file":
-		return true
-	default:
-		return false
-	}
-}
-
-func shellInterpreterWithoutVisibleScript(argv []string) bool {
-	if len(argv) == 0 || !isShellCommand(argv[0]) {
-		return false
-	}
-	i := 1
-	for i < len(argv) {
-		arg := argv[i]
-		if arg == "--" {
-			i++
-			break
-		}
-		if arg == "-c" {
-			return false
-		}
-		if shellOptionTakesValue(arg) {
-			if i+1 >= len(argv) {
-				return true
-			}
-			i += 2
-			continue
-		}
-		if shellNoScriptOption(arg) {
-			return false
-		}
-		if strings.HasPrefix(arg, "-") {
-			if shellShortOptionHasCommand(arg) {
-				return false
-			}
-			i++
-			continue
-		}
-		break
-	}
-	return true
-}
-
-func shellNoScriptOption(arg string) bool {
-	switch arg {
-	case "--help", "--version", "-h", "-n":
-		return true
-	default:
-		return false
-	}
-}
-
-func shellShortOptionHasCommand(arg string) bool {
-	return strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.Contains(arg[1:], "c")
+	return s
 }
 
 func isShellCommand(cmd string) bool {
@@ -1685,12 +1150,4 @@ func gitGlobalFlagTakesValue(arg string) bool {
 	default:
 		return false
 	}
-}
-
-func normalizeGhGlobalOptions(argv []string) ([]string, bool, string) {
-	normalized, _, err := parseGhCommand(argv)
-	if err != nil {
-		return argv, false, ""
-	}
-	return normalized, false, ""
 }

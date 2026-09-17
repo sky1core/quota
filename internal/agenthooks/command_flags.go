@@ -26,6 +26,7 @@ type commandFlag struct {
 	name     string
 	token    string
 	disabled bool
+	literal  bool
 }
 
 func optionValues(groups ...optionGroup) map[string]optionValue {
@@ -86,7 +87,52 @@ var gitCommandOptions = map[string]map[string]optionValue{
 		optionGroup{optionRequiredValue, `-U --unified --inter-hunk-context --pathspec-from-file`},
 		optionGroup{optionAttachedValue, `--recurse-submodules`},
 	),
+	"pull": optionValues(
+		optionGroup{optionNoValue, `-h --help --help-all -q --quiet --no-quiet -v --verbose --no-verbose
+			--ff --no-ff --ff-only --commit --no-commit --edit --no-edit --cleanup --no-cleanup
+			--rebase --no-rebase --autostash --no-autostash --stat --no-stat --log --no-log
+			--signoff --no-signoff --verify --no-verify --progress --no-progress --tags --no-tags
+			--allow-unrelated-histories --no-recurse-submodules`},
+		optionGroup{optionRequiredValue, `-s --strategy -X --strategy-option -S --gpg-sign --depth --deepen --shallow-since
+			--shallow-exclude --server-option --upload-pack`},
+		optionGroup{optionAttachedValue, `--recurse-submodules --jobs`},
+	),
+	"for-each-repo": optionValues(
+		optionGroup{optionNoValue, `-h --help --help-all`},
+		optionGroup{optionRequiredValue, `--config`},
+	),
+	"update-ref": optionValues(
+		optionGroup{optionNoValue, `-h --help --help-all -d --delete --stdin --no-deref --create-reflog`},
+		optionGroup{optionRequiredValue, `-m`},
+	),
+	"replace": optionValues(
+		optionGroup{optionNoValue, `-h --help --help-all -f --force -d --delete --graft --edit --convert-graft-file`},
+		optionGroup{optionRequiredValue, `--format`},
+	),
+	"reflog": optionValues(
+		optionGroup{optionNoValue, `-h --help --help-all --all --single-worktree --updateref --rewrite --stale-fix
+			--dry-run --verbose`},
+		optionGroup{optionAttachedValue, `--expire --expire-unreachable`},
+	),
+	"diff": optionValues(
+		optionGroup{optionNoValue, `-h --help --help-all --cached --staged --check --summary --patch --no-patch
+			--name-only --name-status --numstat --shortstat --dirstat --raw --exit-code --quiet
+			--no-color --no-color-moved --minimal --histogram --patience --full-index --binary --text
+			--find-copies-harder --pickaxe-all`},
+		optionGroup{optionRequiredValue, `--inter-hunk-context --diff-filter -S -G -O --output
+			--src-prefix --dst-prefix --word-diff-regex`},
+		optionGroup{optionAttachedValue, `-U --unified -M -C -B -l --stat --dirstat --diff-algorithm --word-diff --color-words
+			--color --color-moved --color-moved-ws --relative --ignore-submodules --submodule
+			--find-renames --find-copies --break-rewrites --abbrev`},
+	),
+	"status": optionValues(
+		optionGroup{optionNoValue, `-h --help --help-all -s --short -b --branch --show-stash
+			--ahead-behind --no-ahead-behind --long -z --renames --no-renames --no-column`},
+		optionGroup{optionAttachedValue, `--porcelain -u --untracked-files --ignored --ignore-submodules --column --find-renames`},
+	),
 }
+
+var gitDefaultSubcommandOptions = optionValues(optionGroup{optionNoValue, `-h --help --help-all`})
 
 var ghCheckoutOptions = optionValues(
 	optionGroup{optionRequiredValue, `-b --branch -R --repo`},
@@ -103,29 +149,95 @@ var ghRepoEditOptions = optionValues(
 		--enable-secret-scanning-push-protection --enable-squash-merge --enable-wiki --template --help`},
 )
 
-func commandFlags(argv []string) ([]commandFlag, bool, error) {
-	if len(argv) < 2 {
-		return nil, false, nil
+type parsedCommand struct {
+	argv        []string
+	flags       []commandFlag
+	undecidable string
+	dynamic     bool
+}
+
+func parseCommand(argv []string) parsedCommand {
+	parsed := parsedCommand{argv: append([]string(nil), argv...)}
+	if len(argv) == 0 {
+		return parsed
 	}
 	name := commandName(argv[0])
-	var options map[string]optionValue
-	start := 2
+	if subcommand, ok := gitDashedSubcommand(name); ok {
+		parsed.argv = append([]string{"git", subcommand}, argv[1:]...)
+		name = "git"
+	}
 	switch name {
 	case "git":
-		options = gitCommandOptions[argv[1]]
-	case "gh":
-		if len(argv) >= 3 && argv[1] == "extension" && argv[2] == "exec" {
-			return nil, false, nil
+		parsed.argv[0] = name
+		var unknown bool
+		parsed.argv, unknown, parsed.undecidable = normalizeGitGlobalOptions(parsed.argv)
+		parsed.dynamic = unknown
+		if unknown || len(parsed.argv) < 2 {
+			return parsed
 		}
-		_, flags, err := parseGhCommand(argv)
-		return flags, true, err
+		if subcommand := parsed.argv[1]; subcommand != "" && !strings.HasPrefix(subcommand, "-") && !knownGitSubcommand(subcommand) {
+			parsed.undecidable = "unknown git subcommand can resolve to a git alias or external helper"
+			return parsed
+		}
+		options, ok := gitCommandOptions[parsed.argv[1]]
+		if !ok {
+			options = gitDefaultSubcommandOptions
+			if !argvHasOption(parsed.argv[2:]) {
+				return parsed
+			}
+			flags, err := parseCommandFlags("git "+parsed.argv[1], parsed.argv[2:], options, true)
+			parsed.flags = flags
+			if err != nil {
+				parsed.undecidable = err.Error()
+			}
+			return parsed
+		}
+		flags, err := parseCommandFlags("git "+parsed.argv[1], parsed.argv[2:], options, true)
+		parsed.flags = flags
+		if err != nil {
+			parsed.undecidable = err.Error()
+		}
+	case "gh":
+		parsed.argv[0] = name
+		normalized, err := parseGhCommand(parsed.argv)
+		if err != nil {
+			parsed.dynamic = true
+			parsed.undecidable = err.Error()
+		} else {
+			parsed = normalized
+		}
+	default:
+		parsed.flags = literalCommandFlags(parsed.argv[1:])
 	}
-	if options == nil {
-		return nil, false, nil
+	return parsed
+}
+
+func argvHasOption(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" || arg == "--end-of-options" {
+			return false
+		}
+		if arg != "-" && strings.HasPrefix(arg, "-") {
+			return true
+		}
 	}
-	command := strings.Join(append([]string{name}, argv[1:start]...), " ")
-	flags, err := parseCommandFlags(command, argv[start:], options, name == "git")
-	return flags, true, err
+	return false
+}
+
+func literalCommandFlags(args []string) []commandFlag {
+	var flags []commandFlag
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		flags = append(flags, commandFlag{name: arg, token: arg, literal: true})
+		if !strings.HasPrefix(arg, "--") {
+			for _, letter := range arg[1:] {
+				flags = append(flags, commandFlag{name: "-" + string(letter), token: arg, literal: true})
+			}
+		}
+	}
+	return flags
 }
 
 func parseCommandFlags(command string, args []string, options map[string]optionValue, gitOptions bool) ([]commandFlag, error) {
@@ -233,10 +345,28 @@ func resolveLongOption(name string, options map[string]optionValue, abbreviate b
 func appendCommandFlag(flags []commandFlag, flag commandFlag, value optionValue) []commandFlag {
 	if value == optionBooleanForce {
 		for i := range flags {
-			if flags[i].name == "-f" || flags[i].name == "--force" {
+			if sameBooleanForceFlag(flags[i].name, flag.name) {
 				flags[i].disabled = flag.disabled
 			}
 		}
 	}
 	return append(flags, flag)
+}
+
+func sameBooleanForceFlag(a, b string) bool {
+	if a == b {
+		return true
+	}
+	return booleanForceFlagAlias(a) != "" && booleanForceFlagAlias(a) == booleanForceFlagAlias(b)
+}
+
+func booleanForceFlagAlias(name string) string {
+	switch name {
+	case "-f", "--force":
+		return "force"
+	case "-d", "--delete-branch":
+		return "delete-branch"
+	default:
+		return ""
+	}
 }

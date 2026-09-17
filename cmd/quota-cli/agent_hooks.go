@@ -27,8 +27,6 @@ func runAgent(args []string) int {
 	switch args[0] {
 	case "hooks":
 		return runAgentHooks(args[1:], os.Stdout, os.Stderr)
-	case "overlay":
-		return runAgentOverlay(args[1:], os.Stdout, os.Stderr)
 	case "instructions":
 		return runAgentInstructions(args[1:], os.Stdin, os.Stdout, os.Stderr)
 	default:
@@ -41,8 +39,7 @@ func runAgent(args []string) int {
 func printAgentUsage(output io.Writer) {
 	fmt.Fprint(output, `usage:
   quota-cli agent hooks <init|list|plan|apply|verify|doctor|eval> [options]
-  quota-cli agent instructions <setup|status|verify|uninstall> [options]
-  quota-cli agent overlay <init|plan|apply|doctor|verify> [options]
+  quota-cli agent instructions <setup|uninstall|status|local-file> [options]
 `)
 }
 
@@ -156,7 +153,8 @@ func agentHooksList(args []string, stdout, stderr io.Writer) int {
 		return writeJSON(stdout, map[string]any{"policies": res.Policies, "errors": errorsAsStrings(res.Errors)}, stderr)
 	}
 	for _, policy := range res.Policies {
-		fmt.Fprintf(stdout, "%s enabled=%v rules=%d tests=%d path=%s\n", policy.ID, policy.Enabled, len(policy.Rules), len(policy.Tests), policy.Path)
+		fmt.Fprintf(stdout, "%s enabled=%v groups=%d rules=%d tests=%d path=%s\n", policy.ID, policy.Enabled, len(policy.Groups), len(policy.Rules), len(policy.Tests), policy.Path)
+		printAgentHookGroups(stdout, policy.Groups, "  ")
 	}
 	for _, err := range res.Errors {
 		fmt.Fprintln(stderr, err)
@@ -206,7 +204,8 @@ func agentHooksPlan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "  none (%s)\n", policyDirForDisplay(policyDir))
 	}
 	for _, policy := range res.Policies {
-		fmt.Fprintf(stdout, "  %s enabled=%v rules=%d tests=%d\n", policy.ID, policy.Enabled, len(policy.Rules), len(policy.Tests))
+		fmt.Fprintf(stdout, "  %s enabled=%v groups=%d rules=%d tests=%d\n", policy.ID, policy.Enabled, len(policy.Groups), len(policy.Rules), len(policy.Tests))
+		printAgentHookGroups(stdout, policy.Groups, "    ")
 	}
 	fmt.Fprintln(stdout, "Hooks")
 	for _, plan := range plans {
@@ -236,6 +235,16 @@ func agentHooksPlan(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func printAgentHookGroups(stdout io.Writer, groups []agenthooks.Group, indent string) {
+	for _, group := range groups {
+		if group.Description == "" {
+			fmt.Fprintf(stdout, "%sgroup %s\n", indent, group.ID)
+			continue
+		}
+		fmt.Fprintf(stdout, "%sgroup %s: %s\n", indent, group.ID, group.Description)
+	}
 }
 
 func agentHooksApply(args []string, stdout, stderr io.Writer) int {
@@ -348,7 +357,11 @@ func agentHooksVerify(args []string, stdout, stderr io.Writer) int {
 		if !result.Passed {
 			status = "FAIL"
 		}
-		fmt.Fprintf(stdout, "%s %s/%s decision=%s rule=%s\n", status, result.PolicyID, result.Name, result.Got, result.RuleID)
+		name := result.Name
+		if result.Group != "" {
+			name = result.Group + "/" + name
+		}
+		fmt.Fprintf(stdout, "%s %s/%s decision=%s rule=%s\n", status, result.PolicyID, name, result.Got, result.RuleID)
 		if result.Error != "" {
 			fmt.Fprintf(stdout, "  error: %s\n", result.Error)
 		}

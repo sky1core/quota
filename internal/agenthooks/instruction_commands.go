@@ -2,6 +2,7 @@ package agenthooks
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -12,12 +13,48 @@ type InstructionHook struct {
 }
 
 func OwnsInstructionCommand(command, executable, agent, event string) bool {
-	if command == ShellQuote([]string{executable, "agent", "instructions", "_hook", "--agent=" + agent, "--event=" + event}) || command == ShellQuote([]string{executable, "agent", "overlay", "hook", "--runtime=" + agent, "--event=" + event}) {
+	if ownsCurrentInstructionCommand(command, executable, agent, event) {
 		return true
 	}
 	legacy := map[string]string{"claude/SessionStart": "json SessionStart CLAUDE.md CLAUDE.local.md . claude-session", "claude/WorktreeCreate": "claude-worktree-create", "claude/WorktreeRemove": "claude-worktree-remove", "codex/SessionStart": "json SessionStart AGENTS.md - . codex-session", "codex/SubagentStart": "json SubagentStart AGENTS.md - . codex-subagent"}
 	suffix, ok := legacy[agent+"/"+event]
 	return ok && command == `sh "$HOME/.local/bin/agents-overlay-context" `+suffix
+}
+func ownsCurrentInstructionCommand(command, executable, agent, event string) bool {
+	inv, ok := parseDirectShellInvocation(command)
+	if !ok {
+		return false
+	}
+	argv := inv.Argv
+	if len(argv) != 6 || !sameExecutable(argv[0], executable) {
+		return false
+	}
+	if argv[1] == "agent" &&
+		argv[2] == "instructions" &&
+		(argv[3] == "_prepare" || argv[3] == "_hook") &&
+		argv[4] == "--agent="+agent &&
+		argv[5] == "--event="+event {
+		return true
+	}
+	return argv[1] == "agent" &&
+		argv[2] == "overlay" &&
+		argv[3] == "hook" &&
+		argv[4] == "--runtime="+agent &&
+		argv[5] == "--event="+event
+}
+func sameExecutable(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if !filepath.IsAbs(a) || !filepath.IsAbs(b) {
+		return false
+	}
+	aInfo, aErr := os.Stat(a)
+	bInfo, bErr := os.Stat(b)
+	if aErr != nil || bErr != nil {
+		return false
+	}
+	return os.SameFile(aInfo, bInfo)
 }
 func SuspiciousInstructionCommand(command string, knownExecutables ...string) bool {
 	invocations, err := ParseShellInvocations(strings.NewReplacer("$HOME", "/placeholder-home", "${HOME}", "/placeholder-home").Replace(command))
@@ -36,7 +73,10 @@ func SuspiciousInstructionCommand(command string, knownExecutables ...string) bo
 				break
 			}
 		}
-		if quotaExecutable && len(argv) >= 4 && argv[1] == "agent" && ((argv[2] == "instructions" && argv[3] == "_hook") || (argv[2] == "overlay" && argv[3] == "hook")) {
+		if quotaExecutable && len(argv) >= 4 && argv[1] == "agent" && argv[2] == "instructions" && (argv[3] == "_prepare" || argv[3] == "_hook") {
+			return true
+		}
+		if quotaExecutable && len(argv) >= 4 && argv[1] == "agent" && argv[2] == "overlay" && argv[3] == "hook" {
 			return true
 		}
 		if filepath.Base(argv[0]) == "agents-overlay-context" {

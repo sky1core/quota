@@ -2,7 +2,12 @@ package agenthooks
 
 import "fmt"
 
-const PresetGitHubHistoryGuard = "github-history-guard"
+const (
+	PresetGitHubHistoryGuard = "github-history-guard"
+
+	PolicyGroupRemoteCodeRefMutation       = "remote-code-ref-mutation"
+	PolicyGroupGitHubCollaborationMetadata = "github-collaboration-metadata"
+)
 
 func Preset(id string) (Policy, error) {
 	switch id {
@@ -13,16 +18,22 @@ func Preset(id string) (Policy, error) {
 	}
 }
 
-func PresetIDs() []string {
-	return []string{PresetGitHubHistoryGuard}
-}
-
 func githubHistoryGuardPreset() Policy {
-	return Policy{
+	policy := Policy{
 		Version:     PolicyVersion,
 		ID:          PresetGitHubHistoryGuard,
 		Description: "Allow GitHub PR/issue collaboration while blocking code history and repository state changes.",
 		Enabled:     true,
+		Groups: []Group{
+			{
+				ID:          PolicyGroupRemoteCodeRefMutation,
+				Description: "Blocks commands that can push, publish, rewrite, move, merge, or hide code history, refs, tags, releases, PR branch state, or repository state.",
+			},
+			{
+				ID:          PolicyGroupGitHubCollaborationMetadata,
+				Description: "Allows PR/Issue text, comment, review metadata, and PR stack links that do not push or move refs.",
+			},
+		},
 		Rules: []Rule{
 			{
 				ID:      "deny-git-push",
@@ -71,6 +82,18 @@ func githubHistoryGuardPreset() Policy {
 				Effect:  EffectDeny,
 				Match:   Match{Argv: exactArgs("git", "for-each-repo")},
 				Message: "git for-each-repo runs an arbitrary git command in configured repositories; get explicit approval first.",
+			},
+			{
+				ID:      "deny-git-bisect-run",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("git", "bisect", "run")},
+				Message: "git bisect run executes another command outside the visible policy decision; get explicit approval first.",
+			},
+			{
+				ID:      "deny-git-submodule-foreach",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("git", "submodule", "foreach")},
+				Message: "git submodule foreach executes another command in submodules; get explicit approval first.",
 			},
 			{
 				ID:      "deny-git-update-ref",
@@ -241,6 +264,30 @@ func githubHistoryGuardPreset() Policy {
 				Message: "gh pr update-branch changes PR branch history; get explicit approval first.",
 			},
 			{
+				ID:      "deny-gh-issue-develop",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("gh", "issue", "develop")},
+				Message: "gh issue develop can create or link a branch for an issue; get explicit approval first.",
+			},
+			{
+				ID:      "deny-gh-pr-revert",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("gh", "pr", "revert")},
+				Message: "gh pr revert can create revert source and a PR branch; get explicit approval first.",
+			},
+			{
+				ID:      "deny-gh-pr-close-delete-branch",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("gh", "pr", "close"), HasFlag: []string{"--delete-branch"}},
+				Message: "gh pr close --delete-branch deletes the PR branch ref; get explicit approval first.",
+			},
+			{
+				ID:      "deny-gh-pr-close-delete-branch-short",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("gh", "pr", "close"), HasFlag: []string{"-d"}},
+				Message: "gh pr close -d deletes the PR branch ref; get explicit approval first.",
+			},
+			{
 				ID:      "deny-gh-pr-checkout-force",
 				Effect:  EffectDeny,
 				Match:   Match{Argv: exactArgs("gh", "pr", "checkout"), HasFlag: []string{"--force"}},
@@ -289,10 +336,58 @@ func githubHistoryGuardPreset() Policy {
 				Message: "gh repo sync changes repository refs; get explicit approval first.",
 			},
 			{
+				ID:      "deny-gh-repo-create",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("gh", "repo", "create")},
+				Message: "gh repo create creates remote repository state and can publish source; get explicit approval first.",
+			},
+			{
+				ID:      "deny-gh-repo-delete",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("gh", "repo", "delete")},
+				Message: "gh repo delete removes a remote repository and its source history; get explicit approval first.",
+			},
+			{
+				ID:      "deny-gh-repo-fork",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("gh", "repo", "fork")},
+				Message: "gh repo fork creates a remote repository copy; get explicit approval first.",
+			},
+			{
+				ID:      "deny-gh-repo-deploy-key-add-write",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("gh", "repo", "deploy-key", "add"), HasFlag: []string{"--allow-write"}},
+				Message: "gh repo deploy-key add --allow-write grants future remote write access; get explicit approval first.",
+			},
+			{
+				ID:      "deny-gh-repo-deploy-key-add-write-short",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("gh", "repo", "deploy-key", "add"), HasFlag: []string{"-w"}},
+				Message: "gh repo deploy-key add -w grants future remote write access; get explicit approval first.",
+			},
+			{
 				ID:      "deny-gh-release-create",
 				Effect:  EffectDeny,
 				Match:   Match{Argv: exactArgs("gh", "release", "create")},
 				Message: "gh release create can create tags or publish repository state; get explicit approval first.",
+			},
+			{
+				ID:      "deny-gh-release-edit",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("gh", "release", "edit")},
+				Message: "gh release edit changes published release state; get explicit approval first.",
+			},
+			{
+				ID:      "deny-gh-release-upload",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("gh", "release", "upload")},
+				Message: "gh release upload changes published release assets; get explicit approval first.",
+			},
+			{
+				ID:      "deny-gh-release-delete-asset",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("gh", "release", "delete-asset")},
+				Message: "gh release delete-asset removes published release assets; get explicit approval first.",
 			},
 			{
 				ID:      "deny-gh-release-delete",
@@ -329,6 +424,30 @@ func githubHistoryGuardPreset() Policy {
 				Effect:  EffectDeny,
 				Match:   Match{Argv: exactArgs("gh", "extension", "exec")},
 				Message: "gh extension exec hides GitHub operations from the policy evaluator; get explicit approval first.",
+			},
+			{
+				ID:      "deny-gh-workflow-run",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("gh", "workflow", "run")},
+				Message: "gh workflow run starts remote automation that can change repository state; get explicit approval first.",
+			},
+			{
+				ID:      "deny-gh-run-rerun",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("gh", "run", "rerun")},
+				Message: "gh run rerun restarts remote automation that can change repository state; get explicit approval first.",
+			},
+			{
+				ID:      "deny-gh-agent-task-create",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("gh", "agent-task", "create")},
+				Message: "gh agent-task create dispatches a remote coding agent that can change repository state; get explicit approval first.",
+			},
+			{
+				ID:      "deny-gh-codespace-ssh",
+				Effect:  EffectDeny,
+				Match:   Match{Argv: exactArgs("gh", "codespace", "ssh")},
+				Message: "gh codespace ssh can run commands outside the visible local policy decision; get explicit approval first.",
 			},
 			{
 				ID:      "deny-shell-alias",
@@ -375,6 +494,11 @@ func githubHistoryGuardPreset() Policy {
 			{Name: "allow pr create", Command: `gh pr create --title "change" --body "body"`, Want: DecisionAllow},
 			{Name: "allow issue create", Command: `gh issue create --title "bug" --body "body"`, Want: DecisionAllow},
 			{Name: "allow pr edit", Command: `gh pr edit 12 --body-file body.md`, Want: DecisionAllow},
+			{Name: "allow pr comment", Command: `gh pr comment 12 --body "looks good"`, Want: DecisionAllow},
+			{Name: "allow issue comment", Command: `gh issue comment 12 --body "needs info"`, Want: DecisionAllow},
+			{Name: "allow issue edit", Command: `gh issue edit 12 --body-file body.md`, Want: DecisionAllow},
+			{Name: "allow issue view", Command: `gh issue view 12`, Want: DecisionAllow},
+			{Name: "allow pr close without branch delete", Command: `gh pr close 12 --comment "not ready"`, Want: DecisionAllow},
 			{Name: "deny git push", Command: `git push origin main`, Want: DecisionDeny, RuleID: "deny-git-push"},
 			{Name: "deny absolute git push", Command: `/usr/bin/git push origin main`, Want: DecisionDeny, RuleID: "deny-git-push"},
 			{Name: "deny dashed git push helper", Command: `/usr/libexec/git-core/git-push origin main`, Want: DecisionDeny, RuleID: "deny-git-push"},
@@ -446,6 +570,8 @@ func githubHistoryGuardPreset() Policy {
 			{Name: "deny git filter branch", Command: `git filter-branch -- --all`, Want: DecisionDeny, RuleID: "deny-git-filter-branch"},
 			{Name: "deny git hook run", Command: `git hook run pre-push`, Want: DecisionDeny, RuleID: "deny-git-hook"},
 			{Name: "deny git for-each-repo", Command: `git -c audit.repos=/example/repo for-each-repo --config=audit.repos push origin main`, Want: DecisionDeny, RuleID: "deny-git-for-each-repo"},
+			{Name: "deny git bisect run", Command: `git bisect run ./try-build.sh`, Want: DecisionDeny, RuleID: "deny-git-bisect-run"},
+			{Name: "deny git submodule foreach", Command: `git submodule foreach ./publish.sh`, Want: DecisionDeny, RuleID: "deny-git-submodule-foreach"},
 			{Name: "deny git commit dashdash as message value", Command: `git commit -m -- --amend`, Want: DecisionDeny},
 			{Name: "deny git update ref", Command: `git update-ref -d refs/heads/main`, Want: DecisionDeny, RuleID: "deny-git-update-ref"},
 			{Name: "deny dashed git update ref helper", Command: `/usr/libexec/git-core/git-update-ref -d refs/heads/main`, Want: DecisionDeny, RuleID: "deny-git-update-ref"},
@@ -479,6 +605,10 @@ func githubHistoryGuardPreset() Policy {
 			{Name: "deny gh pr merge with repo option", Command: `gh -R owner/repo pr merge 12`, Want: DecisionDeny, RuleID: "deny-gh-pr-merge"},
 			{Name: "deny gh pr merge with inline repo option", Command: `gh -Rowner/repo pr merge 12`, Want: DecisionDeny, RuleID: "deny-gh-pr-merge"},
 			{Name: "deny gh pr update branch", Command: `gh pr update-branch 23 --rebase`, Want: DecisionDeny, RuleID: "deny-gh-pr-update-branch"},
+			{Name: "deny gh issue develop", Command: `gh issue develop 12 --name feature`, Want: DecisionDeny, RuleID: "deny-gh-issue-develop"},
+			{Name: "deny gh pr revert", Command: `gh pr revert 12`, Want: DecisionDeny, RuleID: "deny-gh-pr-revert"},
+			{Name: "deny gh pr close delete branch", Command: `gh pr close 23 --delete-branch`, Want: DecisionDeny, RuleID: "deny-gh-pr-close-delete-branch"},
+			{Name: "deny gh pr close delete branch short", Command: `gh pr close 23 -d`, Want: DecisionDeny, RuleID: "deny-gh-pr-close-delete-branch-short"},
 			{Name: "deny gh pr checkout force", Command: `gh pr checkout 23 --force`, Want: DecisionDeny, RuleID: "deny-gh-pr-checkout-force"},
 			{Name: "deny gh pr checkout force short", Command: `gh pr checkout 23 -f`, Want: DecisionDeny, RuleID: "deny-gh-pr-checkout-force-short"},
 			{Name: "deny gh pr co force", Command: `gh pr co 23 --force`, Want: DecisionDeny, RuleID: "deny-gh-pr-co-force"},
@@ -486,7 +616,16 @@ func githubHistoryGuardPreset() Policy {
 			{Name: "allow gh pr checkout without force", Command: `gh pr checkout 23`, Want: DecisionAllow},
 			{Name: "deny gh repo visibility", Command: `gh repo edit --visibility public`, Want: DecisionDeny, RuleID: "deny-gh-repo-visibility"},
 			{Name: "deny gh repo sync", Command: `gh repo sync owner/fork --source owner/upstream --force`, Want: DecisionDeny, RuleID: "deny-gh-repo-sync"},
+			{Name: "deny gh repo create", Command: `gh repo create owner/new-repo --add-readme`, Want: DecisionDeny, RuleID: "deny-gh-repo-create"},
+			{Name: "deny gh repo create push", Command: `gh repo create owner/new-repo --source . --push`, Want: DecisionDeny, RuleID: "deny-gh-repo-create"},
+			{Name: "deny gh repo delete", Command: `gh repo delete owner/old-repo --yes`, Want: DecisionDeny, RuleID: "deny-gh-repo-delete"},
+			{Name: "deny gh repo fork", Command: `gh repo fork owner/repo`, Want: DecisionDeny, RuleID: "deny-gh-repo-fork"},
+			{Name: "deny gh repo deploy key add write", Command: `gh repo deploy-key add key.pub --allow-write`, Want: DecisionDeny, RuleID: "deny-gh-repo-deploy-key-add-write"},
+			{Name: "deny gh repo deploy key add write short", Command: `gh repo deploy-key add key.pub -w`, Want: DecisionDeny, RuleID: "deny-gh-repo-deploy-key-add-write-short"},
 			{Name: "deny gh release create", Command: `gh release create v1.2.3 --notes x`, Want: DecisionDeny, RuleID: "deny-gh-release-create"},
+			{Name: "deny gh release edit", Command: `gh release edit v1.2.3 --notes x`, Want: DecisionDeny, RuleID: "deny-gh-release-edit"},
+			{Name: "deny gh release upload", Command: `gh release upload v1.2.3 dist/quota.tgz`, Want: DecisionDeny, RuleID: "deny-gh-release-upload"},
+			{Name: "deny gh release delete asset", Command: `gh release delete-asset v1.2.3 quota.tgz --yes`, Want: DecisionDeny, RuleID: "deny-gh-release-delete-asset"},
 			{Name: "deny gh release delete", Command: `gh release delete v1.2.3 --cleanup-tag --yes`, Want: DecisionDeny, RuleID: "deny-gh-release-delete"},
 			{Name: "deny gh api", Command: `gh api repos/owner/repo/pulls`, Want: DecisionDeny, RuleID: "deny-gh-api"},
 			{Name: "deny gh api with hostname option", Command: `gh --hostname github.com api repos/owner/repo/pulls`, Want: DecisionDeny, RuleID: "deny-gh-api"},
@@ -496,6 +635,10 @@ func githubHistoryGuardPreset() Policy {
 			{Name: "deny gh alias delete", Command: `gh alias delete done`, Want: DecisionDeny, RuleID: "deny-gh-alias-delete"},
 			{Name: "allow gh alias list", Command: `gh alias list`, Want: DecisionAllow},
 			{Name: "deny gh extension exec", Command: `gh extension exec some-extension pr merge 12`, Want: DecisionDeny, RuleID: "deny-gh-extension-exec"},
+			{Name: "deny gh workflow run", Command: `gh workflow run publish.yml --ref main`, Want: DecisionDeny, RuleID: "deny-gh-workflow-run"},
+			{Name: "deny gh run rerun", Command: `gh run rerun 123456789`, Want: DecisionDeny, RuleID: "deny-gh-run-rerun"},
+			{Name: "deny gh agent task create", Command: `gh agent-task create -F task.md`, Want: DecisionDeny, RuleID: "deny-gh-agent-task-create"},
+			{Name: "deny gh codespace ssh", Command: `gh codespace ssh -c example -- ./publish.sh`, Want: DecisionDeny, RuleID: "deny-gh-codespace-ssh"},
 			{Name: "deny shell alias", Command: `bash -O expand_aliases -c 'alias gp="git push"; gp origin main'`, Want: DecisionDeny, RuleID: "deny-shell-alias"},
 			{Name: "deny shell source", Command: `bash -c 'source ./script.sh'`, Want: DecisionDeny, RuleID: "deny-shell-source"},
 			{Name: "deny shell dot source", Command: `bash -c '. ./script.sh'`, Want: DecisionDeny, RuleID: "deny-shell-dot-source"},
@@ -527,6 +670,34 @@ func githubHistoryGuardPreset() Policy {
 			{Name: "deny dynamic protected git", Command: `git "$subcommand" origin main`, Want: DecisionDeny},
 			{Name: "allow dynamic value for unprotected command", Command: `echo "$HOME"`, Want: DecisionAllow},
 		},
+	}
+	assignGitHubHistoryGuardGroups(&policy)
+	return policy
+}
+
+func assignGitHubHistoryGuardGroups(policy *Policy) {
+	for i := range policy.Rules {
+		policy.Rules[i].Group = PolicyGroupRemoteCodeRefMutation
+	}
+	metadataTests := map[string]bool{
+		"allow pr create":                      true,
+		"allow issue create":                   true,
+		"allow pr edit":                        true,
+		"allow pr comment":                     true,
+		"allow issue comment":                  true,
+		"allow issue edit":                     true,
+		"allow issue view":                     true,
+		"allow pr close without branch delete": true,
+		"allow gh pr view":                     true,
+		"allow gh stack link ints":             true,
+	}
+	for i := range policy.Tests {
+		switch {
+		case metadataTests[policy.Tests[i].Name]:
+			policy.Tests[i].Group = PolicyGroupGitHubCollaborationMetadata
+		case policy.Tests[i].Want == DecisionDeny:
+			policy.Tests[i].Group = PolicyGroupRemoteCodeRefMutation
+		}
 	}
 }
 

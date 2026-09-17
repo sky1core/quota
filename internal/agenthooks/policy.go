@@ -28,13 +28,20 @@ type Policy struct {
 	ID          string     `json:"id"`
 	Description string     `json:"description,omitempty"`
 	Enabled     bool       `json:"enabled"`
+	Groups      []Group    `json:"groups,omitempty"`
 	Rules       []Rule     `json:"rules"`
 	Tests       []TestCase `json:"tests,omitempty"`
 	Path        string     `json:"-"`
 }
 
+type Group struct {
+	ID          string `json:"id"`
+	Description string `json:"description,omitempty"`
+}
+
 type Rule struct {
 	ID      string  `json:"id"`
+	Group   string  `json:"group,omitempty"`
 	Effect  string  `json:"effect"`
 	Match   Match   `json:"match"`
 	Except  []Match `json:"except,omitempty"`
@@ -57,6 +64,7 @@ type ArgPattern struct {
 
 type TestCase struct {
 	Name    string `json:"name"`
+	Group   string `json:"group,omitempty"`
 	Command string `json:"command"`
 	Want    string `json:"want"`
 	RuleID  string `json:"ruleId,omitempty"`
@@ -142,13 +150,29 @@ func ValidatePolicy(policy Policy) error {
 	if strings.TrimSpace(policy.ID) == "" {
 		return errors.New("policy id is required")
 	}
-	if strings.ContainsAny(policy.ID, `/\`) || policy.ID == "." || policy.ID == ".." {
+	if !fileSafeID(policy.ID) {
 		return fmt.Errorf("policy id %q is not a file-safe id", policy.ID)
+	}
+	groups := map[string]bool{}
+	for _, group := range policy.Groups {
+		if strings.TrimSpace(group.ID) == "" {
+			return fmt.Errorf("policy %s has a group with an empty id", policy.ID)
+		}
+		if !fileSafeID(group.ID) {
+			return fmt.Errorf("policy %s has non-file-safe group id %q", policy.ID, group.ID)
+		}
+		if groups[group.ID] {
+			return fmt.Errorf("policy %s has duplicate group id %q", policy.ID, group.ID)
+		}
+		groups[group.ID] = true
 	}
 	seen := map[string]bool{}
 	for _, rule := range policy.Rules {
 		if strings.TrimSpace(rule.ID) == "" {
 			return fmt.Errorf("policy %s has a rule with an empty id", policy.ID)
+		}
+		if err := validateOptionalGroup(policy.ID, rule.ID, rule.Group, groups); err != nil {
+			return err
 		}
 		if seen[rule.ID] {
 			return fmt.Errorf("policy %s has duplicate rule id %q", policy.ID, rule.ID)
@@ -172,6 +196,9 @@ func ValidatePolicy(policy Policy) error {
 		if strings.TrimSpace(test.Name) == "" {
 			return fmt.Errorf("policy %s has a test with an empty name", policy.ID)
 		}
+		if err := validateOptionalGroup(policy.ID, test.Name, test.Group, groups); err != nil {
+			return err
+		}
 		if strings.TrimSpace(test.Command) == "" {
 			return fmt.Errorf("test %s has an empty command", test.Name)
 		}
@@ -182,6 +209,23 @@ func ValidatePolicy(policy Policy) error {
 		}
 	}
 	return nil
+}
+
+func validateOptionalGroup(policyID, ownerID, group string, groups map[string]bool) error {
+	if strings.TrimSpace(group) == "" {
+		return nil
+	}
+	if !fileSafeID(group) {
+		return fmt.Errorf("policy %s item %s has non-file-safe group id %q", policyID, ownerID, group)
+	}
+	if len(groups) > 0 && !groups[group] {
+		return fmt.Errorf("policy %s item %s references unknown group %q", policyID, ownerID, group)
+	}
+	return nil
+}
+
+func fileSafeID(id string) bool {
+	return !strings.ContainsAny(id, `/\`) && id != "." && id != ".."
 }
 
 func validateMatch(match Match) error {

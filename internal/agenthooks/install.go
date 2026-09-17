@@ -84,13 +84,6 @@ func CodexHooksPath() string {
 	return filepath.Join(home, ".codex", "hooks.json")
 }
 
-func Plans(binary, policyDir string) []HookPlan {
-	return []HookPlan{
-		{Runtime: "claude", Path: ClaudeSettingsPath(), Command: HookCommand("claude", binary, policyDir), Binary: hookBinary(binary), PolicyDir: policyDir},
-		{Runtime: "codex", Path: CodexHooksPath(), Command: HookCommand("codex", binary, policyDir), Binary: hookBinary(binary), PolicyDir: policyDir},
-	}
-}
-
 func Apply(runtime, binary, policyDir string) (HookPlan, error) {
 	switch runtime {
 	case "claude":
@@ -293,7 +286,7 @@ func isReplacedEvaluatorCommand(command, replacement string) bool {
 		return false
 	}
 	for _, inv := range invocations {
-		argv := inv.Argv
+		argv := inv.literalArgv
 		if len(argv) < 5 {
 			continue
 		}
@@ -377,11 +370,6 @@ func containsCommandString(v any, command string) bool {
 		}
 	}
 	return false
-}
-
-func isManagedHookCommandStrict(command, runtime, binary, policyDir string, exactPolicyDir bool) bool {
-	_, ok := managedHookCommandBinaryStrict(command, runtime, binary, policyDir, exactPolicyDir)
-	return ok
 }
 
 func managedHookCommandBinaryStrict(command, runtime, binary, policyDir string, exactPolicyDir bool) (string, bool) {

@@ -128,6 +128,22 @@ func TestApplyReplacesOnlyEvaluatorExecutables(t *testing.T) {
 				"logger -- quota-cli agent hooks eval --runtime=" + runtime,
 				"other-cli agent hooks eval --runtime=" + runtime,
 				"quota-cli agent hooks eval --runtime=invalid",
+				`"$runner" agent hooks eval --runtime=` + runtime,
+				`"/old/bin/$runner" agent hooks eval --runtime=` + runtime,
+				`/old/bin/quota-cli agent hooks eval --runtime="$runtime"`,
+				`exec -a "$0" /old/bin/quota-cli agent hooks eval --runtime="$runtime"`,
+				`exec -a "$0" "$runner" agent hooks eval --runtime=` + runtime,
+				`exec -a $0 /old/bin/quota-cli agent hooks eval --runtime=` + runtime,
+				`exec -a "$@" /old/bin/quota-cli agent hooks eval --runtime=` + runtime,
+				`exec -a "${names[@]}" /old/bin/quota-cli agent hooks eval --runtime=` + runtime,
+				`exec -a "${name:-$@}" /old/bin/quota-cli agent hooks eval --runtime=` + runtime,
+				`command exec -a $0 /old/bin/quota-cli agent hooks eval --runtime=` + runtime,
+				`/old/bin/quota-cli agent hooks eval --runtime=` + runtime + ` --policy-dir "$policies"`,
+				`logger -- "exec -a \"$0\" /old/bin/quota-cli agent hooks eval --runtime=` + runtime + `"`,
+				"unknown-wrapper /old/bin/quota-cli agent hooks eval --runtime=" + runtime,
+				"exec -Z /old/bin/quota-cli agent hooks eval --runtime=" + runtime,
+				"/old/bin/quota-cli agent hooks eval --runtime=" + runtime + " --runtime=" + runtime,
+				"/old/bin/quota-cli agent hooks eval --runtime=" + runtime + " --unknown",
 			}
 			stale := []string{
 				"quota-cli agent hooks eval --runtime=" + runtime,
@@ -135,6 +151,9 @@ func TestApplyReplacesOnlyEvaluatorExecutables(t *testing.T) {
 				"./qc agent hooks eval --runtime=" + runtime + " --policy-dir /old/policies",
 				"env ./qc agent hooks eval --runtime=" + runtime + " || true",
 				"./qc agent hooks eval --runtime " + runtime,
+				`exec -a "$0" /old/bin/quota-cli agent hooks eval --runtime=` + runtime,
+				`command exec -a "$0" /old/bin/quota-cli agent hooks eval --runtime=` + runtime,
+				`exec -a "$0" -- /old/bin/quota-cli agent hooks eval --runtime=` + runtime,
 			}
 			var hooks []any
 			for _, command := range append(append([]string{}, preserved...), stale...) {

@@ -20,6 +20,7 @@ type Decision struct {
 type TestResult struct {
 	PolicyID string `json:"policyId"`
 	Name     string `json:"name"`
+	Group    string `json:"group,omitempty"`
 	Command  string `json:"command"`
 	Want     string `json:"want"`
 	Got      string `json:"got"`
@@ -39,10 +40,207 @@ func EvaluateCommand(policies []Policy, command string) (Decision, error) {
 			Reason:   "shell command could not be parsed by policy evaluator: " + err.Error(),
 		}, nil
 	}
-	return EvaluateInvocations(policies, invocations), nil
+	decision := evaluateInvocations(policies, invocations)
+	if !decision.Allowed {
+		return decision, nil
+	}
+	if decision, ok := literalDenyDecision(policies, command, invocations); ok {
+		return decision, nil
+	}
+	return decision, nil
 }
 
-func EvaluateInvocations(policies []Policy, invocations []Invocation) Decision {
+func literalDenyDecision(policies []Policy, command string, invocations []Invocation) (Decision, bool) {
+	candidates := literalDenyCandidates(command, invocations)
+	for _, policy := range policies {
+		if !policy.Enabled {
+			continue
+		}
+		for _, rule := range policy.Rules {
+			if rule.Effect != EffectDeny {
+				continue
+			}
+			for _, candidate := range candidates {
+				seq, ok := literalDenyMatch(rule, candidate)
+				if !ok {
+					continue
+				}
+				reason := rule.Message
+				if reason == "" {
+					reason = fmt.Sprintf("matched policy %s rule %s", policy.ID, rule.ID)
+				}
+				return Decision{
+					Decision: rule.Effect,
+					Allowed:  false,
+					RuleID:   rule.ID,
+					PolicyID: policy.ID,
+					Reason:   reason,
+					Command:  seq,
+				}, true
+			}
+		}
+	}
+	return Decision{}, false
+}
+
+func literalDenyCandidates(command string, invocations []Invocation) []string {
+	if len(invocations) == 0 {
+		return []string{command}
+	}
+	seen := map[string]bool{}
+	var candidates []string
+	for _, inv := range invocations {
+		if protectedInvocation(inv) {
+			continue
+		}
+		for _, candidate := range []string{inv.source, strings.Join(inv.literalArgv, " ")} {
+			if candidate == "" || seen[candidate] {
+				continue
+			}
+			seen[candidate] = true
+			candidates = append(candidates, candidate)
+		}
+	}
+	return candidates
+}
+
+func literalDenyMatch(rule Rule, command string) ([]string, bool) {
+	if len(rule.Match.Argv) == 0 || len(rule.Match.Contains) > 0 {
+		return nil, false
+	}
+	seq, ok := exactArgSequence(rule.Match.Argv)
+	if !ok {
+		return nil, false
+	}
+	first := seq[0]
+	if first != "git" && first != "gh" {
+		return nil, false
+	}
+	spans := literalMatchSpans(command, rule.Match, false)
+	for _, span := range spans {
+		if len(rule.Match.HasFlag) > 0 && !literalAnyFlagInCommand(command[span.end:], rule.Match.HasFlag) {
+			continue
+		}
+		if literalAnyMatchAtStart(command[span.start:], rule.Except) {
+			continue
+		}
+		return seq, true
+	}
+	return nil, false
+}
+
+func exactArgSequence(patterns []ArgPattern) ([]string, bool) {
+	seq := make([]string, len(patterns))
+	for i, arg := range patterns {
+		if arg.Exact == "" {
+			return nil, false
+		}
+		seq[i] = arg.Exact
+	}
+	return seq, true
+}
+
+type literalSpan struct {
+	start int
+	end   int
+}
+
+func literalAnyMatchAtStart(command string, matches []Match) bool {
+	for _, match := range matches {
+		if len(match.Argv) == 0 && len(match.HasFlag) > 0 && literalAnyFlagInCommand(command, match.HasFlag) {
+			return true
+		}
+		for _, span := range literalMatchSpans(command, match, match.Exact) {
+			if span.start == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func literalMatchSpans(command string, match Match, exact bool) []literalSpan {
+	if len(match.Argv) == 0 || len(match.Contains) > 0 {
+		return nil
+	}
+	pattern, ok := literalMatchPattern(match.Argv, exact)
+	if !ok {
+		return nil
+	}
+	locs := regexp.MustCompile(pattern).FindAllStringIndex(command, -1)
+	spans := make([]literalSpan, 0, len(locs))
+	for _, loc := range locs {
+		spans = append(spans, literalSpan{start: loc[0], end: loc[1]})
+	}
+	return spans
+}
+
+func literalMatchPattern(args []ArgPattern, exact bool) (string, bool) {
+	var b strings.Builder
+	b.WriteString(literalPrefixBoundary())
+	for i, arg := range args {
+		if i > 0 {
+			b.WriteString(`[[:space:]]+`)
+		}
+		token, ok := literalArgPattern(arg)
+		if !ok {
+			return "", false
+		}
+		b.WriteString(token)
+	}
+	if exact {
+		b.WriteString(literalExactSuffixBoundary())
+	} else {
+		b.WriteString(literalSuffixBoundary())
+	}
+	return b.String(), true
+}
+
+func literalArgPattern(arg ArgPattern) (string, bool) {
+	switch {
+	case arg.Exact != "":
+		return regexp.QuoteMeta(arg.Exact), true
+	case arg.Type == "int":
+		return `[0-9]+`, true
+	case arg.Type == "nonempty":
+		return `[^[:space:];|&()'"` + "`" + `]+`, true
+	default:
+		return "", false
+	}
+}
+
+func literalAnyFlagInCommand(command string, flags []string) bool {
+	for _, flag := range flags {
+		if literalFlagInCommand(command, flag) {
+			return true
+		}
+	}
+	return false
+}
+
+func literalFlagInCommand(command, flag string) bool {
+	pattern := literalPrefixBoundary() + regexp.QuoteMeta(flag)
+	if strings.HasPrefix(flag, "--") {
+		pattern += `($|[=[:space:];|&()'"` + "`" + `])`
+	} else {
+		pattern += literalSuffixBoundary()
+	}
+	return regexp.MustCompile(pattern).MatchString(command)
+}
+
+func literalPrefixBoundary() string {
+	return `(^|[[:space:];|&()'"` + "`" + `])`
+}
+
+func literalSuffixBoundary() string {
+	return `($|[[:space:];|&()'"` + "`" + `])`
+}
+
+func literalExactSuffixBoundary() string {
+	return `([[:space:]]*($|[;|&()'"` + "`" + `]))`
+}
+
+func evaluateInvocations(policies []Policy, invocations []Invocation) Decision {
 	final := Decision{Decision: DecisionAllow, Allowed: true}
 	for _, inv := range invocations {
 		decision := evaluateInvocation(policies, inv)
@@ -57,15 +255,22 @@ func EvaluateInvocations(policies []Policy, invocations []Invocation) Decision {
 }
 
 func evaluateInvocation(policies []Policy, inv Invocation) Decision {
-	if inv.DynamicCommand && hasEnabledDenyRules(policies) {
+	if inv.command.undecidable != "" {
+		return Decision{Decision: DecisionDeny, Allowed: false, Reason: inv.command.undecidable, Command: visibleArgv(inv.Argv, inv.Dynamic)}
+	}
+	if inv.DynamicCommand {
+		reason := inv.DynamicReason
+		if reason == "" {
+			reason = "command cannot be determined by policy evaluator"
+		}
 		return Decision{
 			Decision: DecisionDeny,
 			Allowed:  false,
-			Reason:   "dynamic command name for protected policy is blocked",
+			Reason:   reason,
 			Command:  visibleArgv(inv.Argv, inv.Dynamic),
 		}
 	}
-	if inv.Dynamic && protectedDynamicInvocation(policies, inv) {
+	if inv.Dynamic && protectedInvocation(inv) {
 		return Decision{
 			Decision: DecisionDeny,
 			Allowed:  false,
@@ -73,28 +278,16 @@ func evaluateInvocation(policies []Policy, inv Invocation) Decision {
 			Command:  visibleArgv(inv.Argv, inv.Dynamic),
 		}
 	}
-	if len(inv.Argv) > 0 && hasEnabledDenyRulesForCommand(policies, commandName(inv.Argv[0])) {
-		if _, _, err := commandFlags(inv.Argv); err != nil {
-			return Decision{Decision: DecisionDeny, Allowed: false, Reason: err.Error(), Command: visibleArgv(inv.Argv, inv.Dynamic)}
-		}
-	}
+
 	for _, policy := range policies {
 		if !policy.Enabled {
 			continue
 		}
 		for _, rule := range policy.Rules {
-			matched, err := matchCommand(rule.Match, inv.Argv)
-			if err != nil {
-				return Decision{Decision: DecisionDeny, Allowed: false, Reason: err.Error(), Command: visibleArgv(inv.Argv, inv.Dynamic)}
-			}
-			if !matched {
+			if !matchCommand(rule.Match, inv) {
 				continue
 			}
-			excepted, err := matchAny(rule.Except, inv.Argv)
-			if err != nil {
-				return Decision{Decision: DecisionDeny, Allowed: false, Reason: err.Error(), Command: visibleArgv(inv.Argv, inv.Dynamic)}
-			}
-			if excepted {
+			if matchAny(rule.Except, inv) {
 				continue
 			}
 			decision := Decision{
@@ -111,14 +304,7 @@ func evaluateInvocation(policies []Policy, inv Invocation) Decision {
 			return decision
 		}
 	}
-	if deny, reason := unknownAliasableInvocation(policies, inv.Argv); deny {
-		return Decision{
-			Decision: DecisionDeny,
-			Allowed:  false,
-			Reason:   reason,
-			Command:  visibleArgv(inv.Argv, inv.Dynamic),
-		}
-	}
+
 	return Decision{Decision: DecisionAllow, Allowed: true}
 }
 
@@ -168,6 +354,7 @@ func RunPolicyTests(policies []Policy) []TestResult {
 			result := TestResult{
 				PolicyID: policy.ID,
 				Name:     test.Name,
+				Group:    test.Group,
 				Command:  test.Command,
 				Want:     test.Want,
 			}
@@ -186,45 +373,44 @@ func RunPolicyTests(policies []Policy) []TestResult {
 	return results
 }
 
-func matchAny(matches []Match, argv []string) (bool, error) {
+func matchAny(matches []Match, inv Invocation) bool {
 	for _, match := range matches {
-		matched, err := matchCommand(match, argv)
-		if err != nil || matched {
-			return matched, err
+		if matchCommand(match, inv) {
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
-func matchCommand(match Match, argv []string) (bool, error) {
+func matchCommand(match Match, inv Invocation) bool {
+	argv := inv.Argv
 	if len(argv) == 0 {
-		return false, nil
+		return false
 	}
 	if len(match.Argv) > 0 {
 		if len(argv) < len(match.Argv) {
-			return false, nil
+			return false
 		}
 		if match.Exact && len(argv) != len(match.Argv) {
-			return false, nil
+			return false
 		}
 		for i, pattern := range match.Argv {
 			if !matchArg(pattern, argv[i], i == 0) {
-				return false, nil
+				return false
 			}
 		}
 	}
 	for _, pattern := range match.Contains {
 		if !argvContains(argv, pattern) {
-			return false, nil
+			return false
 		}
 	}
 	for _, flag := range match.HasFlag {
-		matched, err := argvHasFlag(argv, flag)
-		if err != nil || !matched {
-			return false, err
+		if !invocationHasFlag(inv, flag) {
+			return false
 		}
 	}
-	return true, nil
+	return true
 }
 
 func matchArg(pattern ArgPattern, arg string, command bool) bool {
@@ -263,38 +449,16 @@ func argvContains(argv []string, pattern ArgPattern) bool {
 	return false
 }
 
-func argvHasFlag(argv []string, flag string) (bool, error) {
-	if len(argv) == 0 {
-		return false, nil
-	}
-	if flags, supported, err := commandFlags(argv); supported {
-		if err != nil {
-			return false, err
+func invocationHasFlag(inv Invocation, flag string) bool {
+	for _, parsed := range inv.command.flags {
+		if parsed.disabled && !strings.Contains(flag, "=") {
+			continue
 		}
-		for _, parsed := range flags {
-			if parsed.disabled && !strings.Contains(flag, "=") {
-				continue
-			}
-			if parsed.name == flag || parsed.token == flag || strings.HasPrefix(parsed.token, flag+"=") {
-				return true, nil
-			}
-		}
-		return false, nil
-	}
-	args := argv[1:]
-	for _, arg := range args {
-		if arg == flag || strings.HasPrefix(arg, flag+"=") || shortFlagGroupMatches(arg, flag) || longFlagAbbreviationMatches(arg, flag) {
-			return true, nil
+		if parsed.name == flag || parsed.token == flag || strings.HasPrefix(parsed.token, flag+"=") || parsed.literal && longFlagAbbreviationMatches(parsed.token, flag) {
+			return true
 		}
 	}
-	return false, nil
-}
-
-func shortFlagGroupMatches(arg, flag string) bool {
-	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") || len(flag) != 2 || !strings.HasPrefix(flag, "-") {
-		return false
-	}
-	return strings.ContainsRune(arg[1:], rune(flag[1]))
+	return false
 }
 
 func longFlagAbbreviationMatches(arg, flag string) bool {
@@ -307,90 +471,20 @@ func longFlagAbbreviationMatches(arg, flag string) bool {
 	return strings.HasPrefix(flag, arg)
 }
 
-func protectedDynamicInvocation(policies []Policy, inv Invocation) bool {
-	if !inv.Dynamic || len(inv.Argv) == 0 || inv.Argv[0] == "" {
+func protectedInvocation(inv Invocation) bool {
+	if len(inv.Argv) == 0 {
 		return false
 	}
-	first := commandName(inv.Argv[0])
-	for _, policy := range policies {
-		if !policy.Enabled {
-			continue
-		}
-		for _, rule := range policy.Rules {
-			if rule.Effect != EffectDeny || len(rule.Match.Argv) == 0 {
-				continue
-			}
-			if matchArg(rule.Match.Argv[0], first, true) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func hasEnabledDenyRules(policies []Policy) bool {
-	for _, policy := range policies {
-		if !policy.Enabled {
-			continue
-		}
-		for _, rule := range policy.Rules {
-			if rule.Effect == EffectDeny {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func unknownAliasableInvocation(policies []Policy, argv []string) (bool, string) {
-	if len(argv) < 2 {
-		return false, ""
-	}
-	name := commandName(argv[0])
-	subcommand := argv[1]
-	if strings.HasPrefix(subcommand, "-") {
-		return false, ""
-	}
-	switch name {
-	case "git":
-		if !hasEnabledDenyRulesForCommand(policies, "git") || knownGitSubcommand(subcommand) {
-			return false, ""
-		}
-		return true, "unknown git subcommand can resolve to a git alias or external helper"
-	case "gh":
-		if !hasEnabledDenyRulesForCommand(policies, "gh") || knownGhCommand(subcommand) {
-			return false, ""
-		}
-		return true, "unknown gh command can resolve to a gh alias or extension"
+	switch commandName(inv.Argv[0]) {
+	case "git", "gh":
+		return true
 	default:
-		return false, ""
+		return false
 	}
-}
-
-func hasEnabledDenyRulesForCommand(policies []Policy, command string) bool {
-	for _, policy := range policies {
-		if !policy.Enabled {
-			continue
-		}
-		for _, rule := range policy.Rules {
-			if rule.Effect != EffectDeny || len(rule.Match.Argv) == 0 {
-				continue
-			}
-			if matchArg(rule.Match.Argv[0], command, true) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func knownGitSubcommand(subcommand string) bool {
 	_, ok := knownGitSubcommands[subcommand]
-	return ok
-}
-
-func knownGhCommand(command string) bool {
-	_, ok := knownGhCommands[command]
 	return ok
 }
 
@@ -403,8 +497,7 @@ func knownGhCommand(command string) bool {
 // first shipped after git 2.30 (scalar, replay, repo, refs, diagnose, backfill,
 // last-modified, diff-pairs) are intentionally excluded: they may be absent, so
 // an alias could shadow them, and they must stay fail-closed via the unknown-
-// subcommand deny. `hook` (git 2.36) is listed only so its dedicated deny rule
-// supplies the block message; the deny rule matches before the unknown-alias check.
+// subcommand deny.
 var knownGitSubcommands = map[string]struct{}{
 	"add": {}, "am": {}, "annotate": {}, "apply": {}, "archive": {}, "bisect": {}, "blame": {},
 	"branch": {}, "bugreport": {}, "bundle": {}, "cat-file": {}, "check-attr": {}, "check-ignore": {},
@@ -429,15 +522,6 @@ var knownGitSubcommands = map[string]struct{}{
 	"symbolic-ref": {}, "tag": {}, "unpack-file": {}, "unpack-objects": {}, "update-index": {},
 	"update-ref": {}, "update-server-info": {}, "var": {}, "verify-commit": {}, "verify-pack": {},
 	"verify-tag": {}, "version": {}, "whatchanged": {}, "worktree": {}, "write-tree": {},
-}
-
-var knownGhCommands = map[string]struct{}{
-	"agent-task": {}, "alias": {}, "api": {}, "attestation": {}, "auth": {}, "browse": {},
-	"cache": {}, "co": {}, "codespace": {}, "completion": {}, "config": {}, "copilot": {},
-	"extension": {}, "gist": {}, "gpg-key": {}, "help": {}, "issue": {}, "label": {},
-	"licenses": {}, "org": {}, "pr": {}, "preview": {}, "project": {}, "release": {},
-	"repo": {}, "ruleset": {}, "run": {}, "search": {}, "secret": {}, "skill": {},
-	"ssh-key": {}, "stack": {}, "status": {}, "variable": {}, "workflow": {},
 }
 
 func visibleArgv(argv []string, dynamic bool) []string {

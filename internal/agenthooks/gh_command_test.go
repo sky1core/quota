@@ -31,9 +31,13 @@ func TestGhOptionPositionsReachProtectionRules(t *testing.T) {
 		{`gh --body checkout pr merge 123`, "deny-gh-pr-merge"},
 		{`gh pr --body -- merge 123`, "deny-gh-pr-merge"},
 		{`gh pr --rebase=true update-branch 123`, "deny-gh-pr-update-branch"},
+		{`gh issue -R owner/repo develop 12 --name feature`, "deny-gh-issue-develop"},
+		{`gh pr --title revert revert 12`, "deny-gh-pr-revert"},
 		{`gh --visibility public repo edit`, "deny-gh-repo-visibility"},
 		{`gh repo -hmerge edit --visibility public`, "deny-gh-repo-visibility"},
+		{`gh repo create owner/new --template owner/template`, "deny-gh-repo-create"},
 		{`gh repo --source checkout sync example/repository`, "deny-gh-repo-sync"},
+		{`gh repo fork owner/repo --clone=false`, "deny-gh-repo-fork"},
 		{`gh --notes delete release create v1`, "deny-gh-release-create"},
 		{`gh release --notes merge create v1`, "deny-gh-release-create"},
 		{`gh release --cleanup-tag=true delete v1 --yes`, "deny-gh-release-delete"},
@@ -42,6 +46,9 @@ func TestGhOptionPositionsReachProtectionRules(t *testing.T) {
 		{`gh --clobber=true alias import aliases.yml`, "deny-gh-alias-import"},
 		{`gh alias --all=true delete`, "deny-gh-alias-delete"},
 		{`gh extension --help=false exec example --unknown merge`, "deny-gh-extension-exec"},
+		{`gh workflow run --json`, "deny-gh-workflow-run"},
+		{`gh agent-task create -R owner/repo -F task.md`, "deny-gh-agent-task-create"},
+		{`gh codespace ssh -R owner/repo -c example -- ./publish.sh`, "deny-gh-codespace-ssh"},
 		{`gh -X DELETE api repos/example/repository`, "deny-gh-api"},
 		{`gh -fmerge=checkout api repos/example/repository`, "deny-gh-api"},
 		{`gh --hostname example.invalid --method DELETE api repos/example/repository`, "deny-gh-api"},
@@ -100,7 +107,6 @@ func TestGhOptionPositionsAllowNormalOperations(t *testing.T) {
 		`gh repo autolink --json id view 123`,
 		`gh run --json databaseId list`,
 		`gh --json name workflow list`,
-		`gh workflow run --json`,
 		`gh repo clone example/repository -- --depth 1`,
 		`gh browse --commit --no-browser`,
 		`gh stack link 123 456`,
@@ -115,7 +121,7 @@ func TestGhOptionPositionsAllowNormalOperations(t *testing.T) {
 	}
 }
 
-func TestGhParsingErrorsRespectPolicyCommandScope(t *testing.T) {
+func TestGhParsingErrorsDenyBeforePolicyMatching(t *testing.T) {
 	for _, protected := range []string{"git", "gh", "*"} {
 		policy := Policy{Version: PolicyVersion, ID: "custom", Enabled: true,
 			Rules: []Rule{{ID: "deny", Effect: EffectDeny, Match: Match{Argv: []ArgPattern{{Glob: protected}, {Exact: "push"}}}}},
@@ -123,7 +129,7 @@ func TestGhParsingErrorsRespectPolicyCommandScope(t *testing.T) {
 		for _, command := range []string{`gh my-query`, `gh pr view 123 --future-option`, `gh --future-option=value pr view 123`} {
 			t.Run(protected+"/"+command, func(t *testing.T) {
 				decision, err := EvaluateCommand([]Policy{policy}, command)
-				if err != nil || decision.Allowed != (protected == "git") {
+				if err != nil || decision.Allowed {
 					t.Fatalf("decision=%+v err=%v", decision, err)
 				}
 			})
@@ -193,9 +199,9 @@ func TestGhNormalizationPreservesOptionTokensAndValues(t *testing.T) {
 			if err != nil || len(invocations) != 1 || invocations[0].Dynamic || !reflect.DeepEqual(invocations[0].Argv, tc.argv) {
 				t.Fatalf("invocations=%+v err=%v; want %q", invocations, err, tc.argv)
 			}
-			again, _, err := parseGhCommand(tc.argv)
-			if err != nil || !reflect.DeepEqual(again, tc.argv) {
-				t.Fatalf("normalization changed on second parse: %q err=%v", again, err)
+			again, err := parseGhCommand(tc.argv)
+			if err != nil || !reflect.DeepEqual(again.argv, tc.argv) {
+				t.Fatalf("normalization changed on second parse: %q err=%v", again.argv, err)
 			}
 		})
 	}

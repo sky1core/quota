@@ -236,9 +236,19 @@ func TestKnownGitSubcommandsWithoutFlagTablesAllowReadOptions(t *testing.T) {
 		`git log --oneline`,
 		`git log --oneline --decorate=short`,
 		`git log --color=never --oneline`,
+		`git log --stat=80 -n 1`,
+		`git log --no-walk=sorted HEAD`,
+		`git log -n 1 --pretty`,
 		`git show --stat`,
+		`git show --stat=80 --no-patch HEAD`,
+		`git show --pretty --no-patch HEAD`,
 		`git rev-parse --show-toplevel`,
 		`git rev-parse --short=7 HEAD`,
+		`git rev-parse --abbrev-ref=loose HEAD`,
+		`git rev-parse --show-object-format=input`,
+		`git rev-parse --glob=refs/heads/main`,
+		`git rev-parse --exclude=refs/heads/main --branches`,
+		`git rev-parse --parseopt -- --foo`,
 	} {
 		decision, err := EvaluateCommand(policies, command)
 		if err != nil {
@@ -289,12 +299,37 @@ func TestGitReadOptionTableMatchesGitAcceptedForms(t *testing.T) {
 		{"log", "--decorate=short", "--oneline", "-n", "1"},
 		{"log", "--color", "--oneline", "-n", "1"},
 		{"log", "--color=never", "--oneline", "-n", "1"},
+		{"log", "--stat", "-n", "1"},
+		{"log", "--stat=80", "-n", "1"},
+		{"log", "--pretty", "-n", "1"},
+		{"log", "--pretty=oneline", "-n", "1"},
+		{"log", "--branches", "-n", "1"},
+		{"log", "--branches=main", "-n", "1"},
+		{"log", "--tags", "-n", "1"},
+		{"log", "--tags=no-such-tag", "-n", "1"},
+		{"log", "--remotes", "-n", "1"},
+		{"log", "--remotes=origin/main", "-n", "1"},
+		{"log", "--no-walk", "HEAD"},
+		{"log", "--no-walk=sorted", "HEAD"},
 		{"show", "--decorate", "--stat", "--no-patch", "HEAD"},
 		{"show", "--decorate=short", "--stat", "--no-patch", "HEAD"},
 		{"show", "--color", "--stat", "--no-patch", "HEAD"},
 		{"show", "--color=never", "--stat", "--no-patch", "HEAD"},
+		{"show", "--stat=80", "--no-patch", "HEAD"},
+		{"show", "--pretty", "--no-patch", "HEAD"},
+		{"show", "--pretty=oneline", "--no-patch", "HEAD"},
 		{"rev-parse", "--short", "HEAD"},
 		{"rev-parse", "--short=7", "HEAD"},
+		{"rev-parse", "--abbrev-ref", "HEAD"},
+		{"rev-parse", "--abbrev-ref=loose", "HEAD"},
+		{"rev-parse", "--show-object-format"},
+		{"rev-parse", "--show-object-format=input"},
+		{"rev-parse", "--default", "HEAD"},
+		{"rev-parse", "--branches=main"},
+		{"rev-parse", "--tags=no-such-tag"},
+		{"rev-parse", "--remotes=origin/main"},
+		{"rev-parse", "--glob=refs/heads/main"},
+		{"rev-parse", "--exclude=refs/heads/main", "--branches"},
 	} {
 		run(args...)
 		command := "git " + strings.Join(args, " ")
@@ -305,6 +340,20 @@ func TestGitReadOptionTableMatchesGitAcceptedForms(t *testing.T) {
 		if !decision.Allowed {
 			t.Fatalf("%s: decision = %+v, want allow", command, decision)
 		}
+	}
+}
+
+func TestGitReadOptionTableRejectsInvalidRegisteredValueForms(t *testing.T) {
+	policy, err := Preset(PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := EvaluateCommand([]Policy{policy}, `git rev-parse --default=HEAD`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Allowed || decision.RuleID != "" || decision.Reason == "" {
+		t.Fatalf("git rev-parse --default=HEAD: decision = %+v, want parse rejection", decision)
 	}
 }
 

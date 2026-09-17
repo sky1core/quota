@@ -11,6 +11,7 @@ type optionValue uint8
 const (
 	optionNoValue optionValue = iota
 	optionRequiredValue
+	optionRequiredSeparateValue
 	optionAttachedValue
 	optionLastArgDefault
 	optionBooleanValue
@@ -126,27 +127,28 @@ var gitCommandOptions = map[string]map[string]optionValue{
 			--find-renames --find-copies --break-rewrites --abbrev`},
 	),
 	"log": optionValues(
-		optionGroup{optionNoValue, `-h --help --help-all --oneline --stat --shortstat --name-only --name-status
-			--graph --all --branches --tags --remotes --no-decorate --patch --no-patch --reverse
-			--date-order --author-date-order --topo-order --walk-reflogs --no-walk --do-walk --no-color`},
+		optionGroup{optionNoValue, `-h --help --help-all --oneline --shortstat --name-only --name-status
+			--graph --all --no-decorate --patch --no-patch --reverse
+			--date-order --author-date-order --topo-order --walk-reflogs --do-walk --no-color`},
 		optionGroup{optionRequiredValue, `-n --max-count --skip --since --after --until --before --author
-			--committer --grep --grep-reflog --format --pretty --date --decorate-refs --decorate-refs-exclude`},
-		optionGroup{optionAttachedValue, `--decorate --color`},
+			--committer --grep --grep-reflog --format --date --decorate-refs --decorate-refs-exclude`},
+		optionGroup{optionAttachedValue, `--stat --pretty --branches --tags --remotes --no-walk --decorate --color`},
 	),
 	"show": optionValues(
-		optionGroup{optionNoValue, `-h --help --help-all --stat --shortstat --summary --patch --no-patch
+		optionGroup{optionNoValue, `-h --help --help-all --shortstat --summary --patch --no-patch
 			--name-only --name-status --raw --quiet --no-color --no-decorate`},
-		optionGroup{optionRequiredValue, `--format --pretty --date`},
-		optionGroup{optionAttachedValue, `--decorate --color`},
+		optionGroup{optionRequiredValue, `--format --date`},
+		optionGroup{optionAttachedValue, `--stat --pretty --decorate --color`},
 	),
 	"rev-parse": optionValues(
 		optionGroup{optionNoValue, `-h --help --help-all --show-toplevel --show-prefix --show-cdup --git-dir
 			--absolute-git-dir --git-common-dir --is-inside-git-dir --is-inside-work-tree --is-bare-repository
-			--is-shallow-repository --show-superproject-working-tree --show-object-format --show-ref-format
-			--verify --quiet --symbolic --symbolic-full-name --abbrev-ref --revs-only --no-revs
-			--flags --no-flags --default --sq --not --branches --tags --remotes --glob --exclude`},
-		optionGroup{optionRequiredValue, `--path-format --parseopt --prefix --since --after --until --before`},
-		optionGroup{optionAttachedValue, `--short`},
+			--is-shallow-repository --show-superproject-working-tree --show-ref-format
+			--verify --quiet --symbolic --symbolic-full-name --revs-only --no-revs
+			--flags --no-flags --parseopt --sq --not`},
+		optionGroup{optionRequiredValue, `--path-format --prefix --since --after --until --before`},
+		optionGroup{optionRequiredSeparateValue, `--default`},
+		optionGroup{optionAttachedValue, `--short --abbrev-ref --show-object-format --branches --tags --remotes --glob --exclude`},
 	),
 	"status": optionValues(
 		optionGroup{optionNoValue, `-h --help --help-all -s --short -b --branch --show-stash
@@ -279,7 +281,7 @@ func parseCommandFlags(command string, args []string, options map[string]optionV
 			if err != nil {
 				return nil, fmt.Errorf("%s: %w", command, err)
 			}
-			if attached && value == optionNoValue {
+			if attached && (value == optionNoValue || value == optionRequiredSeparateValue) {
 				return nil, fmt.Errorf("%s option %s does not accept a value", command, name)
 			}
 			disabled := false
@@ -300,7 +302,7 @@ func parseCommandFlags(command string, args []string, options map[string]optionV
 				flags = active
 			}
 			flags = appendCommandFlag(flags, commandFlag{name: name, token: arg, disabled: disabled}, value)
-			if !attached && (value == optionRequiredValue || value == optionLastArgDefault && i+1 < len(args)) {
+			if !attached && (value == optionRequiredValue || value == optionRequiredSeparateValue || value == optionLastArgDefault && i+1 < len(args)) {
 				i++
 				if i == len(args) {
 					return nil, fmt.Errorf("%s option %s requires a value", command, name)

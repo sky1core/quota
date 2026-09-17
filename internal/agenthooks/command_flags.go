@@ -127,23 +127,26 @@ var gitCommandOptions = map[string]map[string]optionValue{
 	),
 	"log": optionValues(
 		optionGroup{optionNoValue, `-h --help --help-all --oneline --stat --shortstat --name-only --name-status
-			--graph --all --branches --tags --remotes --decorate --no-decorate --patch --no-patch --reverse
-			--date-order --author-date-order --topo-order --walk-reflogs --no-walk --do-walk --color --no-color`},
+			--graph --all --branches --tags --remotes --no-decorate --patch --no-patch --reverse
+			--date-order --author-date-order --topo-order --walk-reflogs --no-walk --do-walk --no-color`},
 		optionGroup{optionRequiredValue, `-n --max-count --skip --since --after --until --before --author
 			--committer --grep --grep-reflog --format --pretty --date --decorate-refs --decorate-refs-exclude`},
+		optionGroup{optionAttachedValue, `--decorate --color`},
 	),
 	"show": optionValues(
 		optionGroup{optionNoValue, `-h --help --help-all --stat --shortstat --summary --patch --no-patch
-			--name-only --name-status --raw --quiet --no-color --color --decorate --no-decorate`},
+			--name-only --name-status --raw --quiet --no-color --no-decorate`},
 		optionGroup{optionRequiredValue, `--format --pretty --date`},
+		optionGroup{optionAttachedValue, `--decorate --color`},
 	),
 	"rev-parse": optionValues(
 		optionGroup{optionNoValue, `-h --help --help-all --show-toplevel --show-prefix --show-cdup --git-dir
 			--absolute-git-dir --git-common-dir --is-inside-git-dir --is-inside-work-tree --is-bare-repository
 			--is-shallow-repository --show-superproject-working-tree --show-object-format --show-ref-format
-			--short --verify --quiet --symbolic --symbolic-full-name --abbrev-ref --revs-only --no-revs
+			--verify --quiet --symbolic --symbolic-full-name --abbrev-ref --revs-only --no-revs
 			--flags --no-flags --default --sq --not --branches --tags --remotes --glob --exclude`},
 		optionGroup{optionRequiredValue, `--path-format --parseopt --prefix --since --after --until --before`},
+		optionGroup{optionAttachedValue, `--short`},
 	),
 	"status": optionValues(
 		optionGroup{optionNoValue, `-h --help --help-all -s --short -b --branch --show-stash

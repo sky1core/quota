@@ -2,8 +2,10 @@ package agenthooks
 
 import (
 	"encoding/json"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -232,8 +234,11 @@ func TestKnownGitSubcommandsWithoutFlagTablesAllowReadOptions(t *testing.T) {
 	policies := []Policy{policy}
 	for _, command := range []string{
 		`git log --oneline`,
+		`git log --oneline --decorate=short`,
+		`git log --color=never --oneline`,
 		`git show --stat`,
 		`git rev-parse --show-toplevel`,
+		`git rev-parse --short=7 HEAD`,
 	} {
 		decision, err := EvaluateCommand(policies, command)
 		if err != nil {
@@ -256,6 +261,50 @@ func TestKnownGitSubcommandsWithoutFlagTablesAllowReadOptions(t *testing.T) {
 	}
 	if decision.Allowed || decision.RuleID != "" || decision.Reason == "" {
 		t.Fatalf("git clean -fd: decision = %+v, want parse rejection", decision)
+	}
+}
+
+func TestGitReadOptionTableMatchesGitAcceptedForms(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	probe := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	if out, err := probe.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "true" {
+		t.Skip("not inside a git worktree")
+	}
+
+	policy, err := Preset(PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"log", "--decorate", "--oneline", "-n", "1"},
+		{"log", "--decorate=short", "--oneline", "-n", "1"},
+		{"log", "--color", "--oneline", "-n", "1"},
+		{"log", "--color=never", "--oneline", "-n", "1"},
+		{"show", "--decorate", "--stat", "--no-patch", "HEAD"},
+		{"show", "--decorate=short", "--stat", "--no-patch", "HEAD"},
+		{"show", "--color", "--stat", "--no-patch", "HEAD"},
+		{"show", "--color=never", "--stat", "--no-patch", "HEAD"},
+		{"rev-parse", "--short", "HEAD"},
+		{"rev-parse", "--short=7", "HEAD"},
+	} {
+		run(args...)
+		command := "git " + strings.Join(args, " ")
+		decision, err := EvaluateCommand([]Policy{policy}, command)
+		if err != nil {
+			t.Fatalf("%s: %v", command, err)
+		}
+		if !decision.Allowed {
+			t.Fatalf("%s: decision = %+v, want allow", command, decision)
+		}
 	}
 }
 

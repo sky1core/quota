@@ -12,6 +12,7 @@ const (
 	optionNoValue optionValue = iota
 	optionRequiredValue
 	optionRequiredSeparateValue
+	optionRequiredNonEmptyValue
 	optionAttachedValue
 	optionLastArgDefault
 	optionBooleanValue
@@ -302,11 +303,17 @@ func parseCommandFlags(command string, args []string, options map[string]optionV
 				flags = active
 			}
 			flags = appendCommandFlag(flags, commandFlag{name: name, token: arg, disabled: disabled}, value)
-			if !attached && (value == optionRequiredValue || value == optionRequiredSeparateValue || value == optionLastArgDefault && i+1 < len(args)) {
+			if !attached && (value == optionRequiredValue || value == optionRequiredSeparateValue || value == optionRequiredNonEmptyValue || value == optionLastArgDefault && i+1 < len(args)) {
 				i++
 				if i == len(args) {
 					return nil, fmt.Errorf("%s option %s requires a value", command, name)
 				}
+				if value == optionRequiredNonEmptyValue && args[i] == "" {
+					return nil, fmt.Errorf("%s option %s requires a non-empty value", command, name)
+				}
+			}
+			if attached && value == optionRequiredNonEmptyValue && text == "" {
+				return nil, fmt.Errorf("%s option %s requires a non-empty value", command, name)
 			}
 			continue
 		}
@@ -326,12 +333,20 @@ func parseCommandFlags(command string, args []string, options map[string]optionV
 				disabled = !enabled && value == optionBooleanForce
 			}
 			flags = appendCommandFlag(flags, commandFlag{name: name, token: arg, disabled: disabled}, value)
-			if value == optionRequiredValue {
+			if value == optionRequiredValue || value == optionRequiredNonEmptyValue {
+				var text string
 				if j == len(arg)-1 {
 					i++
 					if i == len(args) {
 						return nil, fmt.Errorf("%s option %s requires a value", command, name)
 					}
+					text = args[i]
+				} else {
+					text = arg[j+1:]
+					text = strings.TrimPrefix(text, "=")
+				}
+				if value == optionRequiredNonEmptyValue && text == "" {
+					return nil, fmt.Errorf("%s option %s requires a non-empty value", command, name)
 				}
 				break
 			}

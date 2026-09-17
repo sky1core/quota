@@ -276,6 +276,16 @@ func githubHistoryGuardPreset() Policy {
 				Message: "gh pr revert can create revert source and a PR branch; get explicit approval first.",
 			},
 			{
+				ID:     "deny-gh-pr-create-without-head",
+				Effect: EffectDeny,
+				Match:  Match{Argv: exactArgs("gh", "pr", "create")},
+				Except: []Match{
+					{Argv: exactArgs("gh", "pr", "create"), HasFlag: []string{"--head"}},
+					{Argv: exactArgs("gh", "pr", "create"), HasFlag: []string{"-H"}},
+				},
+				Message: "gh pr create may push the current branch unless --head is supplied; use --head for push-free PR metadata work.",
+			},
+			{
 				ID:      "deny-gh-pr-close-delete-branch",
 				Effect:  EffectDeny,
 				Match:   Match{Argv: exactArgs("gh", "pr", "close"), HasFlag: []string{"--delete-branch"}},
@@ -491,7 +501,7 @@ func githubHistoryGuardPreset() Policy {
 			},
 		},
 		Tests: []TestCase{
-			{Name: "allow pr create", Command: `gh pr create --title "change" --body "body"`, Want: DecisionAllow},
+			{Name: "allow pr create with explicit head", Command: `gh pr create --head feature --title "change" --body "body"`, Want: DecisionAllow},
 			{Name: "allow issue create", Command: `gh issue create --title "bug" --body "body"`, Want: DecisionAllow},
 			{Name: "allow pr edit", Command: `gh pr edit 12 --body-file body.md`, Want: DecisionAllow},
 			{Name: "allow pr comment", Command: `gh pr comment 12 --body "looks good"`, Want: DecisionAllow},
@@ -499,6 +509,7 @@ func githubHistoryGuardPreset() Policy {
 			{Name: "allow issue edit", Command: `gh issue edit 12 --body-file body.md`, Want: DecisionAllow},
 			{Name: "allow issue view", Command: `gh issue view 12`, Want: DecisionAllow},
 			{Name: "allow pr close without branch delete", Command: `gh pr close 12 --comment "not ready"`, Want: DecisionAllow},
+			{Name: "deny pr create without explicit head", Command: `gh pr create --title "change" --body "body"`, Want: DecisionDeny, RuleID: "deny-gh-pr-create-without-head"},
 			{Name: "deny git push", Command: `git push origin main`, Want: DecisionDeny, RuleID: "deny-git-push"},
 			{Name: "deny absolute git push", Command: `/usr/bin/git push origin main`, Want: DecisionDeny, RuleID: "deny-git-push"},
 			{Name: "deny dashed git push helper", Command: `/usr/libexec/git-core/git-push origin main`, Want: DecisionDeny, RuleID: "deny-git-push"},
@@ -680,7 +691,7 @@ func assignGitHubHistoryGuardGroups(policy *Policy) {
 		policy.Rules[i].Group = PolicyGroupRemoteCodeRefMutation
 	}
 	metadataTests := map[string]bool{
-		"allow pr create":                      true,
+		"allow pr create with explicit head":   true,
 		"allow issue create":                   true,
 		"allow pr edit":                        true,
 		"allow pr comment":                     true,

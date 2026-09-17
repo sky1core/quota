@@ -88,7 +88,7 @@ func TestAgentHooksInitListVerifyEval(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = agentHooksEval([]string{"--policy-dir", policyDir, "--command", "gh pr create --title ok"}, strings.NewReader(""), &stdout, &stderr)
+	code = agentHooksEval([]string{"--policy-dir", policyDir, "--command", "gh pr create --head feature --title ok"}, strings.NewReader(""), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("allow eval code = %d stderr=%s", code, stderr.String())
 	}

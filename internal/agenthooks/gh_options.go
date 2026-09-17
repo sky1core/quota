@@ -109,7 +109,7 @@ var ghCommandOptions = map[string]map[string]optionValue{
 	),
 	"pr co":                  ghCheckoutOptions,
 	"pr comment":             ghOptions(`--create-if-none --delete-last --edit-last -e --editor -w --web --yes --help`, `-b --body -F --body-file -R --repo`),
-	"pr create":              ghOptions(`-d --draft --dry-run -e --editor -f --fill --fill-first --fill-verbose --no-maintainer-edit -w --web --help`, `-a --assignee -B --base -b --body -F --body-file -H --head -l --label -m --milestone -p --project --recover -r --reviewer -T --template -t --title -R --repo`),
+	"pr create":              ghPrCreateOptions(),
 	"pr diff":                ghOptions(`--name-only --patch -w --web --help`, `--color -e --exclude -R --repo`),
 	"pr edit":                ghOptions(`--remove-milestone --help`, `--add-assignee --add-label --add-project --add-reviewer -B --base -b --body -F --body-file -m --milestone --remove-assignee --remove-label --remove-project --remove-reviewer -t --title -R --repo`),
 	"pr list":                ghOptions(`-d --draft -w --web --help`, `--app -a --assignee -A --author -B --base -H --head -q --jq --json -l --label -L --limit -S --search -s --state -t --template -R --repo`),
@@ -257,4 +257,12 @@ var ghCommandOptions = map[string]map[string]optionValue{
 
 func ghOptions(booleans, values string) map[string]optionValue {
 	return optionValues(optionGroup{optionBooleanValue, booleans}, optionGroup{optionRequiredValue, values})
+}
+
+func ghPrCreateOptions() map[string]optionValue {
+	return optionValues(
+		optionGroup{optionBooleanValue, `-d --draft --dry-run -e --editor -f --fill --fill-first --fill-verbose --no-maintainer-edit -w --web --help`},
+		optionGroup{optionRequiredValue, `-a --assignee -B --base -b --body -F --body-file -l --label -m --milestone -p --project --recover -r --reviewer -T --template -t --title -R --repo`},
+		optionGroup{optionRequiredNonEmptyValue, `-H --head`},
+	)
 }

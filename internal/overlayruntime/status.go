@@ -3,7 +3,6 @@ package overlayruntime
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 )
@@ -78,17 +77,7 @@ func CheckRepository(ctx context.Context, dir, agent string, options CheckOption
 			}
 		}
 		problems = append(problems, claudeSettingsFindings(r)...)
-		if shared := filepath.Join(r.Top, sharedRule); exists(shared) {
-			bridge := filepath.Join(r.Top, "CLAUDE.md")
-			data, err := readRegular(bridge)
-			if os.IsNotExist(err) {
-				problems = append(problems, bridge+" is missing; Claude does not load "+shared+" without an @AGENTS.md import")
-			} else if err != nil {
-				problems = append(problems, err.Error())
-			} else if !importsShared(data) {
-				problems = append(problems, bridge+" does not import @AGENTS.md; Claude does not load "+shared)
-			}
-		}
+		problems = append(problems, claudeSharedBridgeFindings(r.Top)...)
 	}
 	if agent == "all" || agent == "codex" {
 		p, w := codexSettingsFindings(r, options.CodexProjectDocMaxBytes)

@@ -159,6 +159,7 @@ func sessionStart(ctx context.Context, agent, event string, stdin io.Reader, std
 			problems := claudeSettingsFindings(r)
 			notices = append(notices, problems...)
 			nativeBlocked = nativeBlocked || len(problems) > 0
+			notices = append(notices, claudeSharedBridgeFindings(r.Top)...)
 		case "codex":
 			problems, _ := codexSettingsFindings(r, options.CodexProjectDocMaxBytes)
 			problems = append(problems, options.CodexNativeIssues...)

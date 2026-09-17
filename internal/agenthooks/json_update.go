@@ -124,6 +124,9 @@ func updateJSONObjectWithBackup(path string, update func(map[string]any) error, 
 		return nil, err
 	}
 	content = append(content, '\n')
+	if err := ensureJSONTargetUnchanged(target, existed, original); err != nil {
+		return nil, err
+	}
 	if existed {
 		if err := writeUniqueBackup(target, original); err != nil {
 			return nil, err
@@ -145,6 +148,9 @@ func updateJSONObjectWithBackup(path string, update func(map[string]any) error, 
 	if err := tmp.Close(); err != nil {
 		return nil, err
 	}
+	if err := ensureJSONTargetUnchanged(target, existed, original); err != nil {
+		return nil, err
+	}
 	if existed {
 		if err := os.Chmod(tmp.Name(), mode); err != nil {
 			return nil, err
@@ -161,6 +167,26 @@ func updateJSONObjectWithBackup(path string, update func(map[string]any) error, 
 		return nil, fmt.Errorf("saved JSON differs from the update")
 	}
 	return decodeJSONObject(saved)
+}
+
+func ensureJSONTargetUnchanged(target string, existed bool, original []byte) error {
+	latest, err := os.ReadFile(target)
+	if existed {
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(latest, original) {
+			return fmt.Errorf("%s changed during update; preserving external edit", target)
+		}
+		return nil
+	}
+	if err == nil {
+		return fmt.Errorf("%s appeared during update; preserving external edit", target)
+	}
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 func createExclusiveTemp(dir, prefix string, perm os.FileMode) (*os.File, error) {

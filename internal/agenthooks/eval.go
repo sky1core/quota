@@ -117,11 +117,12 @@ func literalDenyMatch(rule Rule, command string) ([]string, bool) {
 		return nil, false
 	}
 	spans := literalMatchSpans(command, rule.Match, false)
-	for _, span := range spans {
-		if len(rule.Match.HasFlag) > 0 && !literalAnyFlagInCommand(command[span.end:], rule.Match.HasFlag) {
+	for i, span := range spans {
+		scopeEnd := literalSpanScopeEnd(command, spans, i)
+		if len(rule.Match.HasFlag) > 0 && !literalAnyFlagInCommand(command[span.end:scopeEnd], rule.Match.HasFlag) {
 			continue
 		}
-		if literalAnyMatchAtStart(command[span.start:], rule.Except) {
+		if literalAnyMatchAtStart(command[span.start:scopeEnd], rule.Except) {
 			continue
 		}
 		return seq, true
@@ -147,8 +148,8 @@ type literalSpan struct {
 
 func literalAnyMatchAtStart(command string, matches []Match) bool {
 	for _, match := range matches {
-		if len(match.Argv) == 0 && len(match.HasFlag) > 0 && literalAnyFlagInCommand(command, match.HasFlag) {
-			return true
+		if len(match.HasFlag) > 0 {
+			continue
 		}
 		for _, span := range literalMatchSpans(command, match, match.Exact) {
 			if span.start == 0 {
@@ -173,6 +174,13 @@ func literalMatchSpans(command string, match Match, exact bool) []literalSpan {
 		spans = append(spans, literalSpan{start: loc[0], end: loc[1]})
 	}
 	return spans
+}
+
+func literalSpanScopeEnd(command string, spans []literalSpan, index int) int {
+	if index+1 < len(spans) {
+		return spans[index+1].start
+	}
+	return len(command)
 }
 
 func literalMatchPattern(args []ArgPattern, exact bool) (string, bool) {

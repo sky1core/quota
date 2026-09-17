@@ -100,7 +100,7 @@ func ghCommandIndex(args []string, options map[string]optionValue) int {
 		if strings.HasPrefix(arg, "-") {
 			if !strings.Contains(arg, "=") && (strings.HasPrefix(arg, "--") || len(arg) == 2) {
 				value, known := options[arg]
-				if !known || value == optionRequiredValue {
+				if !known || value == optionRequiredValue || value == optionRequiredNonEmptyValue {
 					i++
 				}
 			}
@@ -133,7 +133,7 @@ func ghOptionEnd(argv []string, start int, options map[string]optionValue) (int,
 		if !ok {
 			return end, false
 		}
-		if value == optionRequiredValue && !attached {
+		if (value == optionRequiredValue || value == optionRequiredNonEmptyValue) && !attached {
 			end++
 		}
 	} else {
@@ -142,7 +142,7 @@ func ghOptionEnd(argv []string, start int, options map[string]optionValue) (int,
 			if !ok {
 				return end, false
 			}
-			if value == optionRequiredValue {
+			if value == optionRequiredValue || value == optionRequiredNonEmptyValue {
 				if j == len(arg)-1 {
 					end++
 				}

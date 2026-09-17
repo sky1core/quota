@@ -95,7 +95,7 @@ func TestGhOptionPositionsAllowNormalOperations(t *testing.T) {
 		`gh repo --description merge edit`,
 		`gh repo -hcheckout edit`,
 		`gh --enable-secret-scanning=false repo edit example/repository`,
-		`gh --title merge pr create --body checkout`,
+		`gh --title merge pr create --head feature --body checkout`,
 		`gh issue --title checkout create --body merge`,
 		`gh --body-file merge pr edit 123 --title checkout`,
 		`gh --json tagName release view v1`,

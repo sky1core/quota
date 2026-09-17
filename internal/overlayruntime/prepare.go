@@ -84,6 +84,25 @@ func sharedRuleProblem(w string) string {
 	return ""
 }
 
+func claudeSharedBridgeFindings(worktree string) []string {
+	shared := filepath.Join(worktree, sharedRule)
+	if !exists(shared) {
+		return nil
+	}
+	bridge := filepath.Join(worktree, "CLAUDE.md")
+	data, err := readRegular(bridge)
+	if os.IsNotExist(err) {
+		return []string{bridge + " is missing; Claude does not load " + shared + " without an @AGENTS.md import"}
+	}
+	if err != nil {
+		return []string{err.Error()}
+	}
+	if !importsShared(data) {
+		return []string{bridge + " does not import @AGENTS.md; Claude does not load " + shared}
+	}
+	return nil
+}
+
 func bridgeSource(b []byte) ([]byte, bool) {
 	if !utf8.Valid(b) || bytes.IndexByte(b, 0) >= 0 {
 		return nil, false

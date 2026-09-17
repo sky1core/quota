@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -120,5 +121,48 @@ func TestJSONUpdateFailureLeavesOriginalUntouched(t *testing.T) {
 				t.Fatal("failed update modified configuration")
 			}
 		})
+	}
+}
+
+func TestJSONUpdateFailsWhenTargetChangesDuringUpdate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"userSetting":"before"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := UpdateJSONObjectWithBackup(path, func(root map[string]any) error {
+		if err := os.WriteFile(path, []byte("{\"userSetting\":\"new-user-value\"}\n"), 0o600); err != nil {
+			return err
+		}
+		root["quotaSetting"] = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "changed during update") {
+		t.Fatalf("err = %v, want concurrent change failure", err)
+	}
+	actual, _ := os.ReadFile(path)
+	if string(actual) != "{\"userSetting\":\"new-user-value\"}\n" {
+		t.Fatalf("concurrent edit was overwritten: %q", actual)
+	}
+	backups, _ := filepath.Glob(path + ".bak.*")
+	if len(backups) != 0 {
+		t.Fatalf("backup created despite failed update: %v", backups)
+	}
+}
+
+func TestJSONUpdateFailsWhenTargetAppearsDuringUpdate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	_, err := UpdateJSONObjectWithBackup(path, func(root map[string]any) error {
+		if err := os.WriteFile(path, []byte("{\"userSetting\":\"new-user-value\"}\n"), 0o600); err != nil {
+			return err
+		}
+		root["quotaSetting"] = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "appeared during update") {
+		t.Fatalf("err = %v, want concurrent create failure", err)
+	}
+	actual, _ := os.ReadFile(path)
+	if string(actual) != "{\"userSetting\":\"new-user-value\"}\n" {
+		t.Fatalf("concurrent create was overwritten: %q", actual)
 	}
 }

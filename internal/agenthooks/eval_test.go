@@ -49,6 +49,7 @@ func TestGitHubHistoryGuardPresetGroups(t *testing.T) {
 		"deny gh pr update branch":             PolicyGroupRemoteCodeRefMutation,
 		"deny gh issue develop":                PolicyGroupRemoteCodeRefMutation,
 		"deny gh pr revert":                    PolicyGroupRemoteCodeRefMutation,
+		"deny pr create without explicit head": PolicyGroupRemoteCodeRefMutation,
 		"deny gh pr close delete branch":       PolicyGroupRemoteCodeRefMutation,
 		"deny gh repo create":                  PolicyGroupRemoteCodeRefMutation,
 		"deny gh repo fork":                    PolicyGroupRemoteCodeRefMutation,
@@ -59,7 +60,7 @@ func TestGitHubHistoryGuardPresetGroups(t *testing.T) {
 		"deny gh agent task create":            PolicyGroupRemoteCodeRefMutation,
 		"deny gh codespace ssh":                PolicyGroupRemoteCodeRefMutation,
 		"deny gh stack other":                  PolicyGroupRemoteCodeRefMutation,
-		"allow pr create":                      PolicyGroupGitHubCollaborationMetadata,
+		"allow pr create with explicit head":   PolicyGroupGitHubCollaborationMetadata,
 		"allow pr close without branch delete": PolicyGroupGitHubCollaborationMetadata,
 		"allow pr comment":                     PolicyGroupGitHubCollaborationMetadata,
 		"allow issue comment":                  PolicyGroupGitHubCollaborationMetadata,
@@ -448,6 +449,12 @@ func TestLiteralProtectedCommandDeny(t *testing.T) {
 		command string
 		ruleID  string
 	}{
+		{`echo 'gh pr create --title change'`, "deny-gh-pr-create-without-head"},
+		{`echo 'gh pr create --head feature --title change'`, "deny-gh-pr-create-without-head"},
+		{`echo 'gh pr create --head= --title change'`, "deny-gh-pr-create-without-head"},
+		{`echo 'gh pr create --title change' 'gh pr create --head feature'`, "deny-gh-pr-create-without-head"},
+		{`echo 'gh pr create --head feature' 'gh pr create --title change'`, "deny-gh-pr-create-without-head"},
+		{`python3 -c 'import os; os.system("gh pr create --title --head --body body")'`, "deny-gh-pr-create-without-head"},
 		{`echo 'git commit --amend'`, "deny-git-commit-amend"},
 		{`echo 'gh pr close 23 --delete-branch'`, "deny-gh-pr-close-delete-branch"},
 		{`rg 'gh repo create --push'`, "deny-gh-repo-create"},
@@ -467,7 +474,7 @@ func TestLiteralProtectedCommandDeny(t *testing.T) {
 		`echo gitpush`,
 		`echo 'gh pr close 23 --comment ok'`,
 		`echo 'gh stack link 123 456'`,
-		`gh pr create --title ok --body 'git push origin main'`,
+		`gh pr create --head feature --title ok --body 'git push origin main'`,
 	} {
 		decision, err := EvaluateCommand([]Policy{policy}, command)
 		if err != nil || !decision.Allowed {

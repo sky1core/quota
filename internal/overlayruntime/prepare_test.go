@@ -711,6 +711,27 @@ func TestClaudeNativeDisabledDoesNotFallbackInjectBody(t *testing.T) {
 	}
 }
 
+func TestClaudeSessionStartReportsMissingSharedBridge(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	if err := os.Remove(filepath.Join(repo, "CLAUDE.md")); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
+	context := additionalContext(t, stdout)
+	if code != 0 || stderr != "" || !strings.Contains(context, "private body") || !strings.Contains(context, "CLAUDE.md is missing") {
+		t.Fatalf("missing shared bridge was not reported: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	write(t, filepath.Join(repo, "CLAUDE.md"), "# notes only\n")
+	code, stdout, stderr = hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
+	context = additionalContext(t, stdout)
+	if code != 0 || stderr != "" || !strings.Contains(context, "does not import @AGENTS.md") {
+		t.Fatalf("broken shared bridge was not reported: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
 func TestSessionStartDoesNotBypassNativeExclusions(t *testing.T) {
 	home := testHome(t)
 	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")

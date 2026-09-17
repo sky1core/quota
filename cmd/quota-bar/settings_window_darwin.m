@@ -137,6 +137,8 @@ static BOOL QuotaInteger(NSTextField *field, NSInteger minimum, NSInteger maximu
 @property NSTextField *keepaliveIdle;
 @property NSTextField *activityMinutes;
 @property NSTextView *message;
+@property NSPopUpButton *updateMode;
+@property NSTextField *updateRef;
 @property NSTextView *errorText;
 @property NSScrollView *errorScroll;
 @property NSButton *saveButton;
@@ -285,6 +287,41 @@ static BOOL QuotaInteger(NSTextField *field, NSInteger minimum, NSInteger maximu
     QuotaScroll(view, self.message, NSMakeRect(20, 268, 694, 120));
 }
 
+- (void)refreshUpdateRefEnabled {
+    BOOL specific = self.updateMode.indexOfSelectedItem == 2;
+    self.updateRef.enabled = !self.applying && specific;
+}
+
+- (void)updateModeChanged:(id)sender {
+    if (self.updateMode.indexOfSelectedItem == 0) self.updateRef.stringValue = @"";
+    if (self.updateMode.indexOfSelectedItem == 1) self.updateRef.stringValue = @"main";
+    [self refreshUpdateRefEnabled];
+}
+
+- (void)buildUpdate {
+    NSView *view = [self addTab:@"Update"];
+    NSDictionary *config = self.snapshot[@"update"];
+    NSString *mode = config[@"mode"] ?: @"latest";
+    NSString *ref = config[@"ref"] ?: @"";
+    QuotaLabel(view, @"Install source", NSMakeRect(20, 24, 170, 22));
+    self.updateMode = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(210, 18, 260, 30) pullsDown:NO];
+    [self.updateMode addItemsWithTitles:@[@"Latest release", @"Latest commit on main", @"Specific ref or commit"]];
+    if ([mode isEqualToString:@"main"]) [self.updateMode selectItemAtIndex:1];
+    else if ([mode isEqualToString:@"ref"]) [self.updateMode selectItemAtIndex:2];
+    else [self.updateMode selectItemAtIndex:0];
+    self.updateMode.target = self;
+    self.updateMode.action = @selector(updateModeChanged:);
+    self.updateMode.accessibilityLabel = @"Update install source";
+    [view addSubview:self.updateMode];
+    QuotaLabel(view, @"Ref", NSMakeRect(20, 72, 170, 22));
+    self.updateRef = QuotaField(view, ref, @"Update ref", NSMakeRect(210, 68, 360, 26));
+    self.updateRef.placeholderString = @"branch, tag, or commit";
+    self.updateRef.toolTip = @"No spaces, control characters, or @.";
+    NSTextField *hint = QuotaLabel(view, @"Used by quota-cli update and the menu bar update command.", NSMakeRect(20, 114, 690, 22));
+    hint.textColor = NSColor.secondaryLabelColor;
+    [self refreshUpdateRefEnabled];
+}
+
 - (void)showError:(NSString *)error {
     self.errorText.string = error;
     self.errorScroll.hidden = error.length == 0;
@@ -310,6 +347,7 @@ static BOOL QuotaInteger(NSTextField *field, NSInteger minimum, NSInteger maximu
     [self buildGeneral];
     [self buildAccounts];
     [self buildKeepalive];
+    [self buildUpdate];
     self.errorText = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 742, 54)];
     self.errorText.editable = NO;
     self.errorText.richText = NO;
@@ -343,6 +381,7 @@ static BOOL QuotaInteger(NSTextField *field, NSInteger minimum, NSInteger maximu
     if ([item.identifier isEqual:@"General"]) first = self.activeMinutes;
     if ([item.identifier isEqual:@"Accounts"]) first = self.addAccount;
     if ([item.identifier isEqual:@"Keepalive"]) first = self.keepaliveEnabled;
+    if ([item.identifier isEqual:@"Update"]) first = self.updateMode;
     if (first) [self.window makeFirstResponder:first];
 }
 
@@ -459,6 +498,7 @@ static BOOL QuotaInteger(NSTextField *field, NSInteger minimum, NSInteger maximu
         }
     }
     self.message.editable = !applying;
+    [self refreshUpdateRefEnabled];
     for (QuotaSettingsAccountRow *row in self.accounts) {
         if (row.reserved) {
             row.provider.enabled = NO;
@@ -509,6 +549,22 @@ static BOOL QuotaInteger(NSTextField *field, NSInteger minimum, NSInteger maximu
         [self fail:@"Keepalive message must contain text and be at most 8192 UTF-8 bytes, without null characters." tab:2 field:self.message];
         return;
     }
+    NSInteger updateIndex = self.updateMode.indexOfSelectedItem;
+    NSString *updateMode = @[@"latest", @"main", @"ref"][updateIndex < 0 ? 0 : updateIndex];
+    NSString *updateRef = self.updateRef.stringValue;
+    if (updateIndex == 0) {
+        updateRef = @"";
+    } else if (updateIndex == 1) {
+        updateRef = @"main";
+    } else {
+        NSString *trimmedRef = [updateRef stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        NSMutableCharacterSet *bad = [[NSCharacterSet whitespaceAndNewlineCharacterSet] mutableCopy];
+        [bad formUnionWithCharacterSet:NSCharacterSet.controlCharacterSet];
+        if (trimmedRef.length == 0 || ![trimmedRef isEqualToString:updateRef] || [updateRef rangeOfString:@"@"].location != NSNotFound || [updateRef rangeOfCharacterFromSet:bad].location != NSNotFound) {
+            [self fail:@"Update ref must be a branch, tag, or commit without spaces, control characters, or @." tab:3 field:self.updateRef];
+            return;
+        }
+    }
     NSMutableDictionary *edited = [self.snapshot mutableCopy];
     edited[@"refreshActiveMinutes"] = @(active);
     edited[@"refreshIdleMinutes"] = @(idle);
@@ -525,6 +581,7 @@ static BOOL QuotaInteger(NSTextField *field, NSInteger minimum, NSInteger maximu
     }];
     edited[@"selected"] = selected;
     edited[@"keepalive"] = @{@"enabled": [NSNumber numberWithBool:self.keepaliveEnabled.state == NSControlStateValueOn], @"weekdays": days, @"time": time, @"idleMinutes": @(keepaliveIdle), @"activityMinutes": @(activity), @"message": message};
+    edited[@"update"] = @{@"mode": updateMode, @"ref": updateRef};
     NSError *error;
     NSData *data = [NSJSONSerialization dataWithJSONObject:edited options:0 error:&error];
     if (!data) {

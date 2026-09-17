@@ -43,11 +43,16 @@ type ExecPromptAccountSettings struct {
 	MinLeftPct *float64 `json:"minLeftPct,omitempty"`
 }
 
+type UpdateConfig struct {
+	Ref string `json:"ref,omitempty"`
+}
+
 // Config is the parsed ~/.config/quota/config.json.
 type Config struct {
 	ClaudeAccounts []ClaudeAccount   `json:"claudeAccounts"`
 	CodexAccounts  []CodexAccount    `json:"codexAccounts"`
 	ExecPrompt     *ExecPromptConfig `json:"execPrompt,omitempty"`
+	Update         *UpdateConfig     `json:"update,omitempty"`
 }
 
 // Path returns the config file location.

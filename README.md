@@ -23,6 +23,8 @@ go install github.com/sky1core/quota/cmd/quota-bar@latest
 
 버전이 다른 대상 바이너리만 모두 준비한 뒤 교체하므로 빌드 실패 시 기존 설치본은 유지된다. CLI의 Ctrl-C(SIGINT)·SIGTERM도 취소·복구 절차를 거쳐 처리한다. 교체 중 실패하면 복구를 시도하고 복구 실패도 보고한다. 여러 파일의 교체가 한 순간에 이루어지는 것은 아니다. 설치 디렉터리에는 읽기·쓰기·탐색 권한이 필요하고, 기존 실행 파일의 하드링크 백업을 운영체제가 허용해야 한다. 설치 경로는 절대경로여야 하며 심볼릭 링크·다른 OS/아키텍처의 설치본은 교체를 거부한다.
 
+개발 중 최신 commit 또는 특정 commit/tag/branch를 설치하려면 quota-bar **Settings… → Update**에서 설치 기준을 바꾼다. 같은 값은 `~/.config/quota/config.json`의 `update.ref`에 저장되며 `quota-cli update`와 메뉴바 업데이트가 함께 사용한다. 값이 없으면 기본값은 `@latest` 릴리스다. 값이 있으면 Go module proxy 대신 직접 VCS 조회로 해석·설치한다.
+
 ### 시스템 요구사항
 
 - `quota-cli` 지원 OS — macOS 또는 Linux. Windows는 지원하지 않는다.
@@ -90,6 +92,7 @@ quota-cli account rm codex-2                   # 계정 제거
 {
   "claudeAccounts": [ { "key": "claude-2", "configDir": "~/.claude-2" } ],
   "codexAccounts":  [ { "key": "codex-2",  "home": "~/.codex-alt" } ],
+  "update": { "ref": "main" },
   "execPrompt": {
     "accountSettings": {
       "claude":   { "minLeftPct": 40 },

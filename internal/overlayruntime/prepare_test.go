@@ -297,6 +297,103 @@ func TestPreparePreservesUserFilesAndEditedGeneratedFiles(t *testing.T) {
 	assertMode(t, override, 0o644)
 }
 
+func TestRemoveRechecksGeneratedFileBeforeDelete(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		mutate      func(t *testing.T, path string)
+		want        string
+		wantSymlink bool
+	}{
+		{
+			name: "edited",
+			mutate: func(t *testing.T, path string) {
+				write(t, path, "user edit\n")
+			},
+			want: "user edit\n",
+		},
+		{
+			name: "replaced",
+			mutate: func(t *testing.T, path string) {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tmp := filepath.Join(filepath.Dir(path), ".replacement")
+				if err := os.WriteFile(tmp, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(tmp, path); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "# shared rules\n\nprivate body\n",
+		},
+		{
+			name: "symlink",
+			mutate: func(t *testing.T, path string) {
+				if err := os.Rename(path, path+".original"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("AGENTS.md", path); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantSymlink: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testHome(t)
+			globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+			repo := newRepo(t)
+			write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+			prepare(t, repo)
+			target := filepath.Join(repo, "AGENTS.override.md")
+			if err := os.Remove(filepath.Join(repo, "AGENTS.local.md")); err != nil {
+				t.Fatal(err)
+			}
+			r, err := resolveContext(context.Background(), repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := readState(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var remove plannedAction
+			for _, a := range r.evaluateCheckout(repo, state, nil) {
+				if a.Path == target && a.Action == actionRemove {
+					remove = a
+					break
+				}
+			}
+			if remove.Path == "" {
+				t.Fatal("remove action not planned")
+			}
+			tc.mutate(t, target)
+			var res PrepareResult
+			r.applyAction(repo, remove, &state, &res)
+			if len(res.Removed) != 0 || len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0].Reason, "changed") && !strings.Contains(res.Skipped[0].Reason, "user edits") && !strings.Contains(res.Skipped[0].Reason, "regular") {
+				t.Fatalf("result = %+v, want skipped removal", res)
+			}
+			if tc.want != "" && read(t, target) != tc.want {
+				t.Fatalf("target changed: %q", read(t, target))
+			}
+			if tc.wantSymlink {
+				info, err := os.Lstat(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if info.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("target mode = %v, want symlink", info.Mode())
+				}
+			}
+			if state.Generated[target] == "" {
+				t.Fatal("ownership record was dropped for a preserved file")
+			}
+		})
+	}
+}
+
 func TestUserOverrideWithoutLocalSourceIsReported(t *testing.T) {
 	testHome(t)
 	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")

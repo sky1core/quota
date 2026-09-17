@@ -50,7 +50,7 @@ func liveSettingsTestSnapshot(t *testing.T) liveSettingsSnapshot {
 func TestLiveSettingsSaveAndRegistrationOnly(t *testing.T) {
 	liveSettingsTestHome(t)
 	writeSettingsTestFile(t, settingsPath(), `{"selected":["codex_weekly"],"showResetTime":false,"futureNumber":9007199254740993,"keepalive":{"enabled":false,"futureFlag":true}}`)
-	writeSettingsTestFile(t, config.Path(), `{"claudeAccounts":[{"key":"claude-2","configDir":"~/account-two","futureFlag":true},{"key":"claude-3","configDir":"~/account-three"}],"futureNumber":9007199254740993,"execPrompt":{"futurePolicy":"retain","accountSettings":{"claude":{"futureFlag":true},"claude-2":{"minLeftPct":17,"futureFlag":true},"claude-3":{"minLeftPct":19},"codex-99":{"minLeftPct":23}}}}`)
+	writeSettingsTestFile(t, config.Path(), `{"claudeAccounts":[{"key":"claude-2","configDir":"~/account-two","futureFlag":true},{"key":"claude-3","configDir":"~/account-three"}],"futureNumber":9007199254740993,"update":{"ref":"main","futurePolicy":"retain"},"execPrompt":{"futurePolicy":"retain","accountSettings":{"claude":{"futureFlag":true},"claude-2":{"minLeftPct":17,"futureFlag":true},"claude-3":{"minLeftPct":19},"codex-99":{"minLeftPct":23}}}}`)
 	home, _ := os.UserHomeDir()
 	accountFile := filepath.Join(home, "account-two", "auth.json")
 	writeSettingsTestFile(t, accountFile, `{"placeholder":"must remain byte identical"}`)
@@ -59,6 +59,7 @@ func TestLiveSettingsSaveAndRegistrationOnly(t *testing.T) {
 	d.RefreshActiveMinutes, d.RefreshIdleMinutes = 11, 41
 	d.ShowResetTime, d.StartAtLogin = true, true
 	d.Keepalive.Time = "14:25"
+	d.Update = liveSettingsUpdate{Mode: "ref", Ref: "438784f550e2ffb48f703fa668ec5df3d94b1018"}
 	floor := 12.5
 	d.Accounts[0].MinLeftPct = &floor
 	d.Accounts[1].ConfigDir = "~/account-new"
@@ -71,6 +72,9 @@ func TestLiveSettingsSaveAndRegistrationOnly(t *testing.T) {
 	}
 	if bar.RefreshActiveMinutes != 11 || bar.RefreshIdleMinutes != 41 || !bar.ShowResetTime || bar.Keepalive.Time != "14:25" {
 		t.Fatalf("bar runtime config: %+v", bar)
+	}
+	if shared.Update == nil || shared.Update.Ref != "438784f550e2ffb48f703fa668ec5df3d94b1018" {
+		t.Fatalf("shared update config: %+v", shared.Update)
 	}
 	resolved, skipped := shared.ResolveAccounts()
 	if len(resolved) != 2 || len(skipped) != 0 || resolved[1].ConfigDir != filepath.Join(home, "account-new") {
@@ -92,6 +96,10 @@ func TestLiveSettingsSaveAndRegistrationOnly(t *testing.T) {
 	}
 	if sharedRoot["claudeAccounts"].([]any)[0].(map[string]any)["futureFlag"] != true {
 		t.Fatal("unknown account setting lost")
+	}
+	updateRoot := sharedRoot["update"].(map[string]any)
+	if updateRoot["futurePolicy"] != "retain" || updateRoot["ref"] != "438784f550e2ffb48f703fa668ec5df3d94b1018" {
+		t.Fatal("update settings not preserved")
 	}
 	exec := sharedRoot["execPrompt"].(map[string]any)
 	floors := exec["accountSettings"].(map[string]any)
@@ -130,6 +138,28 @@ func TestLiveSettingsSaveAndRegistrationOnly(t *testing.T) {
 	}
 }
 
+func TestLiveSettingsUpdateLatestRemovesRef(t *testing.T) {
+	liveSettingsTestHome(t)
+	writeSettingsTestFile(t, config.Path(), `{"update":{"ref":"main","futurePolicy":"retain"}}`)
+	s := liveSettingsTestSnapshot(t)
+	s.draft.Update = liveSettingsUpdate{Mode: "latest", Ref: ""}
+	_, shared, err := persistLiveSettings(s, s.draft, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shared.Update != nil {
+		t.Fatalf("default update source should not store shared update config: %+v", shared.Update)
+	}
+	root, err := agenthooks.ReadJSONObject(config.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	updateRoot := root["update"].(map[string]any)
+	if _, exists := updateRoot["ref"]; exists || updateRoot["futurePolicy"] != "retain" {
+		t.Fatalf("update ref not removed or unknown field lost: %+v", updateRoot)
+	}
+}
+
 func TestLiveSettingsRejectsInvalidBeforeWriting(t *testing.T) {
 	tests := map[string]func(*liveSettingsDraft){
 		"zero refresh":      func(d *liveSettingsDraft) { d.RefreshActiveMinutes = 0 },
@@ -153,6 +183,10 @@ func TestLiveSettingsRejectsInvalidBeforeWriting(t *testing.T) {
 		"duplicate selected":      func(d *liveSettingsDraft) { d.Selected = []string{"claude_session", "claude_session"} },
 		"invalid keepalive":       func(d *liveSettingsDraft) { d.Keepalive.Time = "25:20" },
 		"empty keepalive message": func(d *liveSettingsDraft) { d.Keepalive.Message = " " },
+		"bad update mode":         func(d *liveSettingsDraft) { d.Update.Mode = "git" },
+		"blank update ref":        func(d *liveSettingsDraft) { d.Update = liveSettingsUpdate{Mode: "ref"} },
+		"spaced update ref":       func(d *liveSettingsDraft) { d.Update = liveSettingsUpdate{Mode: "ref", Ref: "feature branch"} },
+		"at update ref":           func(d *liveSettingsDraft) { d.Update = liveSettingsUpdate{Mode: "ref", Ref: "tag@main"} },
 	}
 	for name, change := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -371,6 +405,23 @@ func TestLiveSettingsRequiresExplicitKeepaliveFields(t *testing.T) {
 		b, _ := json.Marshal(root)
 		if _, err := decodeLiveSettings(string(b)); err == nil {
 			t.Fatal("incomplete keepalive payload accepted")
+		}
+	}
+}
+
+func TestLiveSettingsRequiresExplicitUpdateFields(t *testing.T) {
+	liveSettingsTestHome(t)
+	s := liveSettingsTestSnapshot(t)
+	b, _ := json.Marshal(s.draft)
+	var root map[string]any
+	if err := json.Unmarshal(b, &root); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []any{nil, map[string]any{}, map[string]any{"mode": "latest"}} {
+		root["update"] = value
+		b, _ := json.Marshal(root)
+		if _, err := decodeLiveSettings(string(b)); err == nil {
+			t.Fatal("incomplete update payload accepted")
 		}
 	}
 }

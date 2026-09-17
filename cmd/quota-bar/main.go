@@ -888,7 +888,7 @@ func onReady() {
 	miAutoStart := systray.AddMenuItemCheckbox("Start at Login", "Applies at the next login", isAutoStartEnabled())
 	miVersion := systray.AddMenuItem("quota-bar "+versionString(), "")
 	miVersion.Disable()
-	miUpdate := systray.AddMenuItem("Check for Updates…", "최신 릴리스 확인 후 설치하고 재시작")
+	miUpdate := systray.AddMenuItem("Check for Updates…", "설정된 업데이트 기준으로 설치하고 재시작")
 	miUpdateStatus := systray.AddMenuItem("", "")
 	miUpdateStatus.Disable()
 	miUpdateStatus.Hide()
@@ -1038,7 +1038,7 @@ func onReady() {
 		renderMenu(data)
 	}
 
-	// menuUpdate installs the latest release and restarts by handing over to
+	// menuUpdate installs the configured update source and restarts by handing over to
 	// a FRESH process: launchd respawn when we are the job, spawn+exit(0)
 	// otherwise. It used to re-exec in place (same PID, launchd kept
 	// tracking), but a re-exec'd image re-registers its NSStatusItem under a
@@ -1105,7 +1105,16 @@ func onReady() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		status("Checking and updating installed binaries…")
-		result, err := update.Coordinated(ctx, "quota-bar")
+		cfg, err := config.Load()
+		if err != nil {
+			fail("Update failed — see log", err)
+			return
+		}
+		ref := ""
+		if cfg.Update != nil {
+			ref = cfg.Update.Ref
+		}
+		result, err := update.CoordinatedWithRef(ctx, "quota-bar", ref)
 		if err != nil {
 			fail("Update failed — see log", err)
 			return

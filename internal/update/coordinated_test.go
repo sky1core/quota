@@ -270,7 +270,7 @@ func TestStageReleaseRealGo(t *testing.T) {
 	for _, target := range targets {
 		writeExecutable(t, filepath.Join(protectedBin, target.Name), "original "+target.Name)
 	}
-	if err := stageRelease(ctx, dir, targets, version); err != nil {
+	if err := stageRelease(ctx, dir, targets, version, false); err != nil {
 		t.Fatal(err)
 	}
 	for _, target := range targets {
@@ -286,7 +286,7 @@ func TestStageReleaseRealGo(t *testing.T) {
 			t.Setenv("CGO_ENABLED", "0")
 			changedOnly := t.TempDir()
 			partial := []Target{{Name: "quota-cli", Updated: true}, {Name: "quota-bar", Updated: false}}
-			if err := stageRelease(ctx, changedOnly, partial, version); err != nil {
+			if err := stageRelease(ctx, changedOnly, partial, version, false); err != nil {
 				t.Fatalf("unchanged bar blocked CLI: %v", err)
 			}
 			if _, err := os.Stat(filepath.Join(changedOnly, "quota-bar")); !os.IsNotExist(err) {
@@ -295,12 +295,40 @@ func TestStageReleaseRealGo(t *testing.T) {
 		})
 	}
 	badTargets := append(append([]Target(nil), targets...), Target{Name: "nonexistent-command", Updated: true})
-	if err := stageRelease(ctx, t.TempDir(), badTargets, version); err == nil || !strings.Contains(err.Error(), "staging release") {
+	if err := stageRelease(ctx, t.TempDir(), badTargets, version, false); err == nil || !strings.Contains(err.Error(), "staging release") {
 		t.Fatalf("real Go failure not propagated: %v", err)
 	}
 	for _, target := range targets {
 		assertContents(t, filepath.Join(protectedBin, target.Name), "original "+target.Name)
 	}
+}
+
+func TestStageReleaseEnvPreservesLatestProxy(t *testing.T) {
+	t.Setenv("GOBIN", "/must/not/leak")
+	t.Setenv("GOOS", "plan9")
+	t.Setenv("GOARCH", "mips")
+	t.Setenv("GOPROXY", "https://proxy.example")
+	latest := stageReleaseEnv("/stage", false)
+	if envValue(latest, "GOBIN") != "/stage" || envValue(latest, "GOOS") != runtime.GOOS || envValue(latest, "GOARCH") != runtime.GOARCH {
+		t.Fatalf("target env = GOBIN=%q GOOS=%q GOARCH=%q", envValue(latest, "GOBIN"), envValue(latest, "GOOS"), envValue(latest, "GOARCH"))
+	}
+	if got := envValue(latest, "GOPROXY"); got != "https://proxy.example" {
+		t.Fatalf("latest GOPROXY = %q, want inherited proxy", got)
+	}
+	direct := stageReleaseEnv("/stage", true)
+	if got := envValue(direct, "GOPROXY"); got != "direct" {
+		t.Fatalf("direct GOPROXY = %q, want direct", got)
+	}
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix)
+		}
+	}
+	return ""
 }
 
 func TestCoordinatedRejectsRelativeGOBINBeforeCreatingFiles(t *testing.T) {

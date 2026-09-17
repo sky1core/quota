@@ -15,6 +15,7 @@ import (
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	goldmarktext "github.com/yuin/goldmark/text"
+	"golang.org/x/sys/unix"
 )
 
 type PrepareSkip struct {
@@ -238,31 +239,37 @@ func (r repoContext) planGenerated(w string, state RepositoryState, local []byte
 // inspectGenerated reads the current file at path and decides ownership.
 // A problem means the file must be preserved untouched.
 func inspectGenerated(path string, state RepositoryState) (current []byte, owned bool, problem error) {
+	current, _, _, owned, problem = inspectGeneratedWithStat(path, state)
+	return current, owned, problem
+}
+
+func inspectGeneratedWithStat(path string, state RepositoryState) (current []byte, stat unix.Stat_t, statOK bool, owned bool, problem error) {
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
-		return nil, false, nil
+		return nil, stat, false, false, nil
 	}
 	if err != nil {
-		return nil, false, err
+		return nil, stat, false, false, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, false, fmt.Errorf("is not a regular file; preserved")
+		return nil, stat, false, false, fmt.Errorf("is not a regular file; preserved")
 	}
-	current, err = readRegular(path)
+	current, stat, err = readRegularWithStat(path)
 	if err != nil {
-		return nil, false, err
+		return nil, stat, false, false, err
 	}
+	statOK = true
 	known := state.Generated[path]
 	if known == "" {
-		return current, false, nil
+		return current, stat, statOK, false, nil
 	}
 	if known != digest(current) {
-		return current, true, fmt.Errorf("has user edits; preserved")
+		return current, stat, statOK, true, fmt.Errorf("has user edits; preserved")
 	}
 	if err := checkRecordedGeneratedMode(path, state); err != nil {
-		return current, true, fmt.Errorf("permissions changed after generation; preserved")
+		return current, stat, statOK, true, fmt.Errorf("permissions changed after generation; preserved")
 	}
-	return current, true, nil
+	return current, stat, statOK, true, nil
 }
 
 func generatedModeMatches(path string, plan generatedFile) bool {
@@ -289,11 +296,13 @@ const (
 // plannedAction is the decision for one generated path. It is computed
 // without writing so that preparation and status share one evaluation.
 type plannedAction struct {
-	Path    string
-	Action  fileAction
-	Reason  string
-	plan    generatedFile
-	current []byte
+	Path           string
+	Action         fileAction
+	Reason         string
+	plan           generatedFile
+	current        []byte
+	currentStat    unix.Stat_t
+	hasCurrentStat bool
 	// forget drops a stale ownership record whose file no longer exists.
 	forget bool
 	// recordMode backfills the permission record of an unchanged owned file.
@@ -327,11 +336,12 @@ func (r repoContext) evaluateGeneratedWithOptions(w string, plan generatedFile, 
 	if tracked {
 		return skip("is tracked; it must stay local-only")
 	}
-	current, owned, problem := inspectGenerated(plan.Path, state)
+	current, stat, statOK, owned, problem := inspectGeneratedWithStat(plan.Path, state)
 	if problem != nil {
 		return skip(problem.Error())
 	}
 	a.current = current
+	a.currentStat, a.hasCurrentStat = stat, statOK
 	if plan.SourceErr != nil && !ignoreSourceErr {
 		return skip(plan.SourceErr.Error())
 	}
@@ -429,6 +439,29 @@ func (r repoContext) evaluateCheckoutRemoval(w string, state RepositoryState) []
 	return actions
 }
 
+func removeGeneratedFile(path string, state RepositoryState, expected []byte, expectedStat unix.Stat_t, hasExpectedStat bool) (bool, error) {
+	if expected == nil || !hasExpectedStat {
+		return false, fmt.Errorf("changed before removal")
+	}
+	current, currentStat, currentStatOK, owned, problem := inspectGeneratedWithStat(path, state)
+	if problem != nil {
+		return false, problem
+	}
+	if current == nil {
+		return false, nil
+	}
+	if !owned {
+		return false, fmt.Errorf("exists and is not quota-generated; preserved")
+	}
+	if !currentStatOK || !sameFileSnapshot(currentStat, expectedStat) || !bytes.Equal(current, expected) {
+		return false, fmt.Errorf("changed before removal")
+	}
+	if err := os.Remove(path); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (r repoContext) applyAction(w string, a plannedAction, state *RepositoryState, res *PrepareResult) {
 	skip := func(reason string) { res.Skipped = append(res.Skipped, PrepareSkip{Path: a.Path, Reason: reason}) }
 	switch a.Action {
@@ -444,12 +477,15 @@ func (r repoContext) applyAction(w string, a plannedAction, state *RepositorySta
 			}
 		}
 	case actionRemove:
-		if err := os.Remove(a.Path); err != nil {
+		removed, err := removeGeneratedFile(a.Path, *state, a.current, a.currentStat, a.hasCurrentStat)
+		if err != nil {
 			skip(err.Error())
 			return
 		}
 		forgetGeneratedFile(state, a.Path)
-		res.Removed = append(res.Removed, a.Path)
+		if removed {
+			res.Removed = append(res.Removed, a.Path)
+		}
 	case actionCreate, actionUpdate:
 		if err := managedParents(w, a.plan.Rel, true); err != nil {
 			skip(err.Error())

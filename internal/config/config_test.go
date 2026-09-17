@@ -134,6 +134,17 @@ func TestLoad_ExecPromptAccountSettings(t *testing.T) {
 	}
 }
 
+func TestLoad_UpdateRef(t *testing.T) {
+	writeConfig(t, `{"update":{"ref":"main"}}`)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Update == nil || c.Update.Ref != "main" {
+		t.Fatalf("update ref = %+v, want main", c.Update)
+	}
+}
+
 func resolvedKeys(accts []ResolvedAccount) []string {
 	out := make([]string, len(accts))
 	for i, a := range accts {

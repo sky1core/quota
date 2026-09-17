@@ -37,6 +37,10 @@ func (r Result) RestartRequired(name, runningVersion string) bool {
 }
 
 func Coordinated(ctx context.Context, caller string) (Result, error) {
+	return CoordinatedWithRef(ctx, caller, "")
+}
+
+func CoordinatedWithRef(ctx context.Context, caller, ref string) (Result, error) {
 	if err := supportedCaller(caller, runtime.GOOS); err != nil {
 		return Result{}, err
 	}
@@ -60,11 +64,11 @@ func Coordinated(ctx context.Context, caller string) (Result, error) {
 		return Result{}, err
 	}
 	defer lock.Close()
-	latest, err := Latest(ctx)
+	version, direct, err := versionForRef(ctx, ref)
 	if err != nil {
 		return Result{}, err
 	}
-	result, needsInstall, err := planUpdate(dir, caller, runtime.GOOS, latest)
+	result, needsInstall, err := planUpdate(dir, caller, runtime.GOOS, version)
 	if err != nil {
 		return Result{}, err
 	}
@@ -76,7 +80,7 @@ func Coordinated(ctx context.Context, caller string) (Result, error) {
 		return Result{}, err
 	}
 	defer os.RemoveAll(stage)
-	if err := stageRelease(ctx, stage, result.Targets, latest); err != nil {
+	if err := stageRelease(ctx, stage, result.Targets, version, direct); err != nil {
 		return Result{}, err
 	}
 	var replacements []replacement
@@ -170,7 +174,7 @@ func diskVersion(path, name string) (string, error) {
 	return ResolveVersion("", bi, true), nil
 }
 
-func stageRelease(ctx context.Context, dir string, targets []Target, version string) error {
+func stageRelease(ctx context.Context, dir string, targets []Target, version string, direct bool) error {
 	var changed []Target
 	for _, target := range targets {
 		if target.Updated {
@@ -188,13 +192,7 @@ func stageRelease(ctx context.Context, dir string, targets []Target, version str
 	if err != nil {
 		return err
 	}
-	for _, entry := range os.Environ() {
-		key, _, _ := strings.Cut(entry, "=")
-		if key != "GOBIN" && key != "GOOS" && key != "GOARCH" {
-			cmd.Env = append(cmd.Env, entry)
-		}
-	}
-	cmd.Env = append(cmd.Env, "GOBIN="+dir, "GOOS="+runtime.GOOS, "GOARCH="+runtime.GOARCH)
+	cmd.Env = stageReleaseEnv(dir, direct)
 	if out, err := childprocess.CombinedOutput(cmd); err != nil {
 		return fmt.Errorf("staging release %s: %w\n%s", version, err, strings.TrimSpace(string(out)))
 	}
@@ -208,6 +206,25 @@ func stageRelease(ctx context.Context, dir string, targets []Target, version str
 		}
 	}
 	return nil
+}
+
+func stageReleaseEnv(dir string, direct bool) []string {
+	var env []string
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if key == "GOBIN" || key == "GOOS" || key == "GOARCH" {
+			continue
+		}
+		if direct && key == "GOPROXY" {
+			continue
+		}
+		env = append(env, entry)
+	}
+	env = append(env, "GOBIN="+dir, "GOOS="+runtime.GOOS, "GOARCH="+runtime.GOARCH)
+	if direct {
+		env = append(env, "GOPROXY=direct")
+	}
+	return env
 }
 
 func lockUpdates(ctx context.Context, dir string) (*os.File, error) {

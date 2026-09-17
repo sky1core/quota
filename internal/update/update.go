@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"unicode"
 
 	"github.com/sky1core/quota/internal/childprocess"
 )
@@ -71,23 +72,77 @@ func goCmd(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
+func setCmdEnv(cmd *exec.Cmd, key, value string) {
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	prefix := key + "="
+	for i, entry := range cmd.Env {
+		if strings.HasPrefix(entry, prefix) {
+			cmd.Env[i] = prefix + value
+			return
+		}
+	}
+	cmd.Env = append(cmd.Env, prefix+value)
+}
+
+func NormalizeRef(ref string) (string, error) {
+	if ref == "" {
+		return "", nil
+	}
+	if strings.TrimSpace(ref) != ref {
+		return "", errors.New("update ref must not start or end with whitespace")
+	}
+	for _, r := range ref {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return "", errors.New("update ref must not contain whitespace or control characters")
+		}
+	}
+	if strings.Contains(ref, "@") {
+		return "", errors.New(`update ref must not contain "@"`)
+	}
+	return ref, nil
+}
+
+// VersionForRef resolves the Go module version for an install source. An empty
+// ref keeps the default "@latest" release behavior.
+func VersionForRef(ctx context.Context, ref string) (string, error) {
+	version, _, err := versionForRef(ctx, ref)
+	return version, err
+}
+
+func versionForRef(ctx context.Context, ref string) (string, bool, error) {
+	ref, err := NormalizeRef(ref)
+	if err != nil {
+		return "", false, err
+	}
+	direct := ref != "" && ref != "latest"
+	if ref == "" {
+		ref = "latest"
+	}
+	cmd, err := goCmd(ctx, "list", "-m", "-f", "{{.Version}}", Module+"@"+ref)
+	if err != nil {
+		return "", false, err
+	}
+	if direct {
+		setCmdEnv(cmd, "GOPROXY", "direct")
+	}
+	out, err := childprocess.Output(cmd)
+	if err != nil {
+		return "", false, fmt.Errorf("resolving %s@%s: %w%s", Module, ref, err, stderrOf(err))
+	}
+	v := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(v, "v") {
+		return "", false, fmt.Errorf("unexpected version %q from go list", v)
+	}
+	return v, direct, nil
+}
+
 // Latest returns the newest release tag of this module, exactly as the Go
 // module proxy resolves "@latest". A tag pushed moments ago can lag behind by
 // a few minutes of proxy cache.
 func Latest(ctx context.Context) (string, error) {
-	cmd, err := goCmd(ctx, "list", "-m", "-f", "{{.Version}}", Module+"@latest")
-	if err != nil {
-		return "", err
-	}
-	out, err := childprocess.Output(cmd)
-	if err != nil {
-		return "", fmt.Errorf("resolving %s@latest: %w%s", Module, err, stderrOf(err))
-	}
-	v := strings.TrimSpace(string(out))
-	if !strings.HasPrefix(v, "v") {
-		return "", fmt.Errorf("unexpected version %q from go list", v)
-	}
-	return v, nil
+	return VersionForRef(ctx, "")
 }
 
 // BinPath returns where `go install` puts a binary named name: GOBIN if set,

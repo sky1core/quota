@@ -24,7 +24,7 @@ func main() {
 		// No arguments: reject anything extra (including -h) instead of
 		// silently ignoring it and running a network check/install.
 		if len(os.Args) > 2 {
-			fmt.Fprintln(os.Stderr, "usage: quota-cli update   (인자 없음 — 최신 릴리스로 재설치)")
+			fmt.Fprintln(os.Stderr, "usage: quota-cli update   (인자 없음 — 설정된 업데이트 기준으로 재설치)")
 			os.Exit(2)
 		}
 		os.Exit(runUpdate())
@@ -471,7 +471,16 @@ func runUpdate() int {
 	defer stop()
 	ctx, cancel := context.WithTimeout(signalCtx, 5*time.Minute)
 	defer cancel()
-	result, err := update.Coordinated(ctx, "quota-cli")
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "업데이트 실패: config load: %v\n", err)
+		return 1
+	}
+	ref := ""
+	if cfg.Update != nil {
+		ref = cfg.Update.Ref
+	}
+	result, err := update.CoordinatedWithRef(ctx, "quota-cli", ref)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "업데이트 실패: %v\n", err)
 		return 1

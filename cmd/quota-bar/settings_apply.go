@@ -20,6 +20,7 @@ import (
 	"github.com/sky1core/quota/internal/codex"
 	"github.com/sky1core/quota/internal/config"
 	"github.com/sky1core/quota/internal/keepalive"
+	"github.com/sky1core/quota/internal/update"
 )
 
 type liveSettingsItem struct {
@@ -34,6 +35,11 @@ type liveSettingsAccount struct {
 	MinLeftPct *float64 `json:"minLeftPct"`
 }
 
+type liveSettingsUpdate struct {
+	Mode string `json:"mode"`
+	Ref  string `json:"ref"`
+}
+
 type liveSettingsDraft struct {
 	RefreshActiveMinutes int                   `json:"refreshActiveMinutes"`
 	RefreshIdleMinutes   int                   `json:"refreshIdleMinutes"`
@@ -43,6 +49,7 @@ type liveSettingsDraft struct {
 	AvailableItems       []liveSettingsItem    `json:"availableItems"`
 	Accounts             []liveSettingsAccount `json:"accounts"`
 	Keepalive            keepalive.Config      `json:"keepalive"`
+	Update               liveSettingsUpdate    `json:"update"`
 }
 
 type settingsFileSnapshot struct {
@@ -159,6 +166,10 @@ func snapshotLiveSettings(generation uint64, data quotaData, keepaliveStoppedWit
 		RefreshActiveMinutes: int(cfg.activeInterval().Minutes()), RefreshIdleMinutes: int(cfg.idleInterval().Minutes()),
 		ShowResetTime: cfg.ShowResetTime, StartAtLogin: s.login.exists,
 		Selected: append([]string{}, cfg.Selected...), Keepalive: keepalive.DefaultConfig(),
+		Update: liveSettingsUpdate{Mode: "latest"},
+	}
+	if shared.Update != nil {
+		d.Update = liveSettingsUpdateFromRef(shared.Update.Ref)
 	}
 	if cfg.Keepalive != nil {
 		d.Keepalive = *cfg.Keepalive
@@ -229,7 +240,7 @@ func decodeLiveSettings(raw string) (liveSettingsDraft, error) {
 	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
 		return d, err
 	}
-	for _, key := range []string{"refreshActiveMinutes", "refreshIdleMinutes", "showResetTime", "startAtLogin", "selected", "accounts", "keepalive"} {
+	for _, key := range []string{"refreshActiveMinutes", "refreshIdleMinutes", "showResetTime", "startAtLogin", "selected", "accounts", "keepalive", "update"} {
 		if v, ok := fields[key]; !ok || bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
 			return d, fmt.Errorf("%s is required", key)
 		}
@@ -250,7 +261,56 @@ func decodeLiveSettings(raw string) (liveSettingsDraft, error) {
 			return d, fmt.Errorf("unknown keepalive field %q", key)
 		}
 	}
+	var updateFields map[string]json.RawMessage
+	if err := json.Unmarshal(fields["update"], &updateFields); err != nil {
+		return d, err
+	}
+	allowed = map[string]bool{}
+	for _, key := range []string{"mode", "ref"} {
+		allowed[key] = true
+		if value, ok := updateFields[key]; !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return d, fmt.Errorf("update.%s is required", key)
+		}
+	}
+	for key := range updateFields {
+		if !allowed[key] {
+			return d, fmt.Errorf("unknown update field %q", key)
+		}
+	}
 	return d, nil
+}
+
+func liveSettingsUpdateFromRef(ref string) liveSettingsUpdate {
+	switch ref {
+	case "", "latest":
+		return liveSettingsUpdate{Mode: "latest"}
+	case "main":
+		return liveSettingsUpdate{Mode: "main", Ref: "main"}
+	default:
+		return liveSettingsUpdate{Mode: "ref", Ref: ref}
+	}
+}
+
+func liveSettingsUpdateRef(u liveSettingsUpdate) (string, error) {
+	switch u.Mode {
+	case "latest":
+		if u.Ref != "" && u.Ref != "latest" {
+			return "", errors.New(`update.ref must be empty when update.mode is "latest"`)
+		}
+		return "", nil
+	case "main":
+		if u.Ref != "" && u.Ref != "main" {
+			return "", errors.New(`update.ref must be "main" when update.mode is "main"`)
+		}
+		return "main", nil
+	case "ref":
+		if u.Ref == "" {
+			return "", errors.New("update ref is required")
+		}
+		return update.NormalizeRef(u.Ref)
+	default:
+		return "", fmt.Errorf("invalid update mode %q", u.Mode)
+	}
 }
 
 func validateLiveSettings(d liveSettingsDraft) (settings, config.Config, error) {
@@ -264,6 +324,13 @@ func validateLiveSettings(d liveSettingsDraft) (settings, config.Config, error) 
 	}
 	if err := d.Keepalive.Validate(); err != nil {
 		return bar, shared, err
+	}
+	ref, err := liveSettingsUpdateRef(d.Update)
+	if err != nil {
+		return bar, shared, err
+	}
+	if ref != "" {
+		shared.Update = &config.UpdateConfig{Ref: ref}
 	}
 	seen := map[string]bool{}
 	dirs := map[string]map[string]bool{"claude": {}, "codex": {}}
@@ -445,6 +512,24 @@ func patchLiveSettings(barRoot, sharedRoot map[string]any, bar settings, d liveS
 		if removed[key] {
 			delete(floors, key)
 		}
+	}
+	if shared.Update == nil {
+		if value, exists := sharedRoot["update"]; exists && value != nil {
+			u, ok := value.(map[string]any)
+			if !ok {
+				return errors.New("update must be an object")
+			}
+			delete(u, "ref")
+			if len(u) == 0 {
+				delete(sharedRoot, "update")
+			}
+		}
+	} else {
+		u, err := settingsObject(sharedRoot, "update")
+		if err != nil {
+			return err
+		}
+		u["ref"] = shared.Update.Ref
 	}
 	return nil
 }

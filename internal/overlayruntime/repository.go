@@ -178,57 +178,63 @@ func uniqueStrings(values ...string) []string {
 	return out
 }
 func readRegular(path string) ([]byte, error) {
+	data, _, err := readRegularWithStat(path)
+	return data, err
+}
+
+func readRegularWithStat(path string) ([]byte, unix.Stat_t, error) {
+	var zero unix.Stat_t
 	info, e := os.Lstat(path)
 	if e != nil {
-		return nil, e
+		return nil, zero, e
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("%s is a symlink; not a regular file", path)
+		return nil, zero, fmt.Errorf("%s is a symlink; not a regular file", path)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", path)
+		return nil, zero, fmt.Errorf("%s is not a regular file", path)
 	}
 	var before unix.Stat_t
 	if e = unix.Lstat(path, &before); e != nil {
-		return nil, e
+		return nil, zero, e
 	}
 	if before.Uid != uint32(os.Getuid()) {
-		return nil, fmt.Errorf("%s is not owned by current user", path)
+		return nil, zero, fmt.Errorf("%s is not owned by current user", path)
 	}
 	fd, e := unix.Open(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if e != nil {
-		return nil, fmt.Errorf("could not read %s: %w", path, e)
+		return nil, zero, fmt.Errorf("could not read %s: %w", path, e)
 	}
 	f := os.NewFile(uintptr(fd), path)
 	defer f.Close()
 	opened, e := f.Stat()
 	if e != nil {
-		return nil, e
+		return nil, zero, e
 	}
 	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
-		return nil, fmt.Errorf("%s changed during inspection", path)
+		return nil, zero, fmt.Errorf("%s changed during inspection", path)
 	}
 	if opened.Size() > maxRuleBytes {
-		return nil, fmt.Errorf("%s exceeds %d-byte file size limit", path, maxRuleBytes)
+		return nil, zero, fmt.Errorf("%s exceeds %d-byte file size limit", path, maxRuleBytes)
 	}
 	data, e := io.ReadAll(io.LimitReader(f, maxRuleBytes+1))
 	if e != nil {
-		return nil, e
+		return nil, zero, e
 	}
 	if len(data) > maxRuleBytes {
-		return nil, fmt.Errorf("%s exceeds file size limit", path)
+		return nil, zero, fmt.Errorf("%s exceeds file size limit", path)
 	}
 	var afterStat, openedAfter unix.Stat_t
 	if e = unix.Lstat(path, &afterStat); e != nil {
-		return nil, e
+		return nil, zero, e
 	}
 	if e = unix.Fstat(fd, &openedAfter); e != nil {
-		return nil, e
+		return nil, zero, e
 	}
 	if !sameFileSnapshot(before, afterStat) || !sameFileSnapshot(before, openedAfter) {
-		return nil, fmt.Errorf("%s changed during inspection", path)
+		return nil, zero, fmt.Errorf("%s changed during inspection", path)
 	}
-	return data, nil
+	return data, afterStat, nil
 }
 func sameFileSnapshot(a, b unix.Stat_t) bool {
 	return a.Dev == b.Dev && a.Ino == b.Ino && a.Mode == b.Mode && a.Uid == b.Uid && a.Size == b.Size && a.Mtim == b.Mtim && a.Ctim == b.Ctim

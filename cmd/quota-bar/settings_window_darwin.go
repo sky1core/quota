@@ -25,6 +25,7 @@ type settingsWindowSnapshot struct {
 	AvailableItems       []settingsWindowItem    `json:"availableItems"`
 	Accounts             []settingsWindowAccount `json:"accounts"`
 	Keepalive            settingsWindowKeepalive `json:"keepalive"`
+	Update               settingsWindowUpdate    `json:"update"`
 }
 
 type settingsWindowItem struct {
@@ -46,6 +47,11 @@ type settingsWindowKeepalive struct {
 	IdleMinutes     int      `json:"idleMinutes"`
 	ActivityMinutes int      `json:"activityMinutes"`
 	Message         string   `json:"message"`
+}
+
+type settingsWindowUpdate struct {
+	Mode string `json:"mode"`
+	Ref  string `json:"ref"`
 }
 
 var settingsWindowCallbacks = struct {

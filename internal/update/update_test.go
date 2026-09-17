@@ -39,6 +39,47 @@ func TestResolveVersion(t *testing.T) {
 	}
 }
 
+func TestNormalizeRef(t *testing.T) {
+	for _, ref := range []string{"", "main", "v1.2.3", "feature/update-source", "438784f550e2ffb48f703fa668ec5df3d94b1018"} {
+		got, err := NormalizeRef(ref)
+		if err != nil || got != ref {
+			t.Fatalf("NormalizeRef(%q) = %q, %v", ref, got, err)
+		}
+	}
+	for _, ref := range []string{" main", "main ", "feature branch", "branch\nname", "branch\tname", "tag@version", "bad\x00ref"} {
+		if got, err := NormalizeRef(ref); err == nil {
+			t.Fatalf("NormalizeRef(%q) = %q, nil error", ref, got)
+		}
+	}
+}
+
+func TestVersionForRefUsesDirectProxyOnlyForGitRefs(t *testing.T) {
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "proxy.txt")
+	goBin := filepath.Join(dir, "go")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$GOPROXY\" >> \"$QUOTA_TEST_CAPTURE\"\nprintf 'v0.1.0\\n'\n"
+	if err := os.WriteFile(goBin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GOPROXY", "https://proxy.example")
+	t.Setenv("QUOTA_TEST_CAPTURE", capture)
+	ctx := context.Background()
+	if got, err := VersionForRef(ctx, ""); err != nil || got != "v0.1.0" {
+		t.Fatalf("latest version = %q, %v", got, err)
+	}
+	if got, err := VersionForRef(ctx, "main"); err != nil || got != "v0.1.0" {
+		t.Fatalf("main version = %q, %v", got, err)
+	}
+	b, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Split(strings.TrimSpace(string(b)), "\n"); len(got) != 2 || got[0] != "https://proxy.example" || got[1] != "direct" {
+		t.Fatalf("GOPROXY sequence = %q, want inherited then direct", b)
+	}
+}
+
 func TestBinPathMatchesGoInstall(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go not available")

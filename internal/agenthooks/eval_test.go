@@ -224,6 +224,41 @@ func TestRemovedGitSubcommandsFailClosed(t *testing.T) {
 	}
 }
 
+func TestKnownGitSubcommandsWithoutFlagTablesAllowReadOptions(t *testing.T) {
+	policy, err := Preset(PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policies := []Policy{policy}
+	for _, command := range []string{
+		`git log --oneline`,
+		`git show --stat`,
+		`git rev-parse --show-toplevel`,
+	} {
+		decision, err := EvaluateCommand(policies, command)
+		if err != nil {
+			t.Fatalf("%s: %v", command, err)
+		}
+		if !decision.Allowed {
+			t.Fatalf("%s: decision = %+v, want allow", command, decision)
+		}
+	}
+	decision, err := EvaluateCommand(policies, `git push --force origin main`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Allowed {
+		t.Fatalf("git push --force: decision = %+v, want deny", decision)
+	}
+	decision, err = EvaluateCommand(policies, `git clean -fd`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Allowed || decision.RuleID != "" || decision.Reason == "" {
+		t.Fatalf("git clean -fd: decision = %+v, want parse rejection", decision)
+	}
+}
+
 func TestReflogSelectorStaysLiteral(t *testing.T) {
 	tests := []struct {
 		command string

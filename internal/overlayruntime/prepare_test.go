@@ -30,6 +30,9 @@ func testHome(t *testing.T) string {
 
 func globalIgnore(t *testing.T, lines ...string) {
 	t.Helper()
+	if contains(lines, ".claude/AGENTS.md") && !contains(lines, ".claude/CLAUDE.md") {
+		lines = append(lines, ".claude/CLAUDE.md")
+	}
 	write(t, filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "git", "ignore"), strings.Join(lines, "\n")+"\n")
 }
 
@@ -66,12 +69,17 @@ func git(t *testing.T, dir string, args ...string) string {
 func newRepo(t *testing.T) string {
 	t.Helper()
 	dir := resolvePath(filepath.Join(t.TempDir(), "repo"))
-	if err := os.Mkdir(dir, 0o755); err != nil {
+	return newRepoAt(t, dir)
+}
+
+func newRepoAt(t *testing.T, dir string) string {
+	t.Helper()
+	dir = resolvePath(dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	git(t, dir, "init", "-q")
 	write(t, filepath.Join(dir, "AGENTS.md"), "# shared rules\n")
-	write(t, filepath.Join(dir, "CLAUDE.md"), "@AGENTS.md\n")
 	write(t, filepath.Join(dir, ".gitignore"), "AGENTS.local.md\n")
 	git(t, dir, "add", ".")
 	git(t, dir, "commit", "-q", "-m", "init")
@@ -139,16 +147,16 @@ func stateFileFor(t *testing.T, dir string) string {
 
 func TestPrepareCreatesRefreshesAndRemovesGeneratedFiles(t *testing.T) {
 	home := testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 	before := gitTree(t, repo)
 	res := prepare(t, repo)
-	bridge, override := filepath.Join(repo, "CLAUDE.local.md"), filepath.Join(repo, "AGENTS.override.md")
+	bridge, override := filepath.Join(repo, ".claude/AGENTS.md"), filepath.Join(repo, "AGENTS.override.md")
 	if !res.LocalPresent || res.LocalBody != "private body" || len(res.Skipped) != 0 || !res.Changed(bridge) || !res.Changed(override) || len(res.Created) != 2 {
 		t.Fatalf("result = %+v", res)
 	}
-	if read(t, bridge) != "@AGENTS.local.md\n" || read(t, override) != "# shared rules\n\nprivate body\n" {
+	if read(t, bridge) != "@../AGENTS.local.md\n" || read(t, override) != "# shared rules\n\nprivate body\n" {
 		t.Fatalf("bridge=%q override=%q", read(t, bridge), read(t, override))
 	}
 	assertMode(t, override, 0o600)
@@ -212,21 +220,25 @@ func TestPrepareSkipsUnignoredFilesWithReason(t *testing.T) {
 		t.Fatalf("result = %+v", res)
 	}
 	for _, skip := range res.Skipped {
-		if exists(skip.Path) || !strings.Contains(skip.Reason, "not git-ignored") || !strings.Contains(skip.Reason, `"`+filepath.Base(skip.Path)+`"`) || !strings.Contains(skip.Reason, "global git ignore") {
+		rel, err := filepath.Rel(repo, skip.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exists(skip.Path) || !strings.Contains(skip.Reason, "not git-ignored") || !strings.Contains(skip.Reason, `"`+rel+`"`) || !strings.Contains(skip.Reason, "global git ignore") {
 			t.Fatalf("skip = %+v", skip)
 		}
 	}
 	globalIgnore(t, "AGENTS.override.md")
 	res = prepare(t, repo)
-	if len(res.Created) != 1 || len(res.Skipped) != 1 || filepath.Base(res.Created[0]) != "AGENTS.override.md" || filepath.Base(res.Skipped[0].Path) != "CLAUDE.local.md" {
+	if len(res.Created) != 1 || len(res.Skipped) != 1 || filepath.Base(res.Created[0]) != "AGENTS.override.md" || res.Skipped[0].Path != filepath.Join(repo, ".claude", "AGENTS.md") {
 		t.Fatalf("partial result = %+v", res)
 	}
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	res = prepare(t, repo)
-	if len(res.Created) != 1 || len(res.Skipped) != 0 || filepath.Base(res.Created[0]) != "CLAUDE.local.md" {
+	if len(res.Created) != 1 || len(res.Skipped) != 0 || res.Created[0] != filepath.Join(repo, ".claude", "AGENTS.md") {
 		t.Fatalf("completed result = %+v", res)
 	}
-	globalIgnore(t, "CLAUDE.local.md")
+	globalIgnore(t, ".claude/AGENTS.md")
 	res = prepare(t, repo)
 	if len(res.Created) != 0 || len(res.Updated) != 0 || len(res.Skipped) != 1 || filepath.Base(res.Skipped[0].Path) != "AGENTS.override.md" || !strings.Contains(res.Skipped[0].Reason, "not git-ignored") || !exists(res.Skipped[0].Path) {
 		t.Fatalf("ignore drift result = %+v", res)
@@ -237,19 +249,35 @@ func TestPrepareSkipsUnignoredFilesWithReason(t *testing.T) {
 	}
 }
 
+func TestPrepareReportsUnownedClaudeLocalBridgeAfterLocalRemoval(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
+	repo := newRepo(t)
+	bridge := filepath.Join(repo, ".claude", "AGENTS.md")
+	write(t, bridge, "@../AGENTS.local.md\n")
+	res := prepare(t, repo)
+	if len(res.Skipped) != 1 || res.Skipped[0].Path != bridge || !strings.Contains(res.Skipped[0].Reason, "not quota-generated") {
+		t.Fatalf("unowned stale bridge was not reported: %+v", res)
+	}
+	status, err := CheckRepository(context.Background(), repo, "claude", CheckOptions{})
+	if err != nil || len(status.Problems) != 1 || !strings.Contains(status.Problems[0], "not quota-generated") {
+		t.Fatalf("status = %+v, err = %v", status, err)
+	}
+}
+
 func TestPreparePreservesUserFilesAndEditedGeneratedFiles(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
-	bridge, override := filepath.Join(repo, "CLAUDE.local.md"), filepath.Join(repo, "AGENTS.override.md")
+	bridge, override := filepath.Join(repo, ".claude/AGENTS.md"), filepath.Join(repo, "AGENTS.override.md")
 	write(t, override, "# shared rules\n\nprivate body\n")
-	write(t, bridge, "@AGENTS.local.md\r\n")
+	write(t, bridge, "@../AGENTS.local.md\n")
 	res := prepare(t, repo)
 	if len(res.Created) != 0 || len(res.Skipped) != 1 || res.Skipped[0].Path != override || !strings.Contains(res.Skipped[0].Reason, "not quota-generated") {
 		t.Fatalf("identical user override adopted: %+v", res)
 	}
-	if read(t, override) != "# shared rules\n\nprivate body\n" || read(t, bridge) != "@AGENTS.local.md\r\n" {
+	if read(t, override) != "# shared rules\n\nprivate body\n" || read(t, bridge) != "@../AGENTS.local.md\n" {
 		t.Fatal("user files rewritten")
 	}
 	write(t, bridge, "# my own notes\n")
@@ -343,7 +371,7 @@ func TestRemoveRechecksGeneratedFileBeforeDelete(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			testHome(t)
-			globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+			globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 			repo := newRepo(t)
 			write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 			prepare(t, repo)
@@ -396,7 +424,7 @@ func TestRemoveRechecksGeneratedFileBeforeDelete(t *testing.T) {
 
 func TestUserOverrideWithoutLocalSourceIsReported(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	override := filepath.Join(repo, "AGENTS.override.md")
 	write(t, override, "user override\n")
@@ -412,7 +440,7 @@ func TestUserOverrideWithoutLocalSourceIsReported(t *testing.T) {
 
 func TestPrepareRejectsTrackedOrInvalidLocalSource(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	local := filepath.Join(repo, "AGENTS.local.md")
 	write(t, local, "private\n")
@@ -437,7 +465,7 @@ func TestPrepareRejectsTrackedOrInvalidLocalSource(t *testing.T) {
 	if _, err := PrepareCheckout(context.Background(), repo); err == nil || !strings.Contains(err.Error(), "NUL") {
 		t.Fatalf("NUL source accepted: %v", err)
 	}
-	if exists(filepath.Join(repo, "CLAUDE.local.md")) || exists(filepath.Join(repo, "AGENTS.override.md")) {
+	if exists(filepath.Join(repo, ".claude/AGENTS.md")) || exists(filepath.Join(repo, "AGENTS.override.md")) {
 		t.Fatal("files written despite invalid source")
 	}
 	write(t, filepath.Join(repo, "AGENTS.override.md"), "user\n")
@@ -451,7 +479,7 @@ func TestPrepareRejectsTrackedOrInvalidLocalSource(t *testing.T) {
 
 func TestPrepareLinkedWorktreeCopiesLocalSourceAndRegisteredFiles(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, ".gitignore"), "AGENTS.local.md\n/config/\n")
 	git(t, repo, "commit", "-q", "-am", "ignore config")
@@ -471,12 +499,12 @@ func TestPrepareLinkedWorktreeCopiesLocalSourceAndRegisteredFiles(t *testing.T) 
 	if len(res.Skipped) != 0 || len(res.Created) != 4 {
 		t.Fatalf("result = %+v", res)
 	}
-	if read(t, filepath.Join(linked, "AGENTS.local.md")) != "private body\n" || read(t, filepath.Join(linked, "AGENTS.override.md")) != "# linked rules\n\nprivate body\n" || read(t, filepath.Join(linked, "CLAUDE.local.md")) != "@AGENTS.local.md\n" || read(t, filepath.Join(linked, "config", "run.sh")) != "#!/bin/sh\n" {
+	if read(t, filepath.Join(linked, "AGENTS.local.md")) != "private body\n" || read(t, filepath.Join(linked, "AGENTS.override.md")) != "# linked rules\n\nprivate body\n" || read(t, filepath.Join(linked, ".claude/AGENTS.md")) != "@../AGENTS.local.md\n" || read(t, filepath.Join(linked, "config", "run.sh")) != "#!/bin/sh\n" {
 		t.Fatal("copies differ from sources")
 	}
 	assertMode(t, filepath.Join(linked, "AGENTS.local.md"), 0o600)
 	assertMode(t, filepath.Join(linked, "config", "run.sh"), 0o700)
-	if exists(filepath.Join(repo, "CLAUDE.local.md")) {
+	if exists(filepath.Join(repo, ".claude/AGENTS.md")) {
 		t.Fatal("primary checkout was prepared while preparing the linked worktree")
 	}
 	if err := os.Chmod(filepath.Join(repo, "config", "run.sh"), 0o644); err != nil {
@@ -506,7 +534,7 @@ func TestLocalFileRegistrationRules(t *testing.T) {
 	write(t, filepath.Join(repo, "tracked.txt"), "x\n")
 	git(t, repo, "add", "tracked.txt")
 	ctx := context.Background()
-	for _, bad := range []string{".gitignore", "config/.gitignore", "AGENTS.override.md", "CLAUDE.local.md", "claude.local.md", "/etc/passwd", "../outside", "config/../config/app.json", "config/missing.json", "tracked.txt", "AGENTS.md"} {
+	for _, bad := range []string{".gitignore", "config/.gitignore", "AGENTS.override.md", ".claude/AGENTS.md", "claude.local.md", "/etc/passwd", "../outside", "config/../config/app.json", "config/missing.json", "tracked.txt", "AGENTS.md"} {
 		if _, err := AddLocalFiles(ctx, repo, []string{bad}); err == nil {
 			t.Fatalf("accepted %q", bad)
 		}
@@ -541,7 +569,7 @@ func TestLocalFileRegistrationRules(t *testing.T) {
 
 func TestLegacyStateIsReadForOwnershipOnly(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 	override := filepath.Join(repo, "AGENTS.override.md")
@@ -585,7 +613,7 @@ func TestLegacyStateIsReadForOwnershipOnly(t *testing.T) {
 
 func TestPrepareBareRepositoryCheckout(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md", "AGENTS.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", "AGENTS.local.md")
 	source := newRepo(t)
 	bare := filepath.Join(filepath.Dir(source), "bare.git")
 	git(t, source, "clone", "-q", "--bare", source, bare)
@@ -630,21 +658,21 @@ func additionalContext(t *testing.T, stdout string) string {
 
 func TestSessionStartDeliversBodyOnlyOnFirstPreparedStartup(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 	code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "resume"})
 	if code != 0 || stdout != "" || stderr != "" {
 		t.Fatalf("resume delivered: %d %q %q", code, stdout, stderr)
 	}
-	if !exists(filepath.Join(repo, "CLAUDE.local.md")) {
+	if !exists(filepath.Join(repo, ".claude/AGENTS.md")) {
 		t.Fatal("resume did not prepare the checkout")
 	}
-	if err := os.Remove(filepath.Join(repo, "CLAUDE.local.md")); err != nil {
+	if err := os.Remove(filepath.Join(repo, ".claude/AGENTS.md")); err != nil {
 		t.Fatal(err)
 	}
 	code, stdout, _ = hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
-	if code != 0 || additionalContext(t, stdout) != "private body" {
+	if code != 0 || additionalContext(t, stdout) != "private body" || !exists(filepath.Join(repo, ".claude/AGENTS.md")) {
 		t.Fatalf("startup after creation: %d %q", code, stdout)
 	}
 	code, stdout, _ = hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
@@ -700,7 +728,7 @@ func TestSessionStartDeliversBodyOnlyOnFirstPreparedStartup(t *testing.T) {
 
 func TestClaudeNativeDisabledDoesNotFallbackInjectBody(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 	t.Setenv("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1")
@@ -711,36 +739,206 @@ func TestClaudeNativeDisabledDoesNotFallbackInjectBody(t *testing.T) {
 	}
 }
 
-func TestClaudeSessionStartReportsMissingSharedBridge(t *testing.T) {
+func TestClaudeStartupDeliversWhenClaudeBridgeIsCreated(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
+	write(t, filepath.Join(repo, "CLAUDE.md"), "@AGENTS.md\n")
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
-	if err := os.Remove(filepath.Join(repo, "CLAUDE.md")); err != nil {
-		t.Fatal(err)
-	}
 	code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
-	context := additionalContext(t, stdout)
-	if code != 0 || stderr != "" || !strings.Contains(context, "private body") || !strings.Contains(context, "CLAUDE.md is missing") {
-		t.Fatalf("missing shared bridge was not reported: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	if code != 0 || stderr != "" || additionalContext(t, stdout) != "private body" {
+		t.Fatalf("startup after Claude bridge creation: %d %q %q", code, stdout, stderr)
 	}
-	write(t, filepath.Join(repo, "CLAUDE.md"), "# notes only\n")
+	if read(t, filepath.Join(repo, ".claude", "CLAUDE.md")) != "@../AGENTS.local.md\n" {
+		t.Fatalf("Claude local bridge was not created")
+	}
 	code, stdout, stderr = hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
-	context = additionalContext(t, stdout)
-	if code != 0 || stderr != "" || !strings.Contains(context, "does not import @AGENTS.md") {
-		t.Fatalf("broken shared bridge was not reported: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	if code != 0 || stderr != "" || stdout != "" {
+		t.Fatalf("unchanged startup delivered: %d %q %q", code, stdout, stderr)
+	}
+}
+
+func TestClaudeStartupBridgeMigrationDeliversOnlyMissingBody(t *testing.T) {
+	t.Run("root Claude removed after local bridge existed", func(t *testing.T) {
+		testHome(t)
+		globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", ".claude/CLAUDE.md")
+		repo := newRepo(t)
+		write(t, filepath.Join(repo, "AGENTS.md"), "shared body\n")
+		write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+		write(t, filepath.Join(repo, "CLAUDE.md"), "@AGENTS.md\n")
+		prepare(t, repo)
+		if err := os.Remove(filepath.Join(repo, "CLAUDE.md")); err != nil {
+			t.Fatal(err)
+		}
+		code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
+		if code != 0 || stderr != "" || additionalContext(t, stdout) != "shared body" {
+			t.Fatalf("startup after bridge migration: %d %q %q", code, stdout, stderr)
+		}
+		if !exists(filepath.Join(repo, ".claude", "AGENTS.md")) || exists(filepath.Join(repo, ".claude", "CLAUDE.md")) {
+			t.Fatalf("unexpected bridge files after migration")
+		}
+	})
+
+	t.Run("legacy local with root Claude was already read", func(t *testing.T) {
+		testHome(t)
+		globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
+		repo := newRepo(t)
+		write(t, filepath.Join(repo, "AGENTS.md"), "shared body\n")
+		write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+		write(t, filepath.Join(repo, "CLAUDE.md"), "@AGENTS.md\n")
+		legacy := filepath.Join(repo, "CLAUDE.local.md")
+		write(t, legacy, "@AGENTS.local.md\n")
+		recordGeneratedForTest(t, repo, legacy)
+		code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
+		if code != 0 || stderr != "" || stdout != "" {
+			t.Fatalf("legacy local duplicate delivered: %d %q %q", code, stdout, stderr)
+		}
+		if exists(legacy) || !exists(filepath.Join(repo, ".claude", "CLAUDE.md")) {
+			t.Fatalf("legacy local was not replaced")
+		}
+	})
+
+	t.Run("legacy local without root Claude needs shared body", func(t *testing.T) {
+		testHome(t)
+		globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
+		repo := newRepo(t)
+		write(t, filepath.Join(repo, "AGENTS.md"), "shared body\n")
+		write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+		legacy := filepath.Join(repo, "CLAUDE.local.md")
+		write(t, legacy, "@AGENTS.local.md\n")
+		recordGeneratedForTest(t, repo, legacy)
+		code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
+		if code != 0 || stderr != "" || additionalContext(t, stdout) != "shared body" {
+			t.Fatalf("legacy local migration did not deliver shared body: %d %q %q", code, stdout, stderr)
+		}
+		if exists(legacy) || !exists(filepath.Join(repo, ".claude", "AGENTS.md")) {
+			t.Fatalf("legacy local was not replaced")
+		}
+	})
+
+	t.Run("owned root and local bridges were already read", func(t *testing.T) {
+		testHome(t)
+		globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", ".claude/CLAUDE.md", "CLAUDE.md", "CLAUDE.local.md")
+		repo := newRepo(t)
+		write(t, filepath.Join(repo, "AGENTS.md"), "shared body\n")
+		write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+		rootBridge := filepath.Join(repo, "CLAUDE.md")
+		localBridge := filepath.Join(repo, "CLAUDE.local.md")
+		write(t, rootBridge, "@AGENTS.md\n")
+		write(t, localBridge, "@AGENTS.local.md\n")
+		recordGeneratedForTest(t, repo, rootBridge)
+		recordGeneratedForTest(t, repo, localBridge)
+		code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
+		if code != 0 || stderr != "" || stdout != "" {
+			t.Fatalf("already-read bridge migration delivered duplicate body: %d %q %q", code, stdout, stderr)
+		}
+		if exists(rootBridge) || exists(localBridge) || !exists(filepath.Join(repo, ".claude", "AGENTS.md")) {
+			t.Fatalf("owned bridges were not replaced")
+		}
+	})
+
+	t.Run("linked local refresh while switching to AGENTS bridge", func(t *testing.T) {
+		testHome(t)
+		globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", ".claude/AGENTS.md", ".claude/CLAUDE.md")
+		repo := newRepo(t)
+		write(t, filepath.Join(repo, "AGENTS.local.md"), "private body 1\n")
+		linked := addWorktree(t, repo, "feature")
+		localCopy := filepath.Join(linked, "AGENTS.local.md")
+		localBridge := filepath.Join(linked, ".claude", "CLAUDE.md")
+		write(t, localCopy, "private body 1\n")
+		write(t, localBridge, "@../AGENTS.local.md\n")
+		recordGeneratedForTest(t, linked, localCopy)
+		recordGeneratedForTest(t, linked, localBridge)
+		write(t, filepath.Join(repo, "AGENTS.local.md"), "private body 2\n")
+		code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": linked, "source": "startup"})
+		if code != 0 || stderr != "" || additionalContext(t, stdout) != "# shared rules\n\nprivate body 2" {
+			t.Fatalf("linked migration did not deliver missing bodies: %d %q %q", code, stdout, stderr)
+		}
+		if exists(localBridge) || !exists(filepath.Join(linked, ".claude", "AGENTS.md")) || read(t, localCopy) != "private body 2\n" {
+			t.Fatalf("linked generated files were not refreshed")
+		}
+	})
+
+	t.Run("excluded legacy local bridge needs local body", func(t *testing.T) {
+		testHome(t)
+		globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
+		repo := newRepo(t)
+		write(t, filepath.Join(repo, "AGENTS.md"), "shared body\n")
+		write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+		write(t, filepath.Join(repo, "CLAUDE.md"), "@AGENTS.md\n")
+		legacy := filepath.Join(repo, "CLAUDE.local.md")
+		write(t, legacy, "@AGENTS.local.md\n")
+		recordGeneratedForTest(t, repo, legacy)
+		settings, _ := json.Marshal(map[string]any{"claudeMdExcludes": []string{legacy}})
+		write(t, filepath.Join(repo, ".claude", "settings.local.json"), string(settings))
+		code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
+		if code != 0 || stderr != "" || additionalContext(t, stdout) != "private body" {
+			t.Fatalf("excluded legacy local did not deliver local body: %d %q %q", code, stdout, stderr)
+		}
+		if exists(legacy) || !exists(filepath.Join(repo, ".claude", "CLAUDE.md")) {
+			t.Fatalf("legacy local was not replaced")
+		}
+	})
+}
+
+func TestClaudeSessionStartReportsAgentMDBlockers(t *testing.T) {
+	for _, rel := range []string{"CLAUDE.md", "CLAUDE.local.md", filepath.Join(".claude", "CLAUDE.md")} {
+		t.Run(rel, func(t *testing.T) {
+			testHome(t)
+			globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
+			repo := newRepo(t)
+			write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+			write(t, filepath.Join(repo, rel), "# old instruction file\n")
+			code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
+			context := additionalContext(t, stdout)
+			want := "do not import"
+			if rel == "CLAUDE.local.md" {
+				want = "single local instruction source"
+			}
+			if code != 0 || stderr != "" || strings.Contains(context, "private body") || !strings.Contains(context, rel) || !strings.Contains(context, want) {
+				t.Fatalf("blocker was not reported: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+			}
+		})
+	}
+}
+
+func TestClaudeFileImportsMarkdownVisibleReferences(t *testing.T) {
+	testHome(t)
+	repo := newRepo(t)
+	target := filepath.Join(repo, "AGENTS.md")
+	write(t, target, "shared\n")
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"line only", "@AGENTS.md\n", true},
+		{"inline", "See @AGENTS.md for shared rules.\n", true},
+		{"inline punctuation", "See @AGENTS.md.\n", true},
+		{"code span", "`@AGENTS.md`\n", false},
+		{"fenced", "```\n@AGENTS.md\n```\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(repo, "CLAUDE.md")
+			write(t, path, tc.body)
+			got, err := claudeFileImports(path, target)
+			if err != nil || got != tc.want {
+				t.Fatalf("claudeFileImports = %v, %v; want %v", got, err, tc.want)
+			}
+		})
 	}
 }
 
 func TestSessionStartDoesNotBypassNativeExclusions(t *testing.T) {
 	home := testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
-	write(t, filepath.Join(repo, ".claude", "settings.local.json"), `{"claudeMdExcludes":["**/CLAUDE.local.md"]}`)
+	write(t, filepath.Join(repo, ".claude", "settings.local.json"), `{"claudeMdExcludes":["**/.claude/AGENTS.md"]}`)
 	code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
 	context := additionalContext(t, stdout)
-	if code != 0 || stderr != "" || strings.Contains(context, "private body") || !strings.Contains(context, "CLAUDE.local.md") || !strings.Contains(context, "will not load") {
+	if code != 0 || stderr != "" || strings.Contains(context, "private body") || !strings.Contains(context, ".claude/AGENTS.md") || !strings.Contains(context, "will not load") {
 		t.Fatalf("Claude native exclusion bypassed: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 
@@ -756,9 +954,52 @@ func TestSessionStartDoesNotBypassNativeExclusions(t *testing.T) {
 	}
 }
 
+func TestSessionStartReportsClaudeMDOnlyInstructionFiles(t *testing.T) {
+	home := testHome(t)
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.md"), "shared body\n")
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	write(t, filepath.Join(home, ".claude", "settings.json"), `{"pluginConfigs":{"agents-md@builtin":{"options":{"instructionFiles":"claude-md"}}}}`)
+	code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
+	context := additionalContext(t, stdout)
+	if code != 0 || stderr != "" || strings.Contains(context, "private body") || !strings.Contains(context, "instructionFiles=claude-md") {
+		t.Fatalf("claude-md-only setting was not reported: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
+func TestSessionStartReportsClaudeMDOnlyInstructionFilesForLocalOnlyRepo(t *testing.T) {
+	home := testHome(t)
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
+	repo := newRepo(t)
+	if err := os.Remove(filepath.Join(repo, "AGENTS.md")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	write(t, filepath.Join(home, ".claude", "settings.json"), `{"pluginConfigs":{"agents-md@builtin":{"options":{"instructionFiles":"claude-md"}}}}`)
+	code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
+	context := additionalContext(t, stdout)
+	if code != 0 || stderr != "" || strings.Contains(context, "private body") || !strings.Contains(context, "instructionFiles=claude-md") {
+		t.Fatalf("local-only claude-md setting was not reported: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
+func TestSessionStartIgnoresProjectLocalClaudeMDOnlyInstructionFiles(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	write(t, filepath.Join(repo, ".claude", "settings.local.json"), `{"pluginConfigs":{"agents-md@builtin":{"options":{"instructionFiles":"claude-md"}}}}`)
+	code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
+	context := additionalContext(t, stdout)
+	if code != 0 || stderr != "" || additionalContext(t, stdout) != "private body" || strings.Contains(context, "instructionFiles=claude-md") {
+		t.Fatalf("project-local claude-md setting blocked native loading: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
 func TestCodexStartupAfterLocalRemovalDeliversCurrentSharedRule(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 	prepare(t, repo)
@@ -786,9 +1027,9 @@ func TestSessionStartReportsSkipsWithoutBlocking(t *testing.T) {
 func TestClaudeStartupRequiresCompletePreparedNativeFiles(t *testing.T) {
 	t.Run("bridge without local copy", func(t *testing.T) {
 		testHome(t)
-		globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+		globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 		repo := newRepo(t)
-		write(t, filepath.Join(repo, ".gitignore"), "AGENTS.override.md\nCLAUDE.local.md\n")
+		write(t, filepath.Join(repo, ".gitignore"), "AGENTS.override.md\n.claude/AGENTS.md\n")
 		git(t, repo, "add", ".gitignore")
 		git(t, repo, "commit", "-q", "-m", "drop local ignore")
 		write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
@@ -807,15 +1048,41 @@ func TestClaudeStartupRequiresCompletePreparedNativeFiles(t *testing.T) {
 		linked := addWorktree(t, repo, "feature")
 		code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": linked, "source": "startup"})
 		context := additionalContext(t, stdout)
-		if code != 0 || stderr != "" || strings.Contains(context, "private body") || !strings.Contains(context, "CLAUDE.local.md") || !strings.Contains(context, "not git-ignored") {
+		if code != 0 || stderr != "" || strings.Contains(context, "private body") || !strings.Contains(context, ".claude/AGENTS.md") || !strings.Contains(context, "not git-ignored") {
 			t.Fatalf("partial Claude preparation delivered: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+	})
+	t.Run("local copy with user bridge that does not import local", func(t *testing.T) {
+		testHome(t)
+		globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", "AGENTS.local.md")
+		repo := newRepo(t)
+		write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+		linked := addWorktree(t, repo, "feature")
+		write(t, filepath.Join(linked, ".claude", "AGENTS.md"), "# user bridge\n")
+		code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": linked, "source": "startup"})
+		context := additionalContext(t, stdout)
+		if code != 0 || stderr != "" || strings.Contains(context, "private body") || !strings.Contains(context, ".claude/AGENTS.md") || !strings.Contains(context, "not quota-generated") {
+			t.Fatalf("partial Claude preparation delivered: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+	})
+	t.Run("bridge with skipped stale local copy", func(t *testing.T) {
+		testHome(t)
+		globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", "AGENTS.local.md")
+		repo := newRepo(t)
+		write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+		linked := addWorktree(t, repo, "feature")
+		write(t, filepath.Join(linked, "AGENTS.local.md"), "stale user body\n")
+		code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": linked, "source": "startup"})
+		context := additionalContext(t, stdout)
+		if code != 0 || stderr != "" || strings.Contains(context, "private body") || !strings.Contains(context, "AGENTS.local.md") || !strings.Contains(context, "not quota-generated") {
+			t.Fatalf("stale local copy delivered: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 		}
 	})
 }
 
 func TestWorktreeCreateAndRemoveHooks(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md", "AGENTS.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", "AGENTS.local.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 	code, stdout, stderr := hook(t, "claude", "WorktreeCreate", map[string]any{"cwd": repo, "name": "task-1"})
@@ -826,7 +1093,7 @@ func TestWorktreeCreateAndRemoveHooks(t *testing.T) {
 	if !strings.HasPrefix(target, resolvePath(os.Getenv("QUOTA_INSTRUCTIONS_CLAUDE_WORKTREE_DIR"))) || within(target, repo) {
 		t.Fatalf("target %q", target)
 	}
-	if read(t, filepath.Join(target, "AGENTS.local.md")) != "private body\n" || read(t, filepath.Join(target, "CLAUDE.local.md")) != "@AGENTS.local.md\n" || read(t, filepath.Join(target, "AGENTS.override.md")) != "# shared rules\n\nprivate body\n" {
+	if read(t, filepath.Join(target, "AGENTS.local.md")) != "private body\n" || read(t, filepath.Join(target, ".claude/AGENTS.md")) != "@../AGENTS.local.md\n" || read(t, filepath.Join(target, "AGENTS.override.md")) != "# shared rules\n\nprivate body\n" {
 		t.Fatal("worktree not prepared")
 	}
 	if code, _, stderr := hook(t, "claude", "WorktreeCreate", map[string]any{"cwd": repo, "name": "task-1"}); code == 0 {
@@ -836,7 +1103,7 @@ func TestWorktreeCreateAndRemoveHooks(t *testing.T) {
 	if code, _, stderr := hook(t, "claude", "WorktreeRemove", map[string]any{"worktree_path": target}); code == 0 || !exists(target) || !strings.Contains(stderr, "untracked files: notes.txt") {
 		t.Fatalf("untracked user file removed: %q", stderr)
 	}
-	if !exists(filepath.Join(target, "AGENTS.override.md")) || !exists(filepath.Join(target, "CLAUDE.local.md")) || !exists(filepath.Join(target, "AGENTS.local.md")) {
+	if !exists(filepath.Join(target, "AGENTS.override.md")) || !exists(filepath.Join(target, ".claude/AGENTS.md")) || !exists(filepath.Join(target, "AGENTS.local.md")) {
 		t.Fatal("generated files deleted before the refusal")
 	}
 	if err := os.Remove(filepath.Join(target, "notes.txt")); err != nil {
@@ -858,7 +1125,7 @@ func TestWorktreeCreateAndRemoveHooks(t *testing.T) {
 	if code, _, stderr := hook(t, "claude", "WorktreeRemove", map[string]any{"worktree_path": target}); code == 0 || !exists(target) || !strings.Contains(stderr, "permissions changed") {
 		t.Fatalf("generated file with changed permissions removed: %q", stderr)
 	}
-	if !exists(filepath.Join(target, "CLAUDE.local.md")) || !exists(filepath.Join(target, "AGENTS.local.md")) {
+	if !exists(filepath.Join(target, ".claude/AGENTS.md")) || !exists(filepath.Join(target, "AGENTS.local.md")) {
 		t.Fatal("other generated files deleted before the refusal")
 	}
 	if err := os.Chmod(filepath.Join(target, "AGENTS.override.md"), 0o600); err != nil {
@@ -881,7 +1148,7 @@ func TestWorktreeCreateAndRemoveHooks(t *testing.T) {
 
 func TestWorktreeCreateChecksStateBeforeCreating(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md", "AGENTS.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", "AGENTS.local.md")
 	repo := newRepo(t)
 	state := stateFileFor(t, repo)
 	if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
@@ -910,7 +1177,7 @@ func TestWorktreeCreateChecksStateBeforeCreating(t *testing.T) {
 
 func TestWorktreeRemoveAllowsEmptyIgnoredDirectoriesAfterOrphanRemoval(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md", "AGENTS.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", "AGENTS.local.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, ".gitignore"), "AGENTS.local.md\n/config/\n")
 	git(t, repo, "add", ".gitignore")
@@ -957,7 +1224,7 @@ func TestWorktreeRemoveAllowsEmptyIgnoredDirectoriesAfterOrphanRemoval(t *testin
 
 func TestWorktreeRemoveKeepsUnmergedBranch(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md", "AGENTS.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", "AGENTS.local.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 	code, stdout, stderr := hook(t, "claude", "WorktreeCreate", map[string]any{"cwd": repo, "name": "unmerged"})
@@ -980,7 +1247,7 @@ func TestWorktreeRemoveKeepsUnmergedBranch(t *testing.T) {
 
 func TestWorktreeRemoveIgnoresSharedSourceErrors(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md", "AGENTS.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", "AGENTS.local.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 	code, stdout, stderr := hook(t, "claude", "WorktreeCreate", map[string]any{"cwd": repo, "name": "broken-shared"})
@@ -1011,7 +1278,7 @@ func TestCheckRepositoryReportsPreparationAndIgnoreState(t *testing.T) {
 	if err != nil || len(status.Problems) != 2 {
 		t.Fatalf("status = %+v, err = %v", status, err)
 	}
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
 	if len(status.Problems) != 1 || !strings.Contains(status.Problems[0], "not prepared") {
 		t.Fatalf("status = %+v", status)
@@ -1039,7 +1306,7 @@ func TestCheckRepositoryReportsPreparationAndIgnoreState(t *testing.T) {
 func linkedWorktreeWithRegisteredFile(t *testing.T) (string, string) {
 	t.Helper()
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, ".gitignore"), "AGENTS.local.md\n/config/\n")
 	git(t, repo, "commit", "-q", "-am", "ignore config")
@@ -1200,125 +1467,52 @@ func TestDecodeStateRejectsNonObjectTopLevel(t *testing.T) {
 	}
 }
 
-func TestImportsSharedUsesMarkdownVisibleText(t *testing.T) {
-	tests := []struct {
-		name string
-		body string
-		want bool
-	}{
-		{name: "plain visible import", body: "See @AGENTS.md for shared rules.\n", want: true},
-		{name: "backup path is not import", body: "@AGENTS.md.backup\n", want: false},
-		{name: "fenced code", body: "```text\n@AGENTS.md\n```\n", want: false},
-		{name: "nested fence text", body: "````text\n```\n@AGENTS.md\n````\n", want: false},
-		{name: "blockquote fence", body: "> ~~~text\n> @AGENTS.md\n> ~~~\n", want: false},
-		{name: "list item fence", body: "- ~~~text\n  @AGENTS.md\n  ~~~\n", want: false},
-		{name: "list item blockquote fence", body: "- > ~~~\n  > @AGENTS.md\n  > ~~~\n", want: false},
-		{name: "inline code", body: "`See @AGENTS.md for shared rules`\n", want: false},
-		{name: "mixed width code span", body: "``before ``` inside ` @AGENTS.md end``\n", want: false},
-		{name: "indented code", body: "    @AGENTS.md\n", want: false},
-		{name: "blockquote indented code", body: ">     @AGENTS.md\n", want: false},
-		{name: "space tab indented code", body: " \t@AGENTS.md\n", want: false},
-		{name: "html comment", body: "<!--\n@AGENTS.md\n-->\n", want: false},
-		{name: "fence container ends before visible import", body: "> ~~~\n> sample\n\n@AGENTS.md\n", want: true},
-		{name: "invalid fence info exposes import", body: "```example `literal`\n@AGENTS.md\n", want: true},
-		{name: "unmatched code span marker is text", body: "A lone ` marker\n\n@AGENTS.md\n", want: true},
-		{name: "comment backtick does not hide later import", body: "<!-- ` -->\n@AGENTS.md\n", want: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := importsShared([]byte(tc.body)); got != tc.want {
-				t.Fatalf("importsShared() = %t, want %t", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestCheckRepositoryUsesEffectiveCodexBudgetAndBlocksMissingClaudeImport(t *testing.T) {
+func TestCheckRepositoryUsesEffectiveCodexBudgetAndChecksClaudeCompatibility(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	ctx := context.Background()
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 	prepare(t, repo)
-	if err := os.Remove(filepath.Join(repo, "CLAUDE.md")); err != nil {
-		t.Fatal(err)
-	}
 	status, err := CheckRepository(ctx, repo, "claude", CheckOptions{})
-	if err != nil || len(status.Problems) != 1 || len(status.Warnings) != 0 || !strings.Contains(status.Problems[0], "CLAUDE.md is missing") {
+	if err != nil || len(status.Problems) != 0 || len(status.Warnings) != 0 {
 		t.Fatalf("status = %+v, err = %v", status, err)
 	}
 	write(t, filepath.Join(repo, "CLAUDE.md"), "# notes only\n")
 	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
-	if len(status.Problems) != 1 || len(status.Warnings) != 0 || !strings.Contains(status.Problems[0], "does not import @AGENTS.md") {
+	if len(status.Problems) == 0 || len(status.Warnings) != 0 || !strings.Contains(strings.Join(status.Problems, "\n"), "do not import") {
 		t.Fatalf("status = %+v", status)
-	}
-	write(t, filepath.Join(repo, "CLAUDE.md"), "```text\n@AGENTS.md\n```\n")
-	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
-	if len(status.Problems) != 1 || !strings.Contains(status.Problems[0], "does not import @AGENTS.md") {
-		t.Fatalf("code block import was accepted: %+v", status)
-	}
-	write(t, filepath.Join(repo, "CLAUDE.md"), "````text\n```\n@AGENTS.md\n````\n")
-	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
-	if len(status.Problems) != 1 || !strings.Contains(status.Problems[0], "does not import @AGENTS.md") {
-		t.Fatalf("nested code block import was accepted: %+v", status)
-	}
-	write(t, filepath.Join(repo, "CLAUDE.md"), "> ~~~text\n> @AGENTS.md\n> ~~~\n")
-	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
-	if len(status.Problems) != 1 || !strings.Contains(status.Problems[0], "does not import @AGENTS.md") {
-		t.Fatalf("blockquote code block import was accepted: %+v", status)
-	}
-	write(t, filepath.Join(repo, "CLAUDE.md"), "~~~text\n> ~~~\n@AGENTS.md\n~~~\n")
-	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
-	if len(status.Problems) != 1 || !strings.Contains(status.Problems[0], "does not import @AGENTS.md") {
-		t.Fatalf("quoted line closed top-level code block: %+v", status)
-	}
-	write(t, filepath.Join(repo, "CLAUDE.md"), "- ~~~text\n  @AGENTS.md\n  ~~~\n")
-	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
-	if len(status.Problems) != 1 || !strings.Contains(status.Problems[0], "does not import @AGENTS.md") {
-		t.Fatalf("list code block import was accepted: %+v", status)
-	}
-	write(t, filepath.Join(repo, "CLAUDE.md"), "`See @AGENTS.md for shared rules`\n")
-	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
-	if len(status.Problems) != 1 || !strings.Contains(status.Problems[0], "does not import @AGENTS.md") {
-		t.Fatalf("inline code import was accepted: %+v", status)
-	}
-	write(t, filepath.Join(repo, "CLAUDE.md"), "`opening code span\n@AGENTS.md\nclosing code span`\n")
-	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
-	if len(status.Problems) != 1 || !strings.Contains(status.Problems[0], "does not import @AGENTS.md") {
-		t.Fatalf("multiline code span import was accepted: %+v", status)
-	}
-	write(t, filepath.Join(repo, "CLAUDE.md"), "    @AGENTS.md\n")
-	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
-	if len(status.Problems) != 1 || !strings.Contains(status.Problems[0], "does not import @AGENTS.md") {
-		t.Fatalf("indented code import was accepted: %+v", status)
-	}
-	write(t, filepath.Join(repo, "CLAUDE.md"), "<!--\n@AGENTS.md\n-->\n")
-	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
-	if len(status.Problems) != 1 || !strings.Contains(status.Problems[0], "does not import @AGENTS.md") {
-		t.Fatalf("comment import was accepted: %+v", status)
-	}
-	write(t, filepath.Join(repo, "CLAUDE.md"), "@AGENTS.md.backup\n")
-	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
-	if len(status.Problems) != 1 || !strings.Contains(status.Problems[0], "does not import @AGENTS.md") {
-		t.Fatalf("backup path import was accepted: %+v", status)
-	}
-	write(t, filepath.Join(repo, "CLAUDE.md"), "See @AGENTS.md for shared rules.\n")
-	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
-	if len(status.Problems) != 0 || len(status.Warnings) != 0 {
-		t.Fatalf("inline import was rejected: %+v", status)
-	}
-	if status, _ = CheckRepository(ctx, repo, "codex", CheckOptions{}); len(status.Problems) != 0 {
-		t.Fatalf("Codex status blocked by the Claude bridge: %+v", status)
 	}
 	write(t, filepath.Join(repo, "CLAUDE.md"), "@AGENTS.md\n")
+	prepare(t, repo)
 	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
 	if len(status.Problems) != 0 || len(status.Warnings) != 0 {
 		t.Fatalf("status = %+v", status)
 	}
-	write(t, filepath.Join(repo, ".claude", "settings.local.json"), `{"claudeMdExcludes":["**/CLAUDE.md"]}`)
+	excludedRoot, _ := json.Marshal(map[string]any{"claudeMdExcludes": []string{filepath.Join(repo, "CLAUDE.md")}})
+	write(t, filepath.Join(repo, ".claude", "settings.local.json"), string(excludedRoot))
 	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
-	if len(status.Problems) != 1 || !strings.Contains(status.Problems[0], "CLAUDE.md") || !strings.Contains(status.Problems[0], "will not load") {
-		t.Fatalf("shared bridge exclusion was not reported: %+v", status)
+	if len(status.Problems) == 0 || !strings.Contains(strings.Join(status.Problems, "\n"), "CLAUDE.md") || !strings.Contains(strings.Join(status.Problems, "\n"), "will not load") {
+		t.Fatalf("root CLAUDE.md exclusion was not reported: %+v", status)
+	}
+	if err := os.Remove(filepath.Join(repo, ".claude", "settings.local.json")); err != nil {
+		t.Fatal(err)
+	}
+	if status, _ = CheckRepository(ctx, repo, "codex", CheckOptions{}); len(status.Problems) != 0 {
+		t.Fatalf("Codex status blocked by the Claude file: %+v", status)
+	}
+	write(t, filepath.Join(repo, "CLAUDE.local.md"), "# old local rules\n")
+	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
+	if len(status.Problems) != 1 || !strings.Contains(status.Problems[0], "single local instruction source") {
+		t.Fatalf("CLAUDE.local.md was not reported: %+v", status)
+	}
+	if err := os.Remove(filepath.Join(repo, "CLAUDE.local.md")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(repo, ".claude", "settings.local.json"), `{"claudeMdExcludes":["**/.claude/CLAUDE.md"]}`)
+	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
+	if len(status.Problems) != 1 || !strings.Contains(status.Problems[0], ".claude/CLAUDE.md") || !strings.Contains(status.Problems[0], "will not load") {
+		t.Fatalf("local bridge exclusion was not reported: %+v", status)
 	}
 	if err := os.Remove(filepath.Join(repo, ".claude", "settings.local.json")); err != nil {
 		t.Fatal(err)
@@ -1342,9 +1536,58 @@ func TestCheckRepositoryUsesEffectiveCodexBudgetAndBlocksMissingClaudeImport(t *
 	}
 }
 
+func TestCheckRepositoryReportsClaudeFilesAboveCheckout(t *testing.T) {
+	home := testHome(t)
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
+	parent := filepath.Join(home, "projects")
+	repo := newRepoAt(t, filepath.Join(parent, "repo"))
+	ctx := context.Background()
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	prepare(t, repo)
+
+	write(t, filepath.Join(home, ".claude", "CLAUDE.md"), "# user memory\n")
+	status, err := CheckRepository(ctx, repo, "claude", CheckOptions{})
+	if err != nil || len(status.Problems) != 0 {
+		t.Fatalf("user Claude file should not block AGENTS.md: %+v, err = %v", status, err)
+	}
+
+	write(t, filepath.Join(parent, "CLAUDE.md"), "# parent rules\n")
+	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
+	if !strings.Contains(strings.Join(status.Problems, "\n"), filepath.Join(parent, "CLAUDE.md")+" do not import") {
+		t.Fatalf("parent Claude file did not block missing AGENTS import: %+v", status)
+	}
+	if status, _ = CheckRepository(ctx, repo, "codex", CheckOptions{}); len(status.Problems) != 0 {
+		t.Fatalf("Codex status blocked by the Claude parent file: %+v", status)
+	}
+
+	if err := os.Remove(filepath.Join(parent, "CLAUDE.md")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(parent, ".claude", "CLAUDE.md"), "# parent scoped rules\n")
+	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
+	if !strings.Contains(strings.Join(status.Problems, "\n"), filepath.Join(parent, ".claude", "CLAUDE.md")+" do not import") {
+		t.Fatalf("parent .claude Claude file did not block missing AGENTS import: %+v", status)
+	}
+}
+
+func TestCheckRepositoryAllowsExcludedDuplicateClaudeFile(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	write(t, filepath.Join(repo, "CLAUDE.md"), "@AGENTS.md\n")
+	write(t, filepath.Join(repo, ".claude", "CLAUDE.md"), "@../AGENTS.md\n@../AGENTS.local.md\n")
+	excludedRoot, _ := json.Marshal(map[string]any{"claudeMdExcludes": []string{filepath.Join(repo, "CLAUDE.md")}})
+	write(t, filepath.Join(repo, ".claude", "settings.local.json"), string(excludedRoot))
+	status, err := CheckRepository(context.Background(), repo, "claude", CheckOptions{})
+	if err != nil || len(status.Problems) != 0 || len(status.Warnings) != 0 {
+		t.Fatalf("excluded duplicate root CLAUDE.md blocked valid .claude/CLAUDE.md: %+v err=%v", status, err)
+	}
+}
+
 func TestCheckRepositoryChecksSharedAndOverrideCodexBudgets(t *testing.T) {
 	home := testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	ctx := context.Background()
 	small := int64(20)
 	trustRepo := func(repo string) {
@@ -1375,6 +1618,62 @@ func TestCheckRepositoryChecksSharedAndOverrideCodexBudgets(t *testing.T) {
 	}
 }
 
+func TestPrepareBlocksOversizedCodexOverride(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), strings.Repeat("x", int(codexInstructionMaxBytes)))
+
+	res := prepare(t, repo)
+	override := filepath.Join(repo, "AGENTS.override.md")
+	if exists(override) {
+		t.Fatal("oversized AGENTS.override.md was created")
+	}
+	if len(res.Skipped) != 1 || res.Skipped[0].Path != override || !strings.Contains(res.Skipped[0].Reason, "over quota 32767-byte Codex instruction limit") {
+		t.Fatalf("oversized override skip not reported: %+v", res.Skipped)
+	}
+	if !contains(res.Created, filepath.Join(repo, ".claude/AGENTS.md")) {
+		t.Fatalf("Claude local bridge should still be created: %+v", res.Created)
+	}
+}
+
+func TestCheckRepositoryReportsQuotaInstructionSizeLimit(t *testing.T) {
+	home := testHome(t)
+	ctx := context.Background()
+	trustRepo := func(repo string) {
+		t.Helper()
+		repoKey, _ := json.Marshal(repo)
+		write(t, filepath.Join(home, ".codex", "config.toml"), "[projects."+string(repoKey)+"]\ntrust_level = \"trusted\"\n")
+	}
+
+	repo := newRepo(t)
+	trustRepo(repo)
+	write(t, filepath.Join(repo, "AGENTS.md"), strings.Repeat("a", int(codexInstructionMaxBytes)))
+	status, err := CheckRepository(ctx, repo, "codex", CheckOptions{})
+	if err != nil || len(status.Problems) != 0 || len(status.Warnings) != 0 {
+		t.Fatalf("max-size shared status = %+v, err = %v", status, err)
+	}
+
+	write(t, filepath.Join(repo, "AGENTS.md"), strings.Repeat("a", int(codexInstructionMaxBytes+1)))
+	status, err = CheckRepository(ctx, repo, "codex", CheckOptions{})
+	if err != nil || !strings.Contains(strings.Join(status.Problems, "\n"), "AGENTS.md") || !strings.Contains(strings.Join(status.Problems, "\n"), "over quota 32767-byte Codex instruction limit") {
+		t.Fatalf("oversized shared status = %+v, err = %v", status, err)
+	}
+
+	withOverride := newRepo(t)
+	trustRepo(withOverride)
+	write(t, filepath.Join(withOverride, "AGENTS.md"), strings.Repeat("s", int(codexInstructionMaxBytes+1)))
+	write(t, filepath.Join(withOverride, "AGENTS.override.md"), strings.Repeat("o", int(codexInstructionMaxBytes+1)))
+	status, err = CheckRepository(ctx, withOverride, "codex", CheckOptions{})
+	allProblems, allWarnings := strings.Join(status.Problems, "\n"), strings.Join(status.Warnings, "\n")
+	if err != nil || !strings.Contains(allProblems, "AGENTS.override.md") || !strings.Contains(allProblems, "over quota 32767-byte Codex instruction limit") {
+		t.Fatalf("oversized override status = %+v, err = %v", status, err)
+	}
+	if !strings.Contains(allWarnings, "AGENTS.md") || !strings.Contains(allWarnings, "inactive while AGENTS.override.md exists") {
+		t.Fatalf("inactive shared warning missing: %+v", status)
+	}
+}
+
 func TestCheckRepositoryReportsSharedOnlyNativeProblems(t *testing.T) {
 	testHome(t)
 	repo := newRepo(t)
@@ -1394,7 +1693,7 @@ func TestCheckRepositoryReportsSharedOnlyNativeProblems(t *testing.T) {
 
 func TestCheckRepositoryReportsPreparedGeneratedFiles(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 	prepare(t, repo)
@@ -1403,14 +1702,14 @@ func TestCheckRepositoryReportsPreparedGeneratedFiles(t *testing.T) {
 	if err != nil || len(status.Problems) != 0 {
 		t.Fatalf("status = %+v, err = %v", status, err)
 	}
-	if !contains(status.Generated, filepath.Join(repo, "AGENTS.override.md")) || !contains(status.Generated, filepath.Join(repo, "CLAUDE.local.md")) {
+	if !contains(status.Generated, filepath.Join(repo, "AGENTS.override.md")) || !contains(status.Generated, filepath.Join(repo, ".claude/AGENTS.md")) {
 		t.Fatalf("generated files not reported: %+v", status.Generated)
 	}
 }
 
 func TestCodexSessionStartReportsDocumentBudgetProblem(t *testing.T) {
 	home := testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, "AGENTS.local.md"), strings.Repeat("private body\n", 3))
 	repoKey, _ := json.Marshal(repo)
@@ -1441,17 +1740,17 @@ func TestWorktreeCreateReturnsPathWhenFilesAreSkipped(t *testing.T) {
 		t.Fatalf("create: %d %q %q", code, stdout, stderr)
 	}
 	target := strings.TrimSpace(stdout)
-	if !exists(filepath.Join(target, "AGENTS.override.md")) || exists(filepath.Join(target, "CLAUDE.local.md")) {
+	if !exists(filepath.Join(target, "AGENTS.override.md")) || exists(filepath.Join(target, ".claude/AGENTS.md")) {
 		t.Fatalf("unexpected files in %s", target)
 	}
-	if !strings.Contains(stderr, "CLAUDE.local.md") || !strings.Contains(stderr, `"CLAUDE.local.md"`) || !strings.Contains(stderr, "not git-ignored") {
+	if !strings.Contains(stderr, ".claude/AGENTS.md") || !strings.Contains(stderr, `".claude/AGENTS.md"`) || !strings.Contains(stderr, "not git-ignored") {
 		t.Fatalf("skip reason not reported: %q", stderr)
 	}
 }
 
 func TestTrackedGeneratedFilesAreNeverRemoved(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 	prepare(t, repo)
@@ -1463,7 +1762,7 @@ func TestTrackedGeneratedFilesAreNeverRemoved(t *testing.T) {
 	if len(res.Skipped) != 1 || res.Skipped[0].Path != filepath.Join(repo, "AGENTS.override.md") || res.Skipped[0].Reason != "is tracked; it must stay local-only" {
 		t.Fatalf("result = %+v", res)
 	}
-	if !exists(filepath.Join(repo, "AGENTS.override.md")) || exists(filepath.Join(repo, "CLAUDE.local.md")) {
+	if !exists(filepath.Join(repo, "AGENTS.override.md")) || exists(filepath.Join(repo, ".claude/AGENTS.md")) {
 		t.Fatal("tracked generated file removed or untracked one kept")
 	}
 	status, _ := CheckRepository(context.Background(), repo, "codex", CheckOptions{})
@@ -1474,7 +1773,7 @@ func TestTrackedGeneratedFilesAreNeverRemoved(t *testing.T) {
 
 func TestSharedSourceErrorBlocksOverrideRemoval(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 	prepare(t, repo)
@@ -1591,7 +1890,7 @@ func TestOrphanCopyWithSymlinkParentIsReported(t *testing.T) {
 
 func TestLegacyLocalFilesAreCarriedOver(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, ".gitignore"), "AGENTS.local.md\n/config/\n")
 	git(t, repo, "commit", "-q", "-am", "ignore config")
@@ -1626,15 +1925,14 @@ func TestLegacyLocalFilesAreCarriedOver(t *testing.T) {
 
 func TestLegacySharedCopyIsPreservedAsActiveNativeRule(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.md", "AGENTS.local.md", "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.md", "AGENTS.local.md", "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := resolvePath(filepath.Join(t.TempDir(), "repo"))
 	if err := os.Mkdir(repo, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	git(t, repo, "init", "-q")
-	write(t, filepath.Join(repo, ".gitignore"), "AGENTS.md\nAGENTS.local.md\nAGENTS.override.md\nCLAUDE.local.md\n")
-	write(t, filepath.Join(repo, "CLAUDE.md"), "@AGENTS.md\n")
-	git(t, repo, "add", ".gitignore", "CLAUDE.md")
+	write(t, filepath.Join(repo, ".gitignore"), "AGENTS.md\nAGENTS.local.md\nAGENTS.override.md\n.claude/AGENTS.md\n")
+	git(t, repo, "add", ".gitignore")
 	git(t, repo, "commit", "-q", "-m", "init")
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 	linked := addWorktree(t, repo, "feature")
@@ -1652,22 +1950,49 @@ func TestLegacySharedCopyIsPreservedAsActiveNativeRule(t *testing.T) {
 	if err != nil || !contains(status.Generated, sharedCopy) {
 		t.Fatalf("legacy generated AGENTS.md not reported: %+v err=%v", status, err)
 	}
-	legacyBridge := filepath.Join(linked, "CLAUDE.md")
-	recordGeneratedForTest(t, linked, legacyBridge)
-	status, err = CheckRepository(context.Background(), linked, "claude", CheckOptions{})
-	if err != nil || !contains(status.Generated, legacyBridge) {
-		t.Fatalf("legacy generated CLAUDE.md not reported: %+v err=%v", status, err)
+}
+
+func TestLegacyClaudeBridgeIsRemovedWhenOwned(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	bridge := filepath.Join(repo, "CLAUDE.md")
+	write(t, bridge, "@AGENTS.md\n")
+	recordGeneratedForTest(t, repo, bridge)
+	res := prepare(t, repo)
+	if len(res.Removed) != 1 || res.Removed[0] != bridge || exists(bridge) {
+		t.Fatalf("legacy Claude bridge was not removed: %+v", res)
+	}
+}
+
+func TestTrackedLegacyClaudeBridgeUsesClaudeLocalBridge(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	bridge := filepath.Join(repo, "CLAUDE.md")
+	write(t, bridge, "@AGENTS.md\n")
+	recordGeneratedForTest(t, repo, bridge)
+	git(t, repo, "add", "-f", "CLAUDE.md")
+	git(t, repo, "commit", "-q", "-m", "track claude bridge")
+	res := prepare(t, repo)
+	if contains(res.Removed, bridge) || !exists(bridge) {
+		t.Fatalf("tracked legacy Claude bridge was removed: %+v", res)
+	}
+	if !exists(filepath.Join(repo, ".claude", "CLAUDE.md")) || exists(filepath.Join(repo, ".claude", "AGENTS.md")) {
+		t.Fatalf("wrong Claude local bridge selected: %+v", res)
 	}
 }
 
 func TestClaudeLinkedWorktreeDeliversOnLocalCopyChange(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 	linked := addWorktree(t, repo, "feature")
 	code, stdout, _ := hook(t, "claude", "SessionStart", map[string]any{"cwd": linked, "source": "startup"})
-	if code != 0 || additionalContext(t, stdout) != "private body" {
+	if code != 0 || additionalContext(t, stdout) != "private body" || read(t, filepath.Join(linked, "AGENTS.local.md")) != "private body\n" || read(t, filepath.Join(linked, ".claude", "AGENTS.md")) != "@../AGENTS.local.md\n" {
 		t.Fatalf("startup after copy creation: %d %q", code, stdout)
 	}
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body 2\n")
@@ -1677,7 +2002,7 @@ func TestClaudeLinkedWorktreeDeliversOnLocalCopyChange(t *testing.T) {
 	}
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body 3\n")
 	code, stdout, _ = hook(t, "claude", "SessionStart", map[string]any{"cwd": linked, "source": "startup"})
-	if code != 0 || additionalContext(t, stdout) != "private body 3" {
+	if code != 0 || additionalContext(t, stdout) != "private body 3" || read(t, filepath.Join(linked, "AGENTS.local.md")) != "private body 3\n" {
 		t.Fatalf("startup after copy refresh: %d %q", code, stdout)
 	}
 	code, stdout, _ = hook(t, "claude", "SessionStart", map[string]any{"cwd": linked, "source": "startup"})
@@ -1688,7 +2013,7 @@ func TestClaudeLinkedWorktreeDeliversOnLocalCopyChange(t *testing.T) {
 
 func TestSourceErrorBlocksStatusAndPrepareAlike(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
 	local := filepath.Join(repo, "AGENTS.local.md")
 	write(t, local, "private body\n")
@@ -1708,7 +2033,7 @@ func TestSourceErrorBlocksStatusAndPrepareAlike(t *testing.T) {
 	if err == nil || err.Error() != status.Problems[0] {
 		t.Fatalf("prepare error %v differs from status problem %q", err, status.Problems[0])
 	}
-	if !exists(filepath.Join(repo, "CLAUDE.local.md")) || !exists(filepath.Join(repo, "AGENTS.override.md")) {
+	if !exists(filepath.Join(repo, ".claude/AGENTS.md")) || !exists(filepath.Join(repo, "AGENTS.override.md")) {
 		t.Fatal("generated files removed despite the source error")
 	}
 }
@@ -1740,7 +2065,7 @@ func recordGeneratedForTest(t *testing.T, repo, path string) {
 
 func TestWorktreeRemoveGuardsLegacyBridgeRecord(t *testing.T) {
 	testHome(t)
-	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md", "AGENTS.local.md")
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", "AGENTS.local.md")
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 	code, stdout, stderr := hook(t, "claude", "WorktreeCreate", map[string]any{"cwd": repo, "name": "legacy"})
@@ -1749,15 +2074,14 @@ func TestWorktreeRemoveGuardsLegacyBridgeRecord(t *testing.T) {
 	}
 	target := strings.TrimSpace(stdout)
 	bridge := filepath.Join(target, "CLAUDE.md")
+	write(t, bridge, "@AGENTS.md\n")
+	git(t, target, "add", "CLAUDE.md")
+	git(t, target, "commit", "-q", "-m", "track legacy bridge")
 	git(t, target, "rm", "-q", "--cached", "CLAUDE.md")
 	git(t, target, "commit", "-q", "-m", "untrack bridge")
 	write(t, filepath.Join(target, ".gitignore"), "AGENTS.local.md\nCLAUDE.md\n")
 	git(t, target, "commit", "-q", "-am", "ignore bridge")
-	write(t, bridge, "@AGENTS.md\n")
 	recordGeneratedForTest(t, repo, bridge)
-	if res := prepare(t, target); len(res.Removed) != 0 || len(res.Skipped) != 0 || !exists(bridge) {
-		t.Fatalf("legacy bridge treated as orphan: %+v", res)
-	}
 	write(t, bridge, "@AGENTS.md\n# edited\n")
 	if code, _, stderr := hook(t, "claude", "WorktreeRemove", map[string]any{"worktree_path": target}); code == 0 || !exists(target) || !strings.Contains(stderr, "has user edits") {
 		t.Fatalf("edited legacy bridge removed: %d %q", code, stderr)

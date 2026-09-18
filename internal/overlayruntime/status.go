@@ -75,9 +75,8 @@ func CheckRepository(ctx context.Context, dir, agent string, options CheckOption
 			if notice := claudeNativeRefusal(); notice != "" {
 				problems = append(problems, notice)
 			}
+			problems = append(problems, claudeSettingsFindings(r)...)
 		}
-		problems = append(problems, claudeSettingsFindings(r)...)
-		problems = append(problems, claudeSharedBridgeFindings(r.Top)...)
 	}
 	if agent == "all" || agent == "codex" {
 		p, w := codexSettingsFindings(r, options.CodexProjectDocMaxBytes)
@@ -94,7 +93,7 @@ func generatedVisibleToAgent(rel, agent string) bool {
 	case "claude":
 		return rel != codexRule
 	case "codex":
-		return rel != localBridge && rel != "CLAUDE.md"
+		return rel != claudeAgentsRule && rel != claudeBridgeRule && rel != "CLAUDE.md" && rel != "CLAUDE.local.md"
 	default:
 		return true
 	}

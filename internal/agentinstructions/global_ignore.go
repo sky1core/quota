@@ -15,7 +15,9 @@ import (
 )
 
 // GlobalIgnoreLines are the generated file names every repository must ignore.
-var GlobalIgnoreLines = []string{"AGENTS.override.md", "CLAUDE.local.md"}
+var GlobalIgnoreLines = []string{"AGENTS.override.md", ".claude/AGENTS.md", ".claude/CLAUDE.md"}
+
+var legacyGlobalIgnoreLines = []string{"CLAUDE.local.md"}
 
 // GlobalIgnoreMarker heads the block of lines that quota manages; lines the
 // user wrote elsewhere in the file are never managed.
@@ -149,6 +151,11 @@ func isManagedIgnoreLine(line string) bool {
 			return true
 		}
 	}
+	for _, want := range legacyGlobalIgnoreLines {
+		if line == want {
+			return true
+		}
+	}
 	return false
 }
 
@@ -211,15 +218,22 @@ func PlanGlobalIgnore(path string, uninstall bool) (GlobalIgnorePlan, error) {
 				plan.Add = append(plan.Add, want)
 			}
 		}
-		if len(plan.Add) == 0 {
-			return plan, nil
-		}
 		var next []string
 		if start < 0 {
+			if len(plan.Add) == 0 {
+				return plan, nil
+			}
 			next = append(append([]string(nil), lines...), GlobalIgnoreMarker)
 			next = append(next, plan.Add...)
 		} else {
-			next = append(append([]string(nil), lines[:end]...), plan.Add...)
+			next = append([]string(nil), lines[:start+1]...)
+			for _, line := range lines[start+1 : end] {
+				next = append(next, line)
+			}
+			if len(plan.Add) == 0 && len(plan.Remove) == 0 {
+				return plan, nil
+			}
+			next = append(next, plan.Add...)
 			next = append(next, lines[end:]...)
 		}
 		plan.after = joinIgnoreLines(next)

@@ -28,13 +28,18 @@ type PrepareResult struct {
 	Primary      string `json:"primary"`
 	LocalPresent bool   `json:"localPresent"`
 	LocalBody    string `json:"-"`
+	SharedBody   string `json:"-"`
 	// OverrideBody is the merged AGENTS.override.md content when this call
 	// wrote it.
-	OverrideBody string        `json:"-"`
-	Created      []string      `json:"created,omitempty"`
-	Updated      []string      `json:"updated,omitempty"`
-	Removed      []string      `json:"removed,omitempty"`
-	Skipped      []PrepareSkip `json:"skipped,omitempty"`
+	OverrideBody       string        `json:"-"`
+	ClaudeSharedBefore []string      `json:"-"`
+	ClaudeLocalBefore  []string      `json:"-"`
+	ClaudeSharedAfter  []string      `json:"-"`
+	ClaudeLocalAfter   []string      `json:"-"`
+	Created            []string      `json:"created,omitempty"`
+	Updated            []string      `json:"updated,omitempty"`
+	Removed            []string      `json:"removed,omitempty"`
+	Skipped            []PrepareSkip `json:"skipped,omitempty"`
 }
 
 func (p PrepareResult) Changed(path string) bool {
@@ -56,6 +61,11 @@ type generatedFile struct {
 	OwnerExecutable bool
 	Bridge          bool
 	SourceErr       error
+}
+
+type claudeInstructionFile struct {
+	Path  string
+	Local bool
 }
 
 func mergedCodexInstructions(shared, local []byte) []byte {
@@ -84,25 +94,6 @@ func sharedRuleProblem(w string) string {
 	return ""
 }
 
-func claudeSharedBridgeFindings(worktree string) []string {
-	shared := filepath.Join(worktree, sharedRule)
-	if !exists(shared) {
-		return nil
-	}
-	bridge := filepath.Join(worktree, "CLAUDE.md")
-	data, err := readRegular(bridge)
-	if os.IsNotExist(err) {
-		return []string{bridge + " is missing; Claude does not load " + shared + " without an @AGENTS.md import"}
-	}
-	if err != nil {
-		return []string{err.Error()}
-	}
-	if !importsShared(data) {
-		return []string{bridge + " does not import @AGENTS.md; Claude does not load " + shared}
-	}
-	return nil
-}
-
 func bridgeSource(b []byte) ([]byte, bool) {
 	if !utf8.Valid(b) || bytes.IndexByte(b, 0) >= 0 {
 		return nil, false
@@ -126,20 +117,34 @@ func bridgeLines(b []byte) []string {
 	return lines
 }
 
-// bridgeImportsLocal accepts only a single-line CLAUDE.local.md import.
-func bridgeImportsLocal(b []byte) bool {
+func agentsBridgeImportsLocal(b []byte) bool {
 	lines := bridgeLines(b)
-	return len(lines) == 1 && (lines[0] == "@"+localRule || lines[0] == "@./"+localRule)
+	return len(lines) == 1 && lines[0] == "@../"+localRule
 }
 
-var sharedImportRe = regexp.MustCompile(`(^|[\s(\[{;:])@(\./)?` + regexp.QuoteMeta(sharedRule) + `($|[\s)\]};:,])`)
+func importRefs(rel string) []string {
+	rel = filepath.ToSlash(rel)
+	refs := []string{rel}
+	if rel != "" && !strings.HasPrefix(rel, ".") && !strings.HasPrefix(rel, "/") {
+		refs = append(refs, "./"+rel)
+	}
+	return refs
+}
 
-// importsShared reports whether any non-code part of CLAUDE.md imports AGENTS.md.
-func importsShared(b []byte) bool {
+func importRefPattern(rel string) *regexp.Regexp {
+	var quoted []string
+	for _, ref := range importRefs(rel) {
+		quoted = append(quoted, regexp.QuoteMeta(ref))
+	}
+	return regexp.MustCompile(`(^|[\s(\[{;:])@(` + strings.Join(quoted, "|") + `)($|[\s)\]};:,!?]|[.](?:$|\s))`)
+}
+
+func bridgeImportsPath(b []byte, rel string) bool {
 	source, ok := bridgeSource(b)
 	if !ok {
 		return false
 	}
+	re := importRefPattern(rel)
 	root := goldmark.DefaultParser().Parse(goldmarktext.NewReader(source))
 	found := false
 	_ = ast.Walk(root, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
@@ -153,13 +158,13 @@ func importsShared(b []byte) bool {
 		case ast.KindCodeBlock, ast.KindFencedCodeBlock, ast.KindCodeSpan, ast.KindHTMLBlock, ast.KindRawHTML:
 			return ast.WalkSkipChildren, nil
 		case ast.KindText:
-			if sharedImportRe.Match(n.(*ast.Text).Text(source)) {
+			if re.Match(n.(*ast.Text).Text(source)) {
 				found = true
 				return ast.WalkStop, nil
 			}
 		case ast.KindString:
 			s := n.(*ast.String)
-			if !s.IsCode() && !s.IsRaw() && sharedImportRe.Match(s.Text(source)) {
+			if !s.IsCode() && !s.IsRaw() && re.Match(s.Text(source)) {
 				found = true
 				return ast.WalkStop, nil
 			}
@@ -167,6 +172,138 @@ func importsShared(b []byte) bool {
 		return ast.WalkContinue, nil
 	})
 	return found
+}
+
+func claudeFileImports(path, target string) (bool, error) {
+	data, err := readRegular(path)
+	if err != nil {
+		return false, err
+	}
+	rel, err := filepath.Rel(filepath.Dir(path), target)
+	if err != nil {
+		return false, err
+	}
+	return bridgeImportsPath(data, rel), nil
+}
+
+func (r repoContext) claudeInstructionFiles(w string, state RepositoryState, ignoreOwnedGenerated bool) []claudeInstructionFile {
+	userClaudeMD := resolvePath(filepath.Join(nativeConfigHome("CLAUDE_CONFIG_DIR", ".claude"), "CLAUDE.md"))
+	var files []claudeInstructionFile
+	seen := map[string]bool{}
+	for dir := resolvePath(w); ; dir = filepath.Dir(dir) {
+		for _, rel := range []string{"CLAUDE.md", filepath.Join(".claude", "CLAUDE.md"), "CLAUDE.local.md"} {
+			path := filepath.Join(dir, rel)
+			resolved := resolvePath(path)
+			if seen[resolved] || resolved == userClaudeMD || !exists(path) {
+				continue
+			}
+			seen[resolved] = true
+			if ignoreOwnedGenerated && within(path, w) {
+				_, _, _, owned, problem := inspectGeneratedWithStat(path, state)
+				if owned && problem == nil {
+					checkoutRel, err := filepath.Rel(w, path)
+					if err == nil {
+						tracked, err := r.tracked(w, checkoutRel)
+						if err == nil && !tracked {
+							continue
+						}
+					}
+				}
+			}
+			files = append(files, claudeInstructionFile{Path: path, Local: filepath.Base(path) == "CLAUDE.local.md"})
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+	}
+	return files
+}
+
+func claudeFilesImportTarget(files []claudeInstructionFile, target string) (bool, error) {
+	for _, file := range files {
+		if file.Local {
+			continue
+		}
+		imports, err := claudeFileImports(file.Path, target)
+		if err != nil {
+			return false, err
+		}
+		if imports {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func claudeFilePaths(files []claudeInstructionFile) string {
+	var paths []string
+	for _, file := range files {
+		paths = append(paths, file.Path)
+	}
+	sort.Strings(paths)
+	return strings.Join(paths, ", ")
+}
+
+func (r repoContext) claudeBridgePlan(w string, state RepositoryState, local []byte) generatedFile {
+	rel, body := claudeAgentsRule, claudeAgentsRuleBody
+	if len(r.claudeInstructionFiles(w, state, true)) > 0 {
+		rel, body = claudeBridgeRule, claudeBridgeRuleBody
+	}
+	plan := generatedFile{Path: filepath.Join(w, rel), Rel: rel, Private: true, Bridge: true}
+	if local != nil {
+		plan.Data = []byte(body)
+	}
+	return plan
+}
+
+func (r repoContext) claudeNativeLoadPaths(w string, state RepositoryState) (sharedPaths, localPaths []string) {
+	shared := filepath.Join(w, sharedRule)
+	local := filepath.Join(w, localRule)
+	files := r.claudeInstructionFiles(w, state, false)
+	for _, file := range files {
+		if file.Local {
+			if exists(local) {
+				if imports, err := claudeFileImports(file.Path, local); err == nil && imports {
+					localPaths = append(localPaths, file.Path)
+				}
+			}
+			continue
+		}
+		if exists(shared) {
+			if imports, err := claudeFileImports(file.Path, shared); err == nil && imports {
+				sharedPaths = append(sharedPaths, file.Path)
+			}
+		}
+		if exists(local) {
+			if imports, err := claudeFileImports(file.Path, local); err == nil && imports {
+				localPaths = append(localPaths, file.Path)
+			}
+		}
+	}
+	if len(files) == 0 {
+		if exists(shared) {
+			sharedPaths = append(sharedPaths, shared)
+		}
+		agents := filepath.Join(w, claudeAgentsRule)
+		if exists(local) {
+			if imports, err := claudeFileImports(agents, local); err == nil && imports {
+				localPaths = append(localPaths, agents)
+			}
+		}
+	}
+	return uniqueStrings(sharedPaths...), uniqueStrings(localPaths...)
+}
+
+func bridgeImportsRequiredLocal(plan generatedFile, current []byte) bool {
+	switch plan.Rel {
+	case claudeAgentsRule:
+		return agentsBridgeImportsLocal(current)
+	case claudeBridgeRule:
+		return bridgeImportsPath(current, "../"+localRule)
+	default:
+		return false
+	}
 }
 
 // readLocalSource returns the primary AGENTS.local.md bytes and decoded text, or
@@ -215,20 +352,19 @@ func readSharedSource(w string) ([]byte, error) {
 // when the local source is absent, which marks the file for removal.
 func (r repoContext) planGenerated(w string, state RepositoryState, local []byte) []generatedFile {
 	var plans []generatedFile
-	bridge := generatedFile{Path: filepath.Join(w, localBridge), Rel: localBridge, Bridge: true}
+	claudeLocal := r.claudeBridgePlan(w, state, local)
 	override := generatedFile{Path: filepath.Join(w, codexRule), Rel: codexRule, Private: true}
 	sharedData, sharedErr := readSharedSource(w)
 	if sharedErr != nil {
 		override.SourceErr = sharedErr
 	}
 	if local != nil {
-		bridge.Data = []byte(localBridgeBody)
 		override.Data = mergedCodexInstructions(sharedData, local)
-		if len(override.Data) > maxRuleBytes {
-			override.SourceErr = fmt.Errorf("merged instructions exceed %d-byte file size limit", maxRuleBytes)
+		if int64(len(override.Data)) > codexInstructionMaxBytes {
+			override.SourceErr = fmt.Errorf("merged %s is %d bytes, over quota %d-byte Codex instruction limit", codexRule, len(override.Data), codexInstructionMaxBytes)
 		}
 	}
-	plans = append(plans, bridge, override)
+	plans = append(plans, claudeLocal, override)
 	if w == r.Root {
 		return plans
 	}
@@ -370,13 +506,13 @@ func (r repoContext) evaluateGeneratedWithOptions(w string, plan generatedFile, 
 			a.forget = state.Generated[plan.Path] != ""
 		case owned:
 			a.Action = actionRemove
-		case plan.Rel == codexRule:
+		case plan.Rel == codexRule || plan.Rel == claudeAgentsRule || (plan.Rel == claudeBridgeRule && state.Generated[plan.Path] != ""):
 			return skip("exists and is not quota-generated; preserved")
 		}
 		return a
 	}
 	if current != nil && !owned {
-		if plan.Bridge && bridgeImportsLocal(current) {
+		if plan.Bridge && bridgeImportsRequiredLocal(plan, current) {
 			return a
 		}
 		return skip("exists and is not quota-generated; preserved")
@@ -403,8 +539,10 @@ func (r repoContext) evaluateGeneratedWithOptions(w string, plan generatedFile, 
 
 // orphanPlans lists recorded generated files of checkout w that the current
 // plan no longer produces, so they can be removed under the ownership rules.
-// Shared AGENTS.md copies and CLAUDE.md bridges of earlier versions are left
-// to the user because they may be the checkout's active native instruction path.
+// Shared AGENTS.md copies of earlier versions are left to the user because
+// they may be the checkout's active native instruction path. Generated
+// CLAUDE.md and CLAUDE.local.md bridges are removed under the normal ownership
+// checks so they do not block Claude's AGENTS.md loader.
 func orphanPlans(w string, state RepositoryState, plans []generatedFile) []generatedFile {
 	planned := map[string]bool{}
 	for _, plan := range plans {
@@ -416,7 +554,7 @@ func orphanPlans(w string, state RepositoryState, plans []generatedFile) []gener
 			continue
 		}
 		rel, err := filepath.Rel(w, path)
-		if err != nil || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." || rel == "CLAUDE.md" || rel == sharedRule {
+		if err != nil || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." || rel == sharedRule {
 			continue
 		}
 		orphans = append(orphans, generatedFile{Path: path, Rel: rel})
@@ -535,9 +673,14 @@ func (r repoContext) prepareCheckoutFiles(w string, state *RepositoryState, res 
 		return err
 	}
 	res.LocalPresent, res.LocalBody = local != nil, text
+	if shared, err := readSharedSource(w); err == nil && shared != nil {
+		res.SharedBody, _ = decodeRule(shared, filepath.Join(w, sharedRule))
+	}
+	res.ClaudeSharedBefore, res.ClaudeLocalBefore = r.claudeNativeLoadPaths(w, *state)
 	for _, a := range actions {
 		r.applyAction(w, a, state, res)
 	}
+	res.ClaudeSharedAfter, res.ClaudeLocalAfter = r.claudeNativeLoadPaths(w, *state)
 	return nil
 }
 

@@ -310,17 +310,17 @@ func TestGlobalIgnoreManagesOnlyItsMarkedBlock(t *testing.T) {
 	}
 	installWrite(t, path, "# user rules\n*.log\nCLAUDE.local.md\nCLAUDE.local.md.bak")
 	plan := applyGlobalIgnore(t, path, false)
-	if !plan.Changed || strings.Join(plan.Add, ",") != "AGENTS.override.md" {
+	if !plan.Changed || strings.Join(plan.Add, ",") != strings.Join(GlobalIgnoreLines, ",") {
 		t.Fatalf("plan = %+v", plan)
 	}
-	want := "# user rules\n*.log\nCLAUDE.local.md\nCLAUDE.local.md.bak\n" + GlobalIgnoreMarker + "\nAGENTS.override.md\n"
+	want := "# user rules\n*.log\nCLAUDE.local.md\nCLAUDE.local.md.bak\n" + GlobalIgnoreMarker + "\n" + strings.Join(GlobalIgnoreLines, "\n") + "\n"
 	if got, _ := os.ReadFile(path); string(got) != want {
 		t.Fatalf("ignore file = %q", got)
 	}
 	if plan = applyGlobalIgnore(t, path, false); plan.Changed {
 		t.Fatalf("second apply changed the file: %+v", plan)
 	}
-	if plan = applyGlobalIgnore(t, path, true); !plan.Changed || strings.Join(plan.Remove, ",") != "AGENTS.override.md" {
+	if plan = applyGlobalIgnore(t, path, true); !plan.Changed || strings.Join(plan.Remove, ",") != strings.Join(GlobalIgnoreLines, ",") {
 		t.Fatalf("removal plan = %+v", plan)
 	}
 	if got, _ := os.ReadFile(path); string(got) != "# user rules\n*.log\nCLAUDE.local.md\nCLAUDE.local.md.bak\n" {
@@ -336,14 +336,14 @@ func TestGlobalIgnoreExtendsExistingBlockAndKeepsUserLinesAfterIt(t *testing.T) 
 	path := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "git", "ignore")
 	installWrite(t, path, GlobalIgnoreMarker+"\nCLAUDE.local.md\n*.tmp\n")
 	plan := applyGlobalIgnore(t, path, false)
-	if strings.Join(plan.Add, ",") != "AGENTS.override.md" {
+	if strings.Join(plan.Add, ",") != strings.Join(GlobalIgnoreLines, ",") || len(plan.Remove) != 0 {
 		t.Fatalf("plan = %+v", plan)
 	}
-	if got, _ := os.ReadFile(path); string(got) != GlobalIgnoreMarker+"\nCLAUDE.local.md\nAGENTS.override.md\n*.tmp\n" {
+	if got, _ := os.ReadFile(path); string(got) != GlobalIgnoreMarker+"\nCLAUDE.local.md\n"+strings.Join(GlobalIgnoreLines, "\n")+"\n*.tmp\n" {
 		t.Fatalf("ignore file = %q", got)
 	}
 	plan = applyGlobalIgnore(t, path, true)
-	if strings.Join(plan.Remove, ",") != "CLAUDE.local.md,AGENTS.override.md" {
+	if strings.Join(plan.Remove, ",") != "CLAUDE.local.md,"+strings.Join(GlobalIgnoreLines, ",") {
 		t.Fatalf("removal plan = %+v", plan)
 	}
 	if got, _ := os.ReadFile(path); string(got) != "*.tmp\n" {
@@ -380,7 +380,7 @@ func TestGlobalIgnorePathHonorsExcludesFile(t *testing.T) {
 		t.Fatalf("plan = %+v", plan)
 	}
 	got, _ := os.ReadFile(custom)
-	if string(got) != GlobalIgnoreMarker+"\nAGENTS.override.md\nCLAUDE.local.md\n" {
+	if string(got) != GlobalIgnoreMarker+"\n"+strings.Join(GlobalIgnoreLines, "\n")+"\n" {
 		t.Fatalf("new ignore file = %q", got)
 	}
 }

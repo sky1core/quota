@@ -17,10 +17,13 @@ import (
 
 const sharedRule = "AGENTS.md"
 const localRule = "AGENTS.local.md"
-const localBridge = "CLAUDE.local.md"
+const claudeAgentsRule = ".claude/AGENTS.md"
+const claudeBridgeRule = ".claude/CLAUDE.md"
 const codexRule = "AGENTS.override.md"
-const localBridgeBody = "@" + localRule + "\n"
+const claudeAgentsRuleBody = "@../" + localRule + "\n"
+const claudeBridgeRuleBody = "@../" + localRule + "\n"
 const maxRuleBytes = 8 << 20
+const codexInstructionMaxBytes int64 = 32767
 const cliName = "quota-cli agent instructions"
 
 var ErrOutsideRepository = errors.New("not inside a Git worktree")
@@ -345,7 +348,7 @@ func safeDirectory(p string) error {
 }
 func claudeNativeRefusal() string {
 	if os.Getenv("CLAUDE_CODE_DISABLE_CLAUDE_MDS") == "1" {
-		return "Rules not delivered: CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 disables the native CLAUDE.md channel"
+		return "Rules not delivered: CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 disables the native instruction file channel"
 	}
 	return ""
 }

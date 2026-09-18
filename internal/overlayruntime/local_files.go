@@ -33,7 +33,7 @@ func validateLocalFiles(paths []string) error {
 			}
 		}
 		key := localPathComparisonKey(path)
-		for _, reserved := range []string{sharedRule, localRule, codexRule, "CLAUDE.md", localBridge} {
+		for _, reserved := range []string{sharedRule, localRule, codexRule, claudeAgentsRule, claudeBridgeRule, "CLAUDE.md", "CLAUDE.local.md"} {
 			reservedKey := localPathComparisonKey(reserved)
 			if key == reservedKey || strings.HasPrefix(key, reservedKey+"/") {
 				return fmt.Errorf("local file path %q is reserved", path)

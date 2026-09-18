@@ -262,7 +262,7 @@ Codex `hooks.json`의 SessionStart에 고정된 준비 명령(`_prepare`)을 설
 이전 버전이 설치한 지침 hook은 교체·제거한다.
 Codex가 있으면 설치한 quota hook의 현재 native hook hash만 `config.toml`의 trust state에 동기화하고,
 무관한 hook·설정·신뢰 상태는 보존한다. 전역 git ignore 파일(`core.excludesFile`, 없으면 `~/.config/git/ignore`)에
-`AGENTS.override.md`와 `CLAUDE.local.md` 두 줄이 없으면 `# quota-cli agent instructions (managed)` 표식 아래에 추가한다.
+`AGENTS.override.md`, `.claude/AGENTS.md`, `.claude/CLAUDE.md`가 없으면 `# quota-cli agent instructions (managed)` 표식 아래에 추가한다.
 이미 있는 줄은 그대로 두고 관리 대상으로 삼지 않는다. `--no-global-ignore`를 주면 추가하지 않는다.
 `--agent=claude|codex`로 한 도구만 설정할 수 있고, `--dry-run`은 같은 사전 검사와 변경 계획만 출력한다.
 저장소별 준비 명령은 없다.
@@ -272,7 +272,8 @@ Codex가 있으면 설치한 quota hook의 현재 native hook hash만 `config.to
 공용 지침은 각 checkout의 `AGENTS.md`, 개인 지침은 primary(bare 저장소는 bare 루트)의 `AGENTS.local.md`에 작성한다.
 개인 파일은 Git에서 제외한다. 세션이 시작되면 준비 hook이 그 checkout에 대해 다음을 수행한다.
 
-- `CLAUDE.local.md`가 없으면 `@AGENTS.local.md` 한 줄로 만든다. 이미 있는 파일은 건드리지 않는다.
+- checkout 또는 상위 디렉터리에 `CLAUDE.md`/`.claude/CLAUDE.md`/`CLAUDE.local.md`가 없으면 `.claude/AGENTS.md`를 `@../AGENTS.local.md` 한 줄로 만든다. 이미 있는 파일은 건드리지 않는다.
+- checkout 또는 상위 디렉터리에 `CLAUDE.md`/`.claude/CLAUDE.md`가 있으면 해당 파일이 checkout의 `AGENTS.md`를 직접 import해야 호환으로 본다. 이때 개인 지침은 quota가 만든 `.claude/CLAUDE.md`의 `@../AGENTS.local.md`로 전달한다. `CLAUDE.local.md`가 있으면 `AGENTS.local.md`와 경쟁하는 로컬 지침으로 보고한다. 사용자 전역 `~/.claude/CLAUDE.md`는 이 판단에서 제외한다.
 - `AGENTS.override.md`를 checkout의 `AGENTS.md`(있으면)와 primary `AGENTS.local.md`의 병합본으로 만들거나 갱신한다. Codex는 이 파일이 있으면 이것을, 없으면 `AGENTS.md`를 읽는다.
 - linked worktree에는 primary `AGENTS.local.md`와 등록한 로컬 파일의 복사본을 갱신한다.
 - `AGENTS.local.md`가 없으면 quota가 만든 변경 없는 생성물과 복사본을 제거한다.
@@ -287,8 +288,8 @@ quota는 저장소의 `.git/` 아래에 아무것도 쓰지 않는다. 생성물
 **첫 세션 1회 전달**
 
 새 세션(startup)에서 준비 hook이 그 호출에서 native 로딩이 이미 끝난 파일을 바꿨을 때만, 그 세션에 한해
-additionalContext로 한 번 전달한다. Claude는 `CLAUDE.local.md`가 생성됐거나 linked worktree의 `AGENTS.local.md`
-복사본이 생성·갱신됐을 때 개인 본문을 전달한다. Codex는 `AGENTS.override.md`가 생성됐을 때 개인 본문을,
+additionalContext로 한 번 전달한다. Claude는 `.claude/AGENTS.md`, `.claude/CLAUDE.md`, 또는 linked worktree의
+`AGENTS.local.md` 복사본을 그 startup에서 생성·갱신했을 때 native가 아직 읽지 못한 본문만 전달한다. 이전 로컬 bridge 제거처럼 개인 본문을 이미 native가 읽은 migration에서는 개인 본문을 다시 보내지 않는다. Codex는 `AGENTS.override.md`가 생성됐을 때 개인 본문을,
 갱신됐을 때는 병합본 전체를, 로컬 지침 제거로 삭제됐을 때는 현재 `AGENTS.md` 본문을 전달한다.
 같은 checkout에서 준비 파일이 없던 첫 startup을 동시에 여러 개 시작하는 경우는 보장하지 않으며, 다음 새 세션부터 native 파일 상태를 따른다.
 resume·compact·clear, 변경 없음, 생성 실패에는 전달하지 않는다. 그 이후는 native 로딩만 사용하며
@@ -314,8 +315,10 @@ quota-cli agent instructions status . --agent=all
 
 `status`는 모델 호출 없이 준비 hook과 같은 평가를 쓰기 없이 수행해, 다음 준비가 생성·갱신·제거·건너뜀으로 판단할
 파일과 그 이유를 보고하고 계정 연결·유효 native 설정을 검사한다. 이미 남아 있고 소유권이 유지된 생성물은 `generated:`로 표시한다.
-`AGENTS.md`가 있는데 `CLAUDE.md`가 `@AGENTS.md`를
-import하지 않으면 Claude를 차단됨으로 보고한다. 준비되지 않았거나 확인할 수 없으면 성공으로 처리하지 않는다.
+`CLAUDE.md`나 `.claude/CLAUDE.md`가 checkout 또는 상위 디렉터리에 있으면 checkout `AGENTS.md` 직접 import가 있는 경우만 Claude 호환으로 본다.
+`CLAUDE.local.md`가 경로에 있으면 `AGENTS.local.md`와 경쟁하는 로컬 지침이므로 Claude를 차단됨으로 보고한다.
+Claude 설정이 AGENTS 로딩을 끄고 CLAUDE 경로가 checkout `AGENTS.md`를 가져오지 못하면 차단됨으로 보고한다.
+준비되지 않았거나 확인할 수 없으면 성공으로 처리하지 않는다.
 Codex는 유효 `project_doc_max_bytes` 기준으로 현재 읽히는 `AGENTS.override.md` 또는 `AGENTS.md`를 문제로 보고하고,
 `AGENTS.override.md`가 있을 때 한도를 넘은 비활성 `AGENTS.md`는 경고로 보고한다.
 

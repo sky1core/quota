@@ -123,6 +123,44 @@ func ReadClaudeSettings(path string) (map[string]any, error) {
 	return layer.data, nil
 }
 
+func claudeInstructionFilesOption(data map[string]any) (string, bool) {
+	plugins, ok := data["pluginConfigs"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	plugin, ok := plugins["agents-md@builtin"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	options, ok := plugin["options"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	value, ok := options["instructionFiles"].(string)
+	return value, ok
+}
+
+func claudeEffectiveExclusionPatterns(r repoContext) []string {
+	var problems []string
+	var patterns []string
+	for _, session := range claudeSessionSettings(r) {
+		for _, path := range session.Paths {
+			layer := readJSONSettingsLayer(path, &problems)
+			entries, ok := layer.data["claudeMdExcludes"].([]any)
+			if !ok {
+				continue
+			}
+			for _, entry := range entries {
+				pattern, ok := entry.(string)
+				if ok && pattern != "" {
+					patterns = append(patterns, strings.ReplaceAll(pattern, "\\", "/"))
+				}
+			}
+		}
+	}
+	return patterns
+}
+
 func claudeExclusionPattern(pattern string) string {
 	var out strings.Builder
 	out.WriteByte('^')
@@ -157,13 +195,13 @@ func claudeExclusionPattern(pattern string) string {
 	return out.String()
 }
 
-func claudeExclusionFindings(patterns []string, bridge string) []string {
+func claudeExclusionFindings(patterns []string, instructionFile string) []string {
 	var problems []string
-	candidates := []string{filepath.ToSlash(bridge), filepath.ToSlash(resolvePath(bridge))}
+	candidates := []string{filepath.ToSlash(instructionFile), filepath.ToSlash(resolvePath(instructionFile))}
 	for _, pattern := range patterns {
 		matched := pattern == candidates[0] || pattern == candidates[1]
 		if !matched && strings.ContainsAny(pattern, "{}[]()!") {
-			problems = append(problems, fmt.Sprintf("claudeMdExcludes pattern %q cannot evaluate whether %s still loads", pattern, bridge))
+			problems = append(problems, fmt.Sprintf("claudeMdExcludes pattern %q cannot evaluate whether %s still loads", pattern, instructionFile))
 			continue
 		}
 		expression, err := regexp.Compile(claudeExclusionPattern(pattern))
@@ -172,26 +210,67 @@ func claudeExclusionFindings(patterns []string, bridge string) []string {
 			continue
 		}
 		if matched || expression.MatchString(candidates[0]) || expression.MatchString(candidates[1]) {
-			problems = append(problems, fmt.Sprintf("claudeMdExcludes matches %s; Claude will not load that bridge", bridge))
+			problems = append(problems, fmt.Sprintf("claudeMdExcludes matches %s; Claude will not load that instruction file", instructionFile))
 		}
 	}
 	return problems
 }
 
+func claudeInstructionFileFindings(r repoContext) []string {
+	if !exists(filepath.Join(r.Top, sharedRule)) && !exists(r.localSource()) {
+		return nil
+	}
+	var problems []string
+	files := r.claudeInstructionFiles(r.Top, RepositoryState{}, false)
+	var projectClaude []claudeInstructionFile
+	for _, file := range files {
+		if file.Local {
+			problems = append(problems, file.Path+" is a local Claude instruction file; remove it so AGENTS.local.md is the single local instruction source")
+			continue
+		}
+		projectClaude = append(projectClaude, file)
+	}
+	if len(projectClaude) == 0 {
+		return uniqueStrings(problems...)
+	}
+	shared := filepath.Join(r.Top, sharedRule)
+	if exists(shared) {
+		imported, err := claudeFilesImportTarget(projectClaude, shared)
+		if err != nil {
+			problems = append(problems, err.Error())
+		} else if !imported {
+			problems = append(problems, claudeFilePaths(projectClaude)+" do not import "+shared+"; Claude's default AGENTS fallback will not load it")
+		}
+	}
+	local := filepath.Join(r.Top, localRule)
+	bridge := filepath.Join(r.Top, claudeBridgeRule)
+	if exists(r.localSource()) && exists(bridge) {
+		imported, err := claudeFileImports(bridge, local)
+		if err != nil {
+			problems = append(problems, err.Error())
+		} else if !imported {
+			problems = append(problems, bridge+" does not import "+local+"; Claude will not load "+localRule)
+		}
+	}
+	return uniqueStrings(problems...)
+}
+
 // claudeSettingsFindings reports Claude settings that block hook execution or
-// exclude native bridge files from loading.
+// exclude native instruction files from loading.
 func claudeSettingsFindings(r repoContext) []string {
 	var problems []string
 	executable, err := os.Executable()
 	if err != nil {
 		return []string{err.Error()}
 	}
+	problems = append(problems, claudeInstructionFileFindings(r)...)
 	for _, session := range claudeSessionSettings(r) {
 		var layers []settingsLayer
 		for _, path := range session.Paths {
 			layers = append(layers, readJSONSettingsLayer(path, &problems))
 		}
 		var disabled sourcedSetting
+		var instructionFiles sourcedSetting
 		var patterns []string
 		for index, layer := range layers {
 			hooks, err := agenthooks.ClaudeInstructionHooks(layer.data, executable)
@@ -207,6 +286,11 @@ func claudeSettingsFindings(r repoContext) []string {
 					problems = append(problems, layer.path+": disableAllHooks must be a boolean")
 				}
 				disabled = sourcedSetting{value, layer.path}
+			}
+			if index == 0 {
+				if value, ok := claudeInstructionFilesOption(layer.data); ok {
+					instructionFiles = sourcedSetting{value, layer.path}
+				}
 			}
 			if value, ok := layer.data["claudeMdExcludes"]; ok {
 				entries, valid := value.([]any)
@@ -227,11 +311,45 @@ func claudeSettingsFindings(r repoContext) []string {
 		if disabled.value == true {
 			problems = append(problems, disabled.path+": disableAllHooks is true; Claude instruction hooks are disabled")
 		}
-		sharedBridge := filepath.Join(session.Worktree, "CLAUDE.md")
-		if exists(sharedBridge) || exists(filepath.Join(session.Worktree, sharedRule)) {
-			problems = append(problems, claudeExclusionFindings(patterns, sharedBridge)...)
+		projectClaude := r.claudeInstructionFiles(session.Worktree, RepositoryState{}, false)
+		var loadedProjectClaude []claudeInstructionFile
+		var excludedProjectClaude []string
+		for _, file := range projectClaude {
+			if file.Local {
+				continue
+			}
+			exclusions := claudeExclusionFindings(patterns, file.Path)
+			if len(exclusions) == 0 {
+				loadedProjectClaude = append(loadedProjectClaude, file)
+			} else {
+				excludedProjectClaude = append(excludedProjectClaude, file.Path)
+			}
 		}
-		local := filepath.Join(session.Worktree, localBridge)
+		shared := filepath.Join(session.Worktree, sharedRule)
+		localSourcePresent := exists(r.localSource())
+		if instructionFiles.value == "claude-md" && len(projectClaude) == 0 && (exists(shared) || localSourcePresent) {
+			problems = append(problems, instructionFiles.path+": pluginConfigs.agents-md@builtin.options.instructionFiles=claude-md disables AGENTS.md native loading and no Claude project instruction file imports "+sharedRule+" or "+localRule)
+		}
+		if exists(shared) {
+			problems = append(problems, claudeExclusionFindings(patterns, shared)...)
+			if len(projectClaude) != 0 {
+				imported := false
+				imported, err = claudeFilesImportTarget(loadedProjectClaude, shared)
+				if err != nil {
+					problems = append(problems, err.Error())
+				} else if !imported {
+					detail := claudeFilePaths(loadedProjectClaude) + " do not import " + shared
+					if len(excludedProjectClaude) != 0 {
+						detail = strings.Join(excludedProjectClaude, ", ") + " excluded by claudeMdExcludes; " + detail
+					}
+					problems = append(problems, detail+"; Claude's default AGENTS fallback will not load it")
+				}
+			}
+		}
+		local := filepath.Join(session.Worktree, claudeAgentsRule)
+		if len(projectClaude) > 0 {
+			local = filepath.Join(session.Worktree, claudeBridgeRule)
+		}
 		if exists(local) || exists(r.localSource()) {
 			problems = append(problems, claudeExclusionFindings(patterns, local)...)
 		}
@@ -375,16 +493,24 @@ func appendCodexDocumentBudgetFinding(problems, warnings []string, document stri
 		problems = append(problems, err.Error())
 		return problems, warnings
 	}
-	if int64(len(body)) <= maxBytes {
-		return problems, warnings
-	}
-	message := fmt.Sprintf("%s is %d bytes, over Codex project_doc_max_bytes %d from %s", document, len(body), maxBytes, maxPath)
-	if active {
-		problems = append(problems, message)
-	} else {
-		warnings = append(warnings, message+"; inactive while "+codexRule+" exists")
+	size := int64(len(body))
+	limit, source := codexInstructionLimit(maxBytes, maxPath)
+	if size > limit {
+		message := fmt.Sprintf("%s is %d bytes, over %s", document, len(body), source)
+		if active {
+			problems = append(problems, message)
+		} else {
+			warnings = append(warnings, message+"; inactive while "+codexRule+" exists")
+		}
 	}
 	return problems, warnings
+}
+
+func codexInstructionLimit(maxBytes int64, maxPath string) (int64, string) {
+	if maxBytes < codexInstructionMaxBytes {
+		return maxBytes, fmt.Sprintf("Codex project_doc_max_bytes %d from %s", maxBytes, maxPath)
+	}
+	return codexInstructionMaxBytes, fmt.Sprintf("quota %d-byte Codex instruction limit", codexInstructionMaxBytes)
 }
 
 func codexInstructionHookFindings(data map[string]any, path string) []string {

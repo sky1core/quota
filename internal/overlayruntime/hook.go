@@ -76,31 +76,12 @@ func RunPrepareHookWithOptions(ctx context.Context, agent, event string, stdin i
 	return 0
 }
 
-func preparedPathReady(result PrepareResult, path string) bool {
-	for _, skipped := range result.Skipped {
-		if skipped.Path == path {
-			return false
-		}
-	}
-	return exists(path)
-}
-
 // firstSessionBody returns what a new session must still receive after this
-// call successfully prepared the native files that future sessions will read.
-func firstSessionBody(agent string, result PrepareResult) string {
+// call prepared native files too late for that session's first native scan.
+func firstSessionBody(agent string, result PrepareResult, claudeExcludePatterns []string) string {
 	switch agent {
 	case "claude":
-		bridge := filepath.Join(result.Checkout, localBridge)
-		localCopy := filepath.Join(result.Checkout, localRule)
-		if !preparedPathReady(result, bridge) {
-			return ""
-		}
-		if result.Checkout != result.Primary && !preparedPathReady(result, localCopy) {
-			return ""
-		}
-		if contains(result.Created, bridge) || result.Checkout != result.Primary && result.Changed(localCopy) {
-			return result.LocalBody
-		}
+		return claudeFirstSessionBody(result, claudeExcludePatterns)
 	case "codex":
 		override := filepath.Join(result.Checkout, codexRule)
 		if contains(result.Created, override) {
@@ -123,6 +104,42 @@ func firstSessionBody(agent string, result PrepareResult) string {
 	return ""
 }
 
+func claudeFirstSessionBody(result PrepareResult, excludePatterns []string) string {
+	beforeShared := claudePathLoaded(result.ClaudeSharedBefore, excludePatterns)
+	beforeLocal := claudePathLoaded(result.ClaudeLocalBefore, excludePatterns)
+	afterShared := claudePathLoaded(result.ClaudeSharedAfter, excludePatterns)
+	afterLocal := claudePathLoaded(result.ClaudeLocalAfter, excludePatterns)
+	if containsSkippedPath(result.Skipped, filepath.Join(result.Checkout, localRule)) {
+		afterLocal = false
+	}
+	var parts []string
+	if afterShared && !beforeShared && result.SharedBody != "" {
+		parts = append(parts, result.SharedBody)
+	}
+	if afterLocal && result.LocalBody != "" && (!beforeLocal || result.Changed(filepath.Join(result.Checkout, localRule))) {
+		parts = append(parts, result.LocalBody)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func claudePathLoaded(paths []string, excludePatterns []string) bool {
+	for _, path := range paths {
+		if len(claudeExclusionFindings(excludePatterns, path)) == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSkippedPath(skips []PrepareSkip, path string) bool {
+	for _, skip := range skips {
+		if skip.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
 func sessionStart(ctx context.Context, agent, event string, stdin io.Reader, stdout io.Writer, options PrepareHookOptions) error {
 	h, e := parseHook(stdin)
 	if e != nil {
@@ -143,6 +160,7 @@ func sessionStart(ctx context.Context, agent, event string, stdin io.Reader, std
 	var parts []string
 	var notices []string
 	nativeBlocked := false
+	var claudeExcludePatterns []string
 	if agent == "claude" && (result.LocalPresent || exists(filepath.Join(result.Checkout, sharedRule))) {
 		if notice := claudeNativeRefusal(); notice != "" {
 			notices = append(notices, notice)
@@ -159,7 +177,7 @@ func sessionStart(ctx context.Context, agent, event string, stdin io.Reader, std
 			problems := claudeSettingsFindings(r)
 			notices = append(notices, problems...)
 			nativeBlocked = nativeBlocked || len(problems) > 0
-			notices = append(notices, claudeSharedBridgeFindings(r.Top)...)
+			claudeExcludePatterns = claudeEffectiveExclusionPatterns(r)
 		case "codex":
 			problems, _ := codexSettingsFindings(r, options.CodexProjectDocMaxBytes)
 			problems = append(problems, options.CodexNativeIssues...)
@@ -168,7 +186,7 @@ func sessionStart(ctx context.Context, agent, event string, stdin io.Reader, std
 		}
 	}
 	if source == "startup" && !nativeBlocked {
-		if body := firstSessionBody(agent, result); body != "" {
+		if body := firstSessionBody(agent, result, claudeExcludePatterns); body != "" {
 			parts = append(parts, body)
 		}
 	}

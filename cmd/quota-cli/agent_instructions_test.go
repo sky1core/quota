@@ -108,7 +108,7 @@ func TestInstructionsSetupAndUninstallAccountOnly(t *testing.T) {
 	if _, err := exec.LookPath("codex"); err == nil {
 		wantChanges = 4
 	}
-	if !report.DryRun || report.Plan == nil || len(report.Plan.Changes) != wantChanges || report.GlobalIgnore == nil || report.GlobalIgnore.Path != ignore || len(report.GlobalIgnore.Add) != 2 || report.Applied != nil {
+	if !report.DryRun || report.Plan == nil || len(report.Plan.Changes) != wantChanges || report.GlobalIgnore == nil || report.GlobalIgnore.Path != ignore || len(report.GlobalIgnore.Add) != len(agentinstructions.GlobalIgnoreLines) || report.Applied != nil {
 		t.Fatalf("dry-run report = %s", out)
 	}
 	for _, path := range []string{filepath.Join(home, ".claude", "settings.json"), filepath.Join(home, ".codex", "hooks.json"), ignore} {
@@ -128,7 +128,8 @@ func TestInstructionsSetupAndUninstallAccountOnly(t *testing.T) {
 	if err != nil || !strings.Contains(string(hooks), "'--agent=codex' '--event=SessionStart'") || strings.Contains(string(hooks), "SubagentStart") {
 		t.Fatalf("Codex hooks = %s (%v)", hooks, err)
 	}
-	if got, _ := os.ReadFile(ignore); string(got) != agentinstructions.GlobalIgnoreMarker+"\nAGENTS.override.md\nCLAUDE.local.md\n" {
+	wantIgnore := agentinstructions.GlobalIgnoreMarker + "\n" + strings.Join(agentinstructions.GlobalIgnoreLines, "\n") + "\n"
+	if got, _ := os.ReadFile(ignore); string(got) != wantIgnore {
 		t.Fatalf("global ignore = %q", got)
 	}
 	settingsInfo, _ := os.Stat(filepath.Join(home, ".claude", "settings.json"))
@@ -163,7 +164,7 @@ func TestInstructionsSetupAndUninstallAccountOnly(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("uninstall claude: %d %s %s", code, out, stderr)
 	}
-	if got, _ := os.ReadFile(ignore); string(got) != agentinstructions.GlobalIgnoreMarker+"\nAGENTS.override.md\nCLAUDE.local.md\n" {
+	if got, _ := os.ReadFile(ignore); string(got) != wantIgnore {
 		t.Fatalf("single-agent uninstall changed global ignore: %q", got)
 	}
 	code, out, stderr = runInstructions(t, "", "uninstall", "--json")
@@ -182,7 +183,7 @@ func TestInstructionsSetupAndUninstallAccountOnly(t *testing.T) {
 	if report.GlobalIgnore != nil {
 		t.Fatalf("default uninstall touched the global ignore plan: %s", out)
 	}
-	if got, _ := os.ReadFile(ignore); string(got) != agentinstructions.GlobalIgnoreMarker+"\nAGENTS.override.md\nCLAUDE.local.md\n" {
+	if got, _ := os.ReadFile(ignore); string(got) != wantIgnore {
 		t.Fatalf("default uninstall changed global ignore: %q", got)
 	}
 	code, out, _ = runInstructions(t, "", "uninstall", "--remove-global-ignore", "--json")
@@ -275,15 +276,18 @@ func TestInstructionsLocalFileCommands(t *testing.T) {
 	}
 }
 
-func TestInstructionsPrepareEntryDeliversOnStartup(t *testing.T) {
+func TestInstructionsPrepareEntryPreparesClaudeAndDeliversCodexOnStartup(t *testing.T) {
 	home := instructionsHome(t)
-	instructionsWrite(t, filepath.Join(home, ".config", "git", "ignore"), "AGENTS.override.md\nCLAUDE.local.md\n")
+	instructionsWrite(t, filepath.Join(home, ".config", "git", "ignore"), "AGENTS.override.md\n.claude/AGENTS.md\n")
 	repo := instructionsRepo(t)
 	instructionsWrite(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
 	input := `{"cwd":` + string(mustJSON(repo)) + `,"source":"startup","session_id":"x"}`
 	code, out, stderr := runInstructions(t, input, "_prepare", "--agent=claude", "--event=SessionStart")
-	if code != 0 || stderr != "" || !strings.Contains(out, `"additionalContext":"private body"`) {
+	if code != 0 || stderr != "" || !strings.Contains(out, "private body") {
 		t.Fatalf("startup: %d %q %q", code, out, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".claude", "AGENTS.md")); err != nil {
+		t.Fatalf("Claude local bridge was not prepared: %v", err)
 	}
 	code, out, stderr = runInstructions(t, input, "_prepare", "--agent=claude", "--event=SessionStart")
 	if code != 0 || out != "" || stderr != "" {
@@ -297,7 +301,7 @@ func TestInstructionsPrepareEntryDeliversOnStartup(t *testing.T) {
 	if len(report.Agents) != 1 || report.Agents[0].Repository == nil || len(report.Agents[0].Repository.Problems) != 0 || report.Agents[0].State != "blocked" {
 		t.Fatalf("status without account hooks = %s", out)
 	}
-	if !strings.Contains(strings.Join(report.Agents[0].Repository.Generated, "\n"), "CLAUDE.local.md") {
+	if !strings.Contains(strings.Join(report.Agents[0].Repository.Generated, "\n"), ".claude/AGENTS.md") {
 		t.Fatalf("status did not report remaining generated files = %s", out)
 	}
 	if code == 0 {

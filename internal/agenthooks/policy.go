@@ -68,6 +68,7 @@ type TestCase struct {
 	Command string `json:"command"`
 	Want    string `json:"want"`
 	RuleID  string `json:"ruleId,omitempty"`
+	Source  string `json:"source,omitempty"`
 }
 
 type LoadResult struct {
@@ -206,6 +207,11 @@ func ValidatePolicy(policy Policy) error {
 		case DecisionAllow, DecisionDeny:
 		default:
 			return fmt.Errorf("test %s has invalid want %q", test.Name, test.Want)
+		}
+		switch decisionSource(test.Source) {
+		case "", decisionSourceAllow, decisionSourceRule, decisionSourceLiteralRule, decisionSourceUndecidable:
+		default:
+			return fmt.Errorf("test %s has invalid source %q", test.Name, test.Source)
 		}
 	}
 	return nil

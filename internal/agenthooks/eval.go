@@ -15,6 +15,7 @@ type Decision struct {
 	PolicyID string   `json:"policyId,omitempty"`
 	Reason   string   `json:"reason,omitempty"`
 	Command  []string `json:"command,omitempty"`
+	source   decisionSource
 }
 
 type TestResult struct {
@@ -25,9 +26,19 @@ type TestResult struct {
 	Want     string `json:"want"`
 	Got      string `json:"got"`
 	RuleID   string `json:"ruleId,omitempty"`
+	Source   string `json:"source,omitempty"`
 	Passed   bool   `json:"passed"`
 	Error    string `json:"error,omitempty"`
 }
+
+type decisionSource string
+
+const (
+	decisionSourceAllow       decisionSource = "allow"
+	decisionSourceRule        decisionSource = "rule"
+	decisionSourceLiteralRule decisionSource = "literal-rule"
+	decisionSourceUndecidable decisionSource = "undecidable"
+)
 
 var intArgRe = regexp.MustCompile(`^[0-9]+$`)
 
@@ -38,6 +49,7 @@ func EvaluateCommand(policies []Policy, command string) (Decision, error) {
 			Decision: DecisionDeny,
 			Allowed:  false,
 			Reason:   "shell command could not be parsed by policy evaluator: " + err.Error(),
+			source:   decisionSourceUndecidable,
 		}, nil
 	}
 	decision := evaluateInvocations(policies, invocations)
@@ -76,6 +88,7 @@ func literalDenyDecision(policies []Policy, command string, invocations []Invoca
 					PolicyID: policy.ID,
 					Reason:   reason,
 					Command:  seq,
+					source:   decisionSourceLiteralRule,
 				}, true
 			}
 		}
@@ -249,7 +262,7 @@ func literalExactSuffixBoundary() string {
 }
 
 func evaluateInvocations(policies []Policy, invocations []Invocation) Decision {
-	final := Decision{Decision: DecisionAllow, Allowed: true}
+	final := Decision{Decision: DecisionAllow, Allowed: true, source: decisionSourceAllow}
 	for _, inv := range invocations {
 		decision := evaluateInvocation(policies, inv)
 		if !decision.Allowed {
@@ -264,7 +277,7 @@ func evaluateInvocations(policies []Policy, invocations []Invocation) Decision {
 
 func evaluateInvocation(policies []Policy, inv Invocation) Decision {
 	if inv.command.undecidable != "" {
-		return Decision{Decision: DecisionDeny, Allowed: false, Reason: inv.command.undecidable, Command: visibleArgv(inv.Argv, inv.Dynamic)}
+		return Decision{Decision: DecisionDeny, Allowed: false, Reason: inv.command.undecidable, Command: visibleArgv(inv.Argv, inv.Dynamic), source: decisionSourceUndecidable}
 	}
 	if inv.DynamicCommand {
 		reason := inv.DynamicReason
@@ -276,6 +289,7 @@ func evaluateInvocation(policies []Policy, inv Invocation) Decision {
 			Allowed:  false,
 			Reason:   reason,
 			Command:  visibleArgv(inv.Argv, inv.Dynamic),
+			source:   decisionSourceUndecidable,
 		}
 	}
 	if inv.Dynamic && protectedInvocation(inv) {
@@ -284,6 +298,7 @@ func evaluateInvocation(policies []Policy, inv Invocation) Decision {
 			Allowed:  false,
 			Reason:   "dynamic arguments for protected command are blocked",
 			Command:  visibleArgv(inv.Argv, inv.Dynamic),
+			source:   decisionSourceUndecidable,
 		}
 	}
 
@@ -305,6 +320,7 @@ func evaluateInvocation(policies []Policy, inv Invocation) Decision {
 				PolicyID: policy.ID,
 				Reason:   rule.Message,
 				Command:  visibleArgv(inv.Argv, inv.Dynamic),
+				source:   decisionSourceRule,
 			}
 			if decision.Reason == "" {
 				decision.Reason = fmt.Sprintf("matched policy %s rule %s", policy.ID, rule.ID)
@@ -313,7 +329,7 @@ func evaluateInvocation(policies []Policy, inv Invocation) Decision {
 		}
 	}
 
-	return Decision{Decision: DecisionAllow, Allowed: true}
+	return Decision{Decision: DecisionAllow, Allowed: true, source: decisionSourceAllow}
 }
 
 func EvaluateHookEvent(policies []Policy, input []byte) (Decision, error) {
@@ -374,7 +390,8 @@ func RunPolicyTests(policies []Policy) []TestResult {
 			}
 			result.Got = decision.Decision
 			result.RuleID = decision.RuleID
-			result.Passed = result.Got == test.Want && (test.RuleID == "" || test.RuleID == decision.RuleID)
+			result.Source = string(decision.source)
+			result.Passed = result.Got == test.Want && (test.RuleID == "" || test.RuleID == decision.RuleID) && (test.Source == "" || test.Source == result.Source)
 			results = append(results, result)
 		}
 	}

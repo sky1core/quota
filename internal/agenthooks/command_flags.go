@@ -17,6 +17,7 @@ const (
 	optionLastArgDefault
 	optionBooleanValue
 	optionBooleanForce
+	optionToggle
 )
 
 type optionGroup struct {
@@ -282,7 +283,7 @@ func parseCommandFlags(command string, args []string, options map[string]optionV
 			if err != nil {
 				return nil, fmt.Errorf("%s: %w", command, err)
 			}
-			if attached && (value == optionNoValue || value == optionRequiredSeparateValue) {
+			if attached && (value == optionNoValue || value == optionRequiredSeparateValue || value == optionToggle) {
 				return nil, fmt.Errorf("%s option %s does not accept a value", command, name)
 			}
 			disabled := false
@@ -292,15 +293,6 @@ func parseCommandFlags(command string, args []string, options map[string]optionV
 					return nil, fmt.Errorf("%s option %s requires a boolean value", command, name)
 				}
 				disabled = !enabled && value == optionBooleanForce
-			}
-			if command == "git commit" && (name == "--amend" || name == "--no-amend") {
-				active := flags[:0]
-				for _, flag := range flags {
-					if flag.name != "--amend" && flag.name != "--no-amend" {
-						active = append(active, flag)
-					}
-				}
-				flags = active
 			}
 			flags = appendCommandFlag(flags, commandFlag{name: name, token: arg, disabled: disabled}, value)
 			if !attached && (value == optionRequiredValue || value == optionRequiredSeparateValue || value == optionRequiredNonEmptyValue || value == optionLastArgDefault && i+1 < len(args)) {
@@ -385,27 +377,36 @@ func resolveLongOption(name string, options map[string]optionValue, abbreviate b
 func appendCommandFlag(flags []commandFlag, flag commandFlag, value optionValue) []commandFlag {
 	if value == optionBooleanForce {
 		for i := range flags {
-			if sameBooleanForceFlag(flags[i].name, flag.name) {
+			if sameOverridingFlag(flags[i].name, flag.name) {
 				flags[i].disabled = flag.disabled
+			}
+		}
+	}
+	if value == optionToggle {
+		for i := range flags {
+			if sameOverridingFlag(flags[i].name, flag.name) {
+				flags[i].disabled = true
 			}
 		}
 	}
 	return append(flags, flag)
 }
 
-func sameBooleanForceFlag(a, b string) bool {
+func sameOverridingFlag(a, b string) bool {
 	if a == b {
 		return true
 	}
-	return booleanForceFlagAlias(a) != "" && booleanForceFlagAlias(a) == booleanForceFlagAlias(b)
+	return overridingFlagAlias(a) != "" && overridingFlagAlias(a) == overridingFlagAlias(b)
 }
 
-func booleanForceFlagAlias(name string) string {
+func overridingFlagAlias(name string) string {
 	switch name {
 	case "-f", "--force":
 		return "force"
 	case "-d", "--delete-branch":
 		return "delete-branch"
+	case "--amend", "--no-amend":
+		return "amend"
 	default:
 		return ""
 	}

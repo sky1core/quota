@@ -258,6 +258,8 @@ func TestCustomPolicyLiteralFlags(t *testing.T) {
 		{"--enable-secret-scanning-push-protection", `gh repo edit example/repository --enable-secret-scanning-push-protection=false`, true},
 		{"--amend", `git commit --ame --no-amend -m message`, false},
 		{"--amend", `git commit --no-amend --ame -m message`, true},
+		{"--no-amend", `git commit --amend --no-amend -m message`, true},
+		{"--no-amend", `git commit --no-amend --amend -m message`, false},
 	} {
 		t.Run(tt.flag+"/"+tt.command, func(t *testing.T) {
 			match := Match{HasFlag: []string{tt.flag}}

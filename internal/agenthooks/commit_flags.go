@@ -30,7 +30,8 @@ var commitOptions = map[string]optionValue{
 	"--interactive": optionNoValue, "--dry-run": optionNoValue,
 	"--short": optionNoValue, "--branch": optionNoValue, "--ahead-behind": optionNoValue,
 	"--porcelain": optionNoValue, "--long": optionNoValue,
-	"--amend": optionNoValue, "--no-post-rewrite": optionNoValue, "--post-rewrite": optionNoValue,
+	"--amend": optionToggle, "--no-amend": optionToggle,
+	"--no-post-rewrite": optionNoValue, "--post-rewrite": optionNoValue,
 	"--pathspec-file-nul": optionNoValue, "--allow-empty": optionNoValue, "--allow-empty-message": optionNoValue,
 }
 
@@ -39,8 +40,8 @@ func commitOptionsWithNegations() map[string]optionValue {
 	for name, value := range commitOptions {
 		options[name] = value
 	}
-	for name := range commitOptions {
-		if strings.HasPrefix(name, "--") && name != "--trailer" {
+	for name, value := range commitOptions {
+		if strings.HasPrefix(name, "--") && name != "--trailer" && value != optionToggle {
 			negative := "--no-" + strings.TrimPrefix(name, "--")
 			if _, exists := options[negative]; !exists {
 				options[negative] = optionNoValue

@@ -67,10 +67,12 @@ func parseShellInvocations(command string, depth int, inheritedShellStartup stri
 			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok {
 				if shellStartupDeclCanExecuteHiddenScript(decl) {
 					invocations = append(invocations, undecidableInvocation([]string{decl.Variant.Value}, shellStartupEnvReason))
+				} else {
+					invocations = append(invocations, Invocation{source: nodeSource(command, stmt)})
 				}
 				return true
 			}
-			if stmt.Cmd == nil {
+			if stmt.Cmd == nil || sourceOnlyStatementCommand(stmt.Cmd) {
 				invocations = append(invocations, Invocation{source: nodeSource(command, stmt)})
 			}
 			return true
@@ -181,6 +183,15 @@ func parseShellInvocations(command string, depth int, inheritedShellStartup stri
 		return true
 	})
 	return invocations, nil
+}
+
+func sourceOnlyStatementCommand(cmd syntax.Command) bool {
+	switch cmd.(type) {
+	case *syntax.ArithmCmd, *syntax.CaseClause, *syntax.ForClause, *syntax.TestClause, *syntax.LetClause:
+		return true
+	default:
+		return false
+	}
 }
 
 func nodeSource(source string, node syntax.Node) string {

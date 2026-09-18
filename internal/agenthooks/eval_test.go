@@ -17,7 +17,7 @@ func TestGitHubHistoryGuardPresetTestsPass(t *testing.T) {
 	results := RunPolicyTests([]Policy{policy})
 	for _, result := range results {
 		if !result.Passed {
-			t.Fatalf("%s: got decision=%s rule=%s want decision=%s rule=%s error=%s", result.Name, result.Got, result.RuleID, result.Want, findPresetTestRule(policy, result.Name), result.Error)
+			t.Fatalf("%s: got decision=%s rule=%s source=%s want decision=%s rule=%s source=%s error=%s", result.Name, result.Got, result.RuleID, result.Source, result.Want, findPresetTestRule(policy, result.Name), findPresetTestSource(policy, result.Name), result.Error)
 		}
 	}
 }
@@ -89,6 +89,37 @@ func TestRunPolicyTestsSkipsDisabledPolicies(t *testing.T) {
 	policy.Enabled = false
 	if results := RunPolicyTests([]Policy{policy}); len(results) != 0 {
 		t.Fatalf("results = %+v, want none", results)
+	}
+}
+
+func TestRunPolicyTestsChecksDecisionSource(t *testing.T) {
+	policy := Policy{
+		Version: PolicyVersion,
+		ID:      "source-check",
+		Enabled: true,
+		Rules: []Rule{{
+			ID:     "deny-push",
+			Effect: EffectDeny,
+			Match:  Match{Argv: exactArgs("git", "push")},
+		}},
+		Tests: []TestCase{
+			{Name: "direct rule", Command: `git push origin main`, Want: DecisionDeny, RuleID: "deny-push", Source: string(decisionSourceRule)},
+			{Name: "literal rule", Command: `echo 'git push origin main'`, Want: DecisionDeny, RuleID: "deny-push", Source: string(decisionSourceLiteralRule)},
+			{Name: "undecidable", Command: `$cmd push origin main`, Want: DecisionDeny, Source: string(decisionSourceUndecidable)},
+			{Name: "wrong source", Command: `git push origin main`, Want: DecisionDeny, RuleID: "deny-push", Source: string(decisionSourceUndecidable)},
+		},
+	}
+	results := RunPolicyTests([]Policy{policy})
+	if len(results) != 4 {
+		t.Fatalf("results = %d, want 4", len(results))
+	}
+	for _, i := range []int{0, 1, 2} {
+		if !results[i].Passed {
+			t.Fatalf("%s: result = %+v, want pass", results[i].Name, results[i])
+		}
+	}
+	if results[3].Passed {
+		t.Fatalf("%s: result = %+v, want source mismatch failure", results[3].Name, results[3])
 	}
 }
 
@@ -438,6 +469,11 @@ func TestLiteralProtectedCommandDeny(t *testing.T) {
 		`git status; foo git push origin main`,
 		`gh pr view 12; echo 'git push origin main'`,
 		`bash -n -c 'git push'`,
+		`export NOTE='git push'; echo ok`,
+		`declare NOTE='git push'; echo ok`,
+		`[[ 'git push' == x ]]; echo ok`,
+		`case x in ('git push') echo ok;; esac; echo ok`,
+		`for x in 'git push'; do :; done`,
 	} {
 		decision, err := EvaluateCommand([]Policy{policy}, command)
 		if err != nil || decision.Allowed || decision.RuleID != "deny-git-push" {
@@ -659,6 +695,15 @@ func findPresetTestRule(policy Policy, name string) string {
 	for _, test := range policy.Tests {
 		if test.Name == name {
 			return test.RuleID
+		}
+	}
+	return ""
+}
+
+func findPresetTestSource(policy Policy, name string) string {
+	for _, test := range policy.Tests {
+		if test.Name == name {
+			return test.Source
 		}
 	}
 	return ""

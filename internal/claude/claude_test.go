@@ -2,7 +2,10 @@ package claude
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -39,6 +42,45 @@ func TestGetQuotaForConfigDirUsesSharedCache(t *testing.T) {
 	session, ok := windowByKey(result, "session")
 	if !ok || session["left"] != 88 {
 		t.Fatalf("cached session = %v, want left 88", session)
+	}
+}
+
+func TestGetQuotaForConfigDirReturnsWhenCacheLockBusy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	binDir := t.TempDir()
+	claudePath := filepath.Join(binDir, "claude")
+	script := "#!/bin/sh\nprintf '%s\\n' '{\"result\":\"Current session: 10% used\\n\",\"is_error\":false}'\n"
+	if err := os.WriteFile(claudePath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	lockPath := filepath.Join(home, ".config", "quota", "quota-cache.json.lock")
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	start := time.Now()
+	result, err := GetQuotaForConfigDir(5*time.Second, t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("quota probe waited on cache lock for %s", elapsed)
+	}
+	session, ok := windowByKey(result, "session")
+	if !ok || session["left"] != 90 {
+		t.Fatalf("session = %v, want left 90", session)
 	}
 }
 

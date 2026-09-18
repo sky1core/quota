@@ -210,7 +210,7 @@ func GetQuotaForHome(timeout time.Duration, codexHome string, maxAge time.Durati
 		return nil, err
 	}
 	// Cache the raw rate-limits response only until its first data-change boundary.
-	quotacache.Put(key, string(resRaw), cacheValidUntil(rr))
+	quotacache.PutWithContext(ctx, key, string(resRaw), cacheValidUntil(rr))
 	return out, nil
 }
 

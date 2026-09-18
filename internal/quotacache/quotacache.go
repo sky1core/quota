@@ -10,6 +10,7 @@
 package quotacache
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -24,6 +25,8 @@ type entry struct {
 	ValidUntil time.Time `json:"validUntil,omitempty"`
 	Raw        string    `json:"raw"`
 }
+
+const contextLockMaxWait = 100 * time.Millisecond
 
 func path() string {
 	home, _ := os.UserHomeDir()
@@ -59,11 +62,27 @@ func Get(key string, maxAge time.Duration) (string, bool) {
 // optimization, never a source of truth, so a lost write just means the next
 // reader probes live.
 func Put(key, raw string, validUntil time.Time) {
+	putWithLock(key, raw, validUntil, lock)
+}
+
+// PutWithContext is Put with lock acquisition bounded by ctx and a cache budget.
+func PutWithContext(ctx context.Context, key, raw string, validUntil time.Time) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lockCtx, cancel := context.WithTimeout(ctx, contextLockMaxWait)
+	defer cancel()
+	putWithLock(key, raw, validUntil, func(lockPath string) (func(), error) {
+		return lockContext(lockCtx, lockPath)
+	})
+}
+
+func putWithLock(key, raw string, validUntil time.Time, takeLock func(string) (func(), error)) {
 	p := path()
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return
 	}
-	unlock, err := lock(p + ".lock")
+	unlock, err := takeLock(p + ".lock")
 	if err != nil {
 		return
 	}
@@ -113,8 +132,46 @@ func lock(lockPath string) (func(), error) {
 		_ = f.Close()
 		return nil, err
 	}
+	return unlockFile(f), nil
+}
+
+func lockContext(ctx context.Context, lockPath string) (func(), error) {
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return unlockFile(f), nil
+		}
+		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+			_ = f.Close()
+			return nil, err
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			_ = f.Close()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func unlockFile(f *os.File) func() {
 	return func() {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
-	}, nil
+	}
 }

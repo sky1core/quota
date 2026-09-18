@@ -2,7 +2,10 @@ package codex
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -29,6 +32,52 @@ func TestGetQuotaForHomeUsesSharedCache(t *testing.T) {
 	windows := windowsOf(t, result)
 	if len(windows) != 1 || windows[0]["left"] != 88 {
 		t.Fatalf("cached windows = %v, want one window with left 88", windows)
+	}
+}
+
+func TestGetQuotaForHomeReturnsWhenCacheLockBusy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	binDir := t.TempDir()
+	codexPath := filepath.Join(binDir, "codex")
+	script := `#!/bin/sh
+while IFS= read -r line; do
+	case "$line" in
+		*'"id":1'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}' ;;
+		*'"id":2'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300}}}}'; exit 0 ;;
+	esac
+done
+`
+	if err := os.WriteFile(codexPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	lockPath := filepath.Join(home, ".config", "quota", "quota-cache.json.lock")
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	start := time.Now()
+	result, err := GetQuotaForHome(5*time.Second, t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("quota probe waited on cache lock for %s", elapsed)
+	}
+	windows := windowsOf(t, result)
+	if len(windows) != 1 || windows[0]["left"] != 90 {
+		t.Fatalf("windows = %v, want one window with left 90", windows)
 	}
 }
 

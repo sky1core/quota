@@ -96,7 +96,7 @@ func GetQuotaForConfigDir(timeout time.Duration, configDir string, maxAge time.D
 	}
 	// Cache the raw report (parseable, so a success) for other consumers, bounded
 	// by the soonest window reset so it is never served past that instant.
-	quotacache.Put(key, text, earliestReset(result))
+	quotacache.PutWithContext(ctx, key, text, earliestReset(result))
 	return result, nil
 }
 

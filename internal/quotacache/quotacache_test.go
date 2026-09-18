@@ -1,10 +1,12 @@
 package quotacache
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -109,11 +111,6 @@ func TestPutOverwritesSameKey(t *testing.T) {
 	}
 }
 
-// TestConcurrentPutsKeepAll is the reason the write path holds a lock: without
-// serializing the read-modify-write, two Puts that read the same file and each
-// add their key would clobber each other on save (lost update). With the lock,
-// every distinct key survives. Run under -race, it also guards the write path
-// against data races.
 func TestConcurrentPutsKeepAll(t *testing.T) {
 	isolate(t)
 	const n = 20
@@ -129,6 +126,40 @@ func TestConcurrentPutsKeepAll(t *testing.T) {
 	for i := 0; i < n; i++ {
 		if got, ok := Get(fmt.Sprintf("k-%d", i), time.Minute); !ok || got != fmt.Sprintf("v-%d", i) {
 			t.Fatalf("key k-%d lost to a concurrent write: got %q ok=%v", i, got, ok)
+		}
+	}
+}
+
+func TestPutWithContextStopsWaitingForBusyLock(t *testing.T) {
+	isolate(t)
+	lockFile, err := os.OpenFile(path()+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	tests := []struct {
+		name string
+		ctx  context.Context
+		max  time.Duration
+	}{
+		{name: "caller-context", ctx: ctx, max: 200 * time.Millisecond},
+		{name: "cache-budget", ctx: context.Background(), max: 300 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		start := time.Now()
+		PutWithContext(tt.ctx, tt.name, "value", time.Time{})
+		if elapsed := time.Since(start); elapsed > tt.max {
+			t.Fatalf("%s write waited too long: %s", tt.name, elapsed)
+		}
+		if got, ok := Get(tt.name, time.Minute); ok || got != "" {
+			t.Fatalf("%s write should be skipped, got %q ok=%v", tt.name, got, ok)
 		}
 	}
 }

@@ -64,6 +64,12 @@ func parseShellInvocations(command string, depth int, inheritedShellStartup stri
 		}
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
 		if !ok {
+			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok {
+				if shellStartupDeclCanExecuteHiddenScript(decl) {
+					invocations = append(invocations, undecidableInvocation([]string{decl.Variant.Value}, shellStartupEnvReason))
+				}
+				return true
+			}
 			if stmt.Cmd == nil {
 				invocations = append(invocations, Invocation{source: nodeSource(command, stmt)})
 			}
@@ -106,6 +112,14 @@ func parseShellInvocations(command string, depth int, inheritedShellStartup stri
 		inv.command = parsed
 		inv.literalArgv = literalCommandArgv(call, wrappers)
 		inv.source = nodeSource(command, stmt)
+		if shellSetCanExposeFutureStartupEnv(norm, inv.Dynamic) {
+			invocations = append(invocations, undecidableInvocation(norm, shellStartupEnvReason))
+			return true
+		}
+		if wrappers.sameShell && shellStartupBuiltinCallCanExecuteHiddenScript(norm, inv.Dynamic) {
+			invocations = append(invocations, undecidableInvocation(norm, shellStartupEnvReason))
+			return true
+		}
 		if gitConfigDispatch && len(norm) > 0 && commandName(norm[0]) == "git" {
 			dynamicCommand, dynamicReason = true, gitConfigReason
 		}
@@ -415,16 +429,253 @@ func assignmentNameCanChangeGhCommandDispatch(name string) bool {
 	return name == "GH_CONFIG_DIR"
 }
 
+const shellStartupEnvReason = "shell startup environment can execute hidden script content"
+
 func shellStartupAssignmentCanExecuteHiddenScript(assigns []*syntax.Assign) (bool, string) {
 	for _, assign := range assigns {
 		if assign.Name == nil {
 			continue
 		}
 		if shellStartupEnvName(assign.Name.Value) {
-			return true, "shell startup environment can execute hidden script content"
+			return true, shellStartupEnvReason
 		}
 	}
 	return false, ""
+}
+
+func shellStartupDeclCanExecuteHiddenScript(decl *syntax.DeclClause) bool {
+	if decl == nil || decl.Variant == nil {
+		return false
+	}
+	args := make([]shellStartupDeclArg, 0, len(decl.Args))
+	for _, arg := range decl.Args {
+		token, ok := declArgToken(arg)
+		view := shellStartupDeclArg{token: token, ok: ok}
+		if arg != nil && arg.Name != nil {
+			view.name, view.hasName = arg.Name.Value, true
+		}
+		args = append(args, view)
+	}
+	return shellStartupDeclArgsCanExecuteHiddenScript(decl.Variant.Value, args)
+}
+
+func shellStartupBuiltinCallCanExecuteHiddenScript(argv []string, dynamic bool) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	variant := commandName(argv[0])
+	if !declVariantCanExport(variant) {
+		return false
+	}
+	if dynamic {
+		return true
+	}
+	args := make([]shellStartupDeclArg, 0, len(argv)-1)
+	for _, arg := range argv[1:] {
+		view := shellStartupDeclArg{token: arg, ok: true}
+		if name := shellStartupDeclArgName(arg); name != "" {
+			view.name, view.hasName = name, true
+		}
+		args = append(args, view)
+	}
+	return shellStartupDeclArgsCanExecuteHiddenScript(variant, args)
+}
+
+type shellStartupDeclArg struct {
+	token   string
+	ok      bool
+	name    string
+	hasName bool
+}
+
+func shellStartupDeclArgsCanExecuteHiddenScript(variant string, args []shellStartupDeclArg) bool {
+	exports := variant == "export"
+	functionMode := false
+	nameRefMode := false
+	dynamicOpt := false
+	parsingOptions := true
+	for _, arg := range args {
+		if !arg.ok {
+			if declVariantCanExport(variant) || nameRefMode {
+				return true
+			}
+			continue
+		}
+		if parsingOptions && arg.token == "--" {
+			parsingOptions = false
+			continue
+		}
+		if parsingOptions && declOptionToken(arg.token) {
+			if applyDeclOption(variant, arg.token, &exports, &functionMode, &nameRefMode) {
+				dynamicOpt = true
+			}
+			continue
+		}
+		parsingOptions = false
+		if functionMode {
+			continue
+		}
+		if nameRefMode {
+			return true
+		}
+		if !arg.hasName {
+			if exports || dynamicOpt {
+				return true
+			}
+			continue
+		}
+		if shellStartupEnvName(arg.name) && (exports || dynamicOpt) {
+			return true
+		}
+	}
+	return false
+}
+
+func declVariantCanExport(variant string) bool {
+	switch variant {
+	case "export", "declare", "typeset", "readonly", "local":
+		return true
+	default:
+		return false
+	}
+}
+
+func declArgToken(arg *syntax.Assign) (string, bool) {
+	if arg == nil {
+		return "", false
+	}
+	if arg.Name != nil {
+		return arg.Name.Value, true
+	}
+	if arg.Value == nil {
+		return "", false
+	}
+	return staticWord(arg.Value)
+}
+
+func shellStartupDeclArgName(token string) string {
+	if name, _, ok := strings.Cut(token, "="); ok {
+		return strings.TrimSuffix(name, "+")
+	}
+	return token
+}
+
+func declOptionToken(token string) bool {
+	return len(token) >= 2 && (token[0] == '-' || token[0] == '+')
+}
+
+func applyDeclOption(variant, opt string, exports, functionMode, nameRefMode *bool) bool {
+	dynamic := false
+	if opt == "--" {
+		return false
+	}
+	if len(opt) < 2 || (opt[0] != '-' && opt[0] != '+') {
+		return false
+	}
+	for _, ch := range opt[1:] {
+		switch ch {
+		case 'x':
+			*exports = opt[0] == '-'
+		case 'n':
+			if variant == "export" && opt[0] == '-' {
+				*exports = false
+			} else if opt[0] == '-' {
+				*nameRefMode = true
+			}
+		case 'f':
+			if variant == "export" && opt[0] == '-' {
+				*functionMode = true
+			}
+		default:
+			if opt[0] == '-' || opt[0] == '+' {
+				dynamic = true
+			}
+		}
+	}
+	return dynamic
+}
+
+func shellSetCanExposeFutureStartupEnv(argv []string, dynamic bool) bool {
+	if len(argv) == 0 || commandName(argv[0]) != "set" {
+		return false
+	}
+	for i := 1; i < len(argv); i++ {
+		arg := argv[i]
+		if dynamic && arg == "" {
+			return true
+		}
+		switch {
+		case arg == "--":
+			return false
+		case arg == "-o":
+			if i+1 >= len(argv) {
+				return false
+			}
+			if dynamic && argv[i+1] == "" {
+				return true
+			}
+			if argv[i+1] == "allexport" {
+				return true
+			}
+			i++
+		case arg == "+o":
+			if i+1 >= len(argv) {
+				return false
+			}
+			if dynamic && argv[i+1] == "" {
+				return true
+			}
+			if strings.HasPrefix(argv[i+1], "-") || strings.HasPrefix(argv[i+1], "+") {
+				continue
+			}
+			i++
+		case strings.HasPrefix(arg, "-") && arg != "-":
+			body := arg[1:]
+			for j := 0; j < len(body); j++ {
+				switch body[j] {
+				case 'a':
+					return true
+				case 'o':
+					if j+1 < len(body) {
+						return true
+					}
+					if i+1 >= len(argv) {
+						return false
+					}
+					if dynamic && argv[i+1] == "" {
+						return true
+					}
+					if argv[i+1] == "allexport" {
+						return true
+					}
+					i++
+				}
+			}
+		case strings.HasPrefix(arg, "+") && arg != "+":
+			body := arg[1:]
+			for j := 0; j < len(body); j++ {
+				if body[j] == 'o' {
+					if j+1 < len(body) {
+						break
+					}
+					if i+1 >= len(argv) {
+						return false
+					}
+					if dynamic && argv[i+1] == "" {
+						return true
+					}
+					if strings.HasPrefix(argv[i+1], "-") || strings.HasPrefix(argv[i+1], "+") {
+						break
+					}
+					i++
+					break
+				}
+			}
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // wrapperParse is the single interpretation of one wrapper layer. Option
@@ -484,16 +735,27 @@ type wrapperChain struct {
 	gitEnvironment   bool
 	ghEnvironment    bool
 	shellEnvironment bool
+	sameShell        bool
 	script           string
 	hasScript        bool
 }
 
 func parseWrapperChain(argv []string) wrapperChain {
-	chain := wrapperChain{argv: argv}
+	chain := wrapperChain{argv: argv, sameShell: true}
 	for {
+		wrapperName := ""
+		if len(chain.argv) > 0 {
+			wrapperName = commandName(chain.argv[0])
+		}
 		p, ok := parseWrapper(chain.argv)
 		if !ok {
 			return chain
+		}
+		switch wrapperName {
+		case "command", "builtin":
+		case "eval":
+		default:
+			chain.sameShell = false
 		}
 		if p.undecidable != "" {
 			chain.undecidable = p.undecidable

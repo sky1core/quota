@@ -634,6 +634,27 @@ func TestEvaluateHookEventDeniesProtectedCommand(t *testing.T) {
 	}
 }
 
+func TestLiteralFallbackCoversNonCommandStatementText(t *testing.T) {
+	policy, err := Preset(PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		"cat <<'EOF'\ngit push origin main\nEOF",
+		"cmd='git push origin main'; echo ok",
+	} {
+		t.Run(command, func(t *testing.T) {
+			decision, err := EvaluateCommand([]Policy{policy}, command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if decision.Allowed || decision.RuleID != "deny-git-push" {
+				t.Fatalf("decision = %+v, want deny-git-push", decision)
+			}
+		})
+	}
+}
+
 func findPresetTestRule(policy Policy, name string) string {
 	for _, test := range policy.Tests {
 		if test.Name == name {

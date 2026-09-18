@@ -1503,6 +1503,52 @@ func TestSharedSourceErrorBlocksOverrideRemoval(t *testing.T) {
 	}
 }
 
+func TestRegisteredSourceErrorBlocksCopyRemoval(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(t *testing.T, source string)
+		want string
+	}{
+		{
+			name: "missing",
+			edit: func(t *testing.T, source string) {
+				t.Helper()
+				if err := os.Remove(source); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "no such file",
+		},
+		{
+			name: "symlink",
+			edit: func(t *testing.T, source string) {
+				t.Helper()
+				if err := os.Remove(source); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(filepath.Dir(source), "missing.sh"), source); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "symlink",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, linked := linkedWorktreeWithRegisteredFile(t)
+			source := filepath.Join(repo, "config", "run.sh")
+			copyPath := filepath.Join(linked, "config", "run.sh")
+			if err := os.Remove(filepath.Join(repo, "AGENTS.local.md")); err != nil {
+				t.Fatal(err)
+			}
+			tc.edit(t, source)
+			res := prepare(t, linked)
+			if contains(res.Removed, copyPath) || !exists(copyPath) || len(res.Skipped) == 0 || !strings.Contains(res.Skipped[0].Reason, "local file source") || !strings.Contains(res.Skipped[0].Reason, tc.want) {
+				t.Fatalf("result = %+v", res)
+			}
+		})
+	}
+}
+
 func TestTrackedOrphanCopyIsPreserved(t *testing.T) {
 	repo, linked := linkedWorktreeWithRegisteredFile(t)
 	copyPath := filepath.Join(linked, "config", "run.sh")

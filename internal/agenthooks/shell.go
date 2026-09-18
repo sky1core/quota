@@ -58,12 +58,23 @@ func parseShellInvocations(command string, depth int, inheritedShellStartup stri
 	}
 	var invocations []Invocation
 	syntax.Walk(file, func(node syntax.Node) bool {
-		call, ok := node.(*syntax.CallExpr)
+		stmt, ok := node.(*syntax.Stmt)
 		if !ok {
+			return true
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok {
+			if stmt.Cmd == nil {
+				invocations = append(invocations, Invocation{source: nodeSource(command, stmt)})
+			}
 			return true
 		}
 		inv := callInvocation(call)
 		if len(inv.Argv) == 0 && !inv.Dynamic {
+			if len(call.Assigns) > 0 {
+				inv.source = nodeSource(command, stmt)
+				invocations = append(invocations, inv)
+			}
 			return true
 		}
 		wrappers := parseWrapperChain(inv.Argv)
@@ -94,7 +105,7 @@ func parseShellInvocations(command string, depth int, inheritedShellStartup stri
 		dynamicCommand, dynamicReason := parsed.dynamic, parsed.undecidable
 		inv.command = parsed
 		inv.literalArgv = literalCommandArgv(call, wrappers)
-		inv.source = nodeSource(command, call)
+		inv.source = nodeSource(command, stmt)
 		if gitConfigDispatch && len(norm) > 0 && commandName(norm[0]) == "git" {
 			dynamicCommand, dynamicReason = true, gitConfigReason
 		}

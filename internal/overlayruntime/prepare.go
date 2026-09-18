@@ -236,18 +236,18 @@ func (r repoContext) planGenerated(w string, state RepositoryState, local []byte
 	plans = append(plans, copyLocal)
 	for _, rel := range state.LocalFiles {
 		plan := generatedFile{Path: filepath.Join(w, rel), Rel: rel, Private: true}
-		if local != nil {
-			data, err := r.localFileSource(rel)
+		data, err := r.localFileSource(rel)
+		if err != nil {
+			plan.SourceErr = err
+		} else {
+			if local != nil {
+				plan.Data = data
+			}
+			info, err := os.Lstat(filepath.Join(r.Root, rel))
 			if err != nil {
 				plan.SourceErr = err
 			} else {
-				plan.Data = data
-				info, err := os.Lstat(filepath.Join(r.Root, rel))
-				if err != nil {
-					plan.SourceErr = err
-				} else {
-					plan.OwnerExecutable = info.Mode().Perm()&0o100 != 0
-				}
+				plan.OwnerExecutable = info.Mode().Perm()&0o100 != 0
 			}
 		}
 		plans = append(plans, plan)

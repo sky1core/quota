@@ -103,6 +103,12 @@ static BOOL QuotaInteger(NSTextField *field, NSInteger minimum, NSInteger maximu
     return YES;
 }
 
+static void QuotaShowSettingsWindowFront(NSWindow *window) {
+    // Do not replace this with -activate: it is cooperative and can leave the window behind another app.
+    [NSApp activateIgnoringOtherApps:YES];
+    [window makeKeyAndOrderFront:nil];
+}
+
 @interface QuotaSettingsAccountRow : NSObject
 @property NSView *view;
 @property NSPopUpButton *provider;
@@ -331,9 +337,7 @@ static BOOL QuotaInteger(NSTextField *field, NSInteger minimum, NSInteger maximu
 - (void)openSnapshot:(NSDictionary *)snapshot token:(uint64_t)token {
     if (self.token != 0) {
         quotaSettingsClosed(token);
-        if (@available(macOS 14.0, *)) { [NSApp activate]; }
-        else { [NSApp activateIgnoringOtherApps:YES]; }
-        [self.window makeKeyAndOrderFront:nil];
+        QuotaShowSettingsWindowFront(self.window);
         return;
     }
     self.token = token;
@@ -369,9 +373,7 @@ static BOOL QuotaInteger(NSTextField *field, NSInteger minimum, NSInteger maximu
     [self.window standardWindowButton:NSWindowCloseButton].enabled = YES;
     self.window.initialFirstResponder = self.activeMinutes;
     [self.window recalculateKeyViewLoop];
-    if (@available(macOS 14.0, *)) { [NSApp activate]; }
-        else { [NSApp activateIgnoringOtherApps:YES]; }
-    [self.window makeKeyAndOrderFront:nil];
+    QuotaShowSettingsWindowFront(self.window);
     [self.window makeFirstResponder:self.activeMinutes];
 }
 

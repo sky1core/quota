@@ -18,7 +18,7 @@ static void tick(void) {
   require(c.window.visible,"window visible");
   require(NSApp.activationPolicy==NSApplicationActivationPolicyAccessory,"accessory activation policy"); if (!c.window.keyWindow) fprintf(stderr,"UNVERIFIED: OS activation from automated launch; accessory policy confirmed\n");
   require([c.window.firstResponder isKindOfClass:NSTextView.class],"initial editor focus");
-  require(c.tabs.numberOfTabViewItems==3,"three native tabs");
+  require(c.tabs.numberOfTabViewItems==4,"four native tabs");
   require(c.accounts.count==3,"snapshot accounts");
   require(!c.accounts[0].remove.enabled && !c.accounts[0].key.enabled && c.accounts[0].minimum.enabled,"default row constraints");
   originalWindow=c.window;

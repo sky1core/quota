@@ -474,6 +474,7 @@ func TestLiteralProtectedCommandDeny(t *testing.T) {
 		`[[ 'git push' == x ]]; echo ok`,
 		`case x in ('git push') echo ok;; esac; echo ok`,
 		`for x in 'git push'; do :; done`,
+		`for n in 1; do echo 'git push'; done`,
 	} {
 		decision, err := EvaluateCommand([]Policy{policy}, command)
 		if err != nil || decision.Allowed || decision.RuleID != "deny-git-push" {
@@ -490,6 +491,7 @@ func TestLiteralProtectedCommandDeny(t *testing.T) {
 		{`echo 'gh pr create --head= --title change'`, "deny-gh-pr-create-without-head"},
 		{`echo 'gh pr create --title change' 'gh pr create --head feature'`, "deny-gh-pr-create-without-head"},
 		{`echo 'gh pr create --head feature' 'gh pr create --title change'`, "deny-gh-pr-create-without-head"},
+		{`for x in 'gh pr create --title change'; do :; done`, "deny-gh-pr-create-without-head"},
 		{`python3 -c 'import os; os.system("gh pr create --title --head --body body")'`, "deny-gh-pr-create-without-head"},
 		{`echo 'git commit --amend'`, "deny-git-commit-amend"},
 		{`echo 'gh pr close 23 --delete-branch'`, "deny-gh-pr-close-delete-branch"},
@@ -511,6 +513,8 @@ func TestLiteralProtectedCommandDeny(t *testing.T) {
 		`echo 'gh pr close 23 --comment ok'`,
 		`echo 'gh stack link 123 456'`,
 		`gh pr create --head feature --title ok --body 'git push origin main'`,
+		`for n in 1; do gh pr create --head feature --title change --body body; done`,
+		`case x in (x) gh pr create --head feature --title change --body body;; esac`,
 	} {
 		decision, err := EvaluateCommand([]Policy{policy}, command)
 		if err != nil || !decision.Allowed {

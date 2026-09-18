@@ -17,10 +17,14 @@ type Invocation struct {
 	command        parsedCommand
 	literalArgv    []string
 	source         string
+	sourceID       int
+	sourceStart    int
+	sourceEnd      int
 }
 
 func ParseShellInvocations(command string) ([]Invocation, error) {
-	return parseShellInvocations(command, 0, "")
+	state := shellParseState{}
+	return state.parseShellInvocations(command, 0, "")
 }
 
 func parseDirectShellInvocation(command string) (Invocation, bool) {
@@ -47,10 +51,16 @@ func parseDirectShellInvocation(command string) (Invocation, bool) {
 	return inv, true
 }
 
-func parseShellInvocations(command string, depth int, inheritedShellStartup string) ([]Invocation, error) {
+type shellParseState struct {
+	nextSourceID int
+}
+
+func (state *shellParseState) parseShellInvocations(command string, depth int, inheritedShellStartup string) ([]Invocation, error) {
 	if depth > 8 {
 		return nil, fmt.Errorf("nested shell command depth exceeded")
 	}
+	sourceID := state.nextSourceID
+	state.nextSourceID++
 	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
 	file, err := parser.Parse(strings.NewReader(command), "")
 	if err != nil {
@@ -68,19 +78,19 @@ func parseShellInvocations(command string, depth int, inheritedShellStartup stri
 				if shellStartupDeclCanExecuteHiddenScript(decl) {
 					invocations = append(invocations, undecidableInvocation([]string{decl.Variant.Value}, shellStartupEnvReason))
 				} else {
-					invocations = append(invocations, Invocation{source: nodeSource(command, stmt)})
+					invocations = append(invocations, sourceInvocation(command, sourceID, stmt))
 				}
 				return true
 			}
 			if stmt.Cmd == nil || sourceOnlyStatementCommand(stmt.Cmd) {
-				invocations = append(invocations, Invocation{source: nodeSource(command, stmt)})
+				invocations = append(invocations, sourceInvocation(command, sourceID, stmt))
 			}
 			return true
 		}
 		inv := callInvocation(call)
 		if len(inv.Argv) == 0 && !inv.Dynamic {
 			if len(call.Assigns) > 0 {
-				inv.source = nodeSource(command, stmt)
+				setInvocationSource(&inv, command, sourceID, stmt)
 				invocations = append(invocations, inv)
 			}
 			return true
@@ -113,7 +123,7 @@ func parseShellInvocations(command string, depth int, inheritedShellStartup stri
 		dynamicCommand, dynamicReason := parsed.dynamic, parsed.undecidable
 		inv.command = parsed
 		inv.literalArgv = literalCommandArgv(call, wrappers)
-		inv.source = nodeSource(command, stmt)
+		setInvocationSource(&inv, command, sourceID, stmt)
 		if shellSetCanExposeFutureStartupEnv(norm, inv.Dynamic) {
 			invocations = append(invocations, undecidableInvocation(norm, shellStartupEnvReason))
 			return true
@@ -161,7 +171,7 @@ func parseShellInvocations(command string, depth int, inheritedShellStartup stri
 			}
 		}
 		if hasScript && !inv.Dynamic {
-			nested, err := parseShellInvocations(script, depth+1, shellStartupReason)
+			nested, err := state.parseShellInvocations(script, depth+1, shellStartupReason)
 			if err != nil {
 				invocations = append(invocations, undecidableInvocation(norm, "nested command: "+err.Error()))
 				return true
@@ -185,6 +195,20 @@ func parseShellInvocations(command string, depth int, inheritedShellStartup stri
 	return invocations, nil
 }
 
+func sourceInvocation(source string, sourceID int, node syntax.Node) Invocation {
+	inv := Invocation{}
+	setInvocationSource(&inv, source, sourceID, node)
+	return inv
+}
+
+func setInvocationSource(inv *Invocation, source string, sourceID int, node syntax.Node) {
+	text, start, end := nodeSource(source, node)
+	inv.source = text
+	inv.sourceID = sourceID
+	inv.sourceStart = start
+	inv.sourceEnd = end
+}
+
 func sourceOnlyStatementCommand(cmd syntax.Command) bool {
 	switch cmd.(type) {
 	case *syntax.ArithmCmd, *syntax.CaseClause, *syntax.ForClause, *syntax.TestClause, *syntax.LetClause:
@@ -194,12 +218,12 @@ func sourceOnlyStatementCommand(cmd syntax.Command) bool {
 	}
 }
 
-func nodeSource(source string, node syntax.Node) string {
+func nodeSource(source string, node syntax.Node) (string, int, int) {
 	start, end := int(node.Pos().Offset()), int(node.End().Offset())
 	if start < 0 || end < start || end > len(source) {
-		return ""
+		return "", 0, 0
 	}
-	return source[start:end]
+	return source[start:end], start, end
 }
 
 func undecidableInvocation(argv []string, reason string) Invocation {

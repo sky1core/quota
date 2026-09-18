@@ -100,13 +100,14 @@ func literalDenyCandidates(command string, invocations []Invocation) []string {
 	if len(invocations) == 0 {
 		return []string{command}
 	}
+	protectedSpans := protectedInvocationSourceSpans(invocations)
 	seen := map[string]bool{}
 	var candidates []string
 	for _, inv := range invocations {
 		if protectedInvocation(inv) {
 			continue
 		}
-		for _, candidate := range []string{inv.source, strings.Join(inv.literalArgv, " ")} {
+		for _, candidate := range []string{literalSourceCandidate(inv, protectedSpans), strings.Join(inv.literalArgv, " ")} {
 			if candidate == "" || seen[candidate] {
 				continue
 			}
@@ -115,6 +116,41 @@ func literalDenyCandidates(command string, invocations []Invocation) []string {
 		}
 	}
 	return candidates
+}
+
+type invocationSourceSpan struct {
+	sourceID int
+	start    int
+	end      int
+}
+
+func protectedInvocationSourceSpans(invocations []Invocation) []invocationSourceSpan {
+	spans := make([]invocationSourceSpan, 0, len(invocations))
+	for _, inv := range invocations {
+		if protectedInvocation(inv) && inv.sourceEnd > inv.sourceStart {
+			spans = append(spans, invocationSourceSpan{sourceID: inv.sourceID, start: inv.sourceStart, end: inv.sourceEnd})
+		}
+	}
+	return spans
+}
+
+func literalSourceCandidate(inv Invocation, spans []invocationSourceSpan) string {
+	if inv.source == "" || inv.sourceEnd <= inv.sourceStart {
+		return inv.source
+	}
+	b := []byte(inv.source)
+	for _, span := range spans {
+		if span.sourceID != inv.sourceID || span.start < inv.sourceStart || span.end > inv.sourceEnd {
+			continue
+		}
+		if span.start == inv.sourceStart && span.end == inv.sourceEnd {
+			continue
+		}
+		for i := span.start - inv.sourceStart; i < span.end-inv.sourceStart; i++ {
+			b[i] = ' '
+		}
+	}
+	return string(b)
 }
 
 func literalDenyMatch(rule Rule, command string) ([]string, bool) {

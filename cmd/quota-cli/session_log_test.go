@@ -32,15 +32,51 @@ func TestSessionLogAccountsUseConfiguredRoots(t *testing.T) {
 	for _, account := range accounts {
 		got[account.Key] = account.Root
 	}
+	claudeExtra, err := config.CanonicalAccountDirectory(filepath.Join(home, "claude-two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexExtra, err := config.CanonicalAccountDirectory(filepath.Join(home, "codex-two"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := map[string]string{
 		"claude":   filepath.Join(home, ".claude", "projects"),
-		"claude-2": filepath.Join(home, "claude-two", "projects"),
+		"claude-2": filepath.Join(claudeExtra, "projects"),
 		"codex":    filepath.Join(home, ".codex", "sessions"),
-		"codex-2":  filepath.Join(home, "codex-two", "sessions"),
+		"codex-2":  filepath.Join(codexExtra, "sessions"),
 	}
 	for key, root := range want {
 		if got[key] != root {
 			t.Fatalf("%s root = %q, want %q", key, got[key], root)
+		}
+	}
+}
+
+func TestSessionLogExtraAccountsUseCanonicalRoots(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	for _, sub := range []string{"real/sub", "real/account", "account"} {
+		if err := os.MkdirAll(filepath.Join(root, sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("real/sub", filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	wantAccount, err := filepath.EvalSymlinks(filepath.Join(root, "real/account"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	for _, path := range []string{root + "/alias/../account", "alias/../account", "~/alias/../account"} {
+		claudeRoot, err := claudeConfigSessionLogRoot(path)
+		if err != nil || claudeRoot != filepath.Join(wantAccount, "projects") {
+			t.Fatalf("Claude root for %q = %q, %v; want %q", path, claudeRoot, err, filepath.Join(wantAccount, "projects"))
+		}
+		codexRoot, err := codexHomeSessionLogRoot(path)
+		if err != nil || codexRoot != filepath.Join(wantAccount, "sessions") {
+			t.Fatalf("Codex root for %q = %q, %v; want %q", path, codexRoot, err, filepath.Join(wantAccount, "sessions"))
 		}
 	}
 }

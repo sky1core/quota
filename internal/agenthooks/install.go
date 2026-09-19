@@ -13,6 +13,7 @@ const hookStatusMessage = "Checking agent command policy"
 
 type HookPlan struct {
 	Runtime   string   `json:"runtime"`
+	Account   string   `json:"account,omitempty"`
 	Path      string   `json:"path"`
 	Command   string   `json:"command"`
 	Binary    string   `json:"binary,omitempty"`
@@ -70,18 +71,26 @@ func CheckHookBinary(binary string) error {
 
 func ClaudeSettingsPath() string {
 	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
-		return filepath.Join(dir, "settings.json")
+		return ClaudeSettingsPathForConfigDir(dir)
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", "settings.json")
+	return ClaudeSettingsPathForConfigDir(filepath.Join(home, ".claude"))
 }
 
 func CodexHooksPath() string {
 	if dir := os.Getenv("CODEX_HOME"); dir != "" {
-		return filepath.Join(dir, "hooks.json")
+		return CodexHooksPathForHome(dir)
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".codex", "hooks.json")
+	return CodexHooksPathForHome(filepath.Join(home, ".codex"))
+}
+
+func ClaudeSettingsPathForConfigDir(configDir string) string {
+	return filepath.Join(configDir, "settings.json")
+}
+
+func CodexHooksPathForHome(home string) string {
+	return filepath.Join(home, "hooks.json")
 }
 
 func Apply(runtime, binary, policyDir string) (HookPlan, error) {
@@ -101,6 +110,15 @@ func applyClaude(binary, policyDir string) (HookPlan, error) {
 
 func applyCodex(binary, policyDir string) (HookPlan, error) {
 	return applyHook("codex", CodexHooksPath(), binary, policyDir)
+}
+
+func ApplyPath(runtime, path, binary, policyDir string) (HookPlan, error) {
+	switch runtime {
+	case "claude", "codex":
+		return applyHook(runtime, path, binary, policyDir)
+	default:
+		return HookPlan{}, fmt.Errorf("unsupported runtime %q", runtime)
+	}
 }
 
 func applyHook(runtime, path, binary, policyDir string) (HookPlan, error) {
@@ -133,7 +151,7 @@ func applyHook(runtime, path, binary, policyDir string) (HookPlan, error) {
 	if err != nil {
 		return plan, err
 	}
-	inspectHookPlan(&plan, root, runtime, binary, policyDir)
+	inspectHookPlan(&plan, root, runtime, binary, policyDir, codexConfigPathForHookPath(runtime, path))
 	if plan.Error != "" {
 		return plan, fmt.Errorf("saved %s hook at %s, but its configuration could not be read: %s", runtime, plan.Path, plan.Error)
 	}
@@ -161,11 +179,27 @@ func Detect(runtime, binary, policyDir string) HookPlan {
 		plan.Error = err.Error()
 		return plan
 	}
-	inspectHookPlan(&plan, root, runtime, binary, policyDir)
+	inspectHookPlan(&plan, root, runtime, binary, policyDir, codexConfigPathForHookPath(runtime, plan.Path))
 	return plan
 }
 
-func inspectHookPlan(plan *HookPlan, root map[string]any, runtime, binary, policyDir string) {
+func DetectPath(runtime, path, binary, policyDir string) HookPlan {
+	plan := HookPlan{Runtime: runtime, Path: path, Command: HookCommand(runtime, binary, policyDir), Binary: hookBinary(binary), PolicyDir: policyDir}
+	switch runtime {
+	case "claude", "codex":
+	default:
+		return HookPlan{Runtime: runtime, Path: path, Error: fmt.Sprintf("unsupported runtime %q", runtime)}
+	}
+	root, err := ReadJSONObject(plan.Path)
+	if err != nil {
+		plan.Error = err.Error()
+		return plan
+	}
+	inspectHookPlan(&plan, root, runtime, binary, policyDir, codexConfigPathForHookPath(runtime, path))
+	return plan
+}
+
+func inspectHookPlan(plan *HookPlan, root map[string]any, runtime, binary, policyDir, codexConfigPath string) {
 	if hookMaps, foundBinary, ok := findManagedHook(root, runtime, binary, policyDir); ok {
 		plan.Present = true
 		plan.Binary = foundBinary
@@ -177,13 +211,20 @@ func inspectHookPlan(plan *HookPlan, root map[string]any, runtime, binary, polic
 		plan.Reasons = append(plan.Reasons, claudeDisableReasons(root)...)
 	}
 	if runtime == "codex" {
-		config, err := readCodexConfig(codexConfigPath())
+		config, err := readCodexConfig(codexConfigPath)
 		if err != nil {
 			plan.Error = err.Error()
 			return
 		}
 		plan.Reasons = append(plan.Reasons, codexConfigReasons(config)...)
 	}
+}
+
+func codexConfigPathForHookPath(runtime, hookPath string) string {
+	if runtime != "codex" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(hookPath), "config.toml")
 }
 
 // writeUniqueBackup writes content to a fresh path.bak.<nanosecond-timestamp>,

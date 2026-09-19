@@ -2201,6 +2201,45 @@ func TestUnregisteredManagedClaudeCopyNoLongerBlocksAgentFallback(t *testing.T) 
 	}
 }
 
+func TestUnregisteredManagedClaudeCopyPreservedWhenReplacementBridgeSkipped(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", ".claude/CLAUDE.md", "subdir/CLAUDE.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	write(t, filepath.Join(repo, "subdir", "CLAUDE.md"), "@../AGENTS.md\n")
+	if _, err := AddLocalFiles(context.Background(), repo, []string{"subdir/CLAUDE.md"}); err != nil {
+		t.Fatal(err)
+	}
+	linked := addWorktree(t, repo, "unregister-claude-copy-preserve")
+	subdir := filepath.Join(linked, "subdir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prepare(t, subdir)
+	localBridge := filepath.Join(linked, ".claude", "CLAUDE.md")
+	agentsBridge := filepath.Join(linked, ".claude", "AGENTS.md")
+	managedCopy := filepath.Join(linked, "subdir", "CLAUDE.md")
+	if !exists(localBridge) || !exists(managedCopy) || exists(agentsBridge) {
+		t.Fatalf("initial managed copy setup did not select local bridge")
+	}
+	if _, err := RemoveLocalFiles(context.Background(), repo, []string{"subdir/CLAUDE.md"}); err != nil {
+		t.Fatal(err)
+	}
+	res := prepare(t, subdir)
+	if contains(res.Created, agentsBridge) || contains(res.Removed, localBridge) || contains(res.Removed, managedCopy) || !exists(localBridge) || !exists(managedCopy) || exists(agentsBridge) {
+		t.Fatalf("failed replacement bridge removed part of the existing Claude connection: %+v", res)
+	}
+	var copyPreserved bool
+	for _, skip := range res.Skipped {
+		if skip.Path == managedCopy && strings.Contains(skip.Reason, "replacement Claude bridge was not prepared") {
+			copyPreserved = true
+		}
+	}
+	if !copyPreserved {
+		t.Fatalf("managed copy preserve skip missing: %+v", res.Skipped)
+	}
+}
+
 func TestManagedClaudeCopyRequiresTargetPreparation(t *testing.T) {
 	testHome(t)
 	globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", ".claude/AGENTS.md")

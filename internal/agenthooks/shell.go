@@ -16,6 +16,7 @@ type Invocation struct {
 	DynamicReason  string   `json:"dynamicReason,omitempty"`
 	command        parsedCommand
 	literalArgv    []string
+	auditArgv      [][]string
 	source         string
 	sourceID       int
 	sourceStart    int
@@ -97,7 +98,9 @@ func (state *shellParseState) parseShellInvocations(command string, depth int, i
 		}
 		wrappers := parseWrapperChain(inv.Argv)
 		if wrappers.undecidable != "" {
-			invocations = append(invocations, undecidableInvocation(wrappers.argv, wrappers.undecidable))
+			blocked := undecidableInvocation(wrappers.argv, wrappers.undecidable)
+			blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
+			invocations = append(invocations, blocked)
 			return true
 		}
 		gitConfigDispatch, gitConfigReason := gitConfigAssignmentCanChangeCommandDispatch(call.Assigns)
@@ -125,11 +128,15 @@ func (state *shellParseState) parseShellInvocations(command string, depth int, i
 		inv.literalArgv = literalCommandArgv(call, wrappers)
 		setInvocationSource(&inv, command, sourceID, stmt)
 		if shellSetCanExposeFutureStartupEnv(norm, inv.Dynamic) {
-			invocations = append(invocations, undecidableInvocation(norm, shellStartupEnvReason))
+			blocked := undecidableInvocation(norm, shellStartupEnvReason)
+			blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
+			invocations = append(invocations, blocked)
 			return true
 		}
 		if wrappers.sameShell && shellStartupBuiltinCallCanExecuteHiddenScript(norm, inv.Dynamic) {
-			invocations = append(invocations, undecidableInvocation(norm, shellStartupEnvReason))
+			blocked := undecidableInvocation(norm, shellStartupEnvReason)
+			blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
+			invocations = append(invocations, blocked)
 			return true
 		}
 		if gitConfigDispatch && len(norm) > 0 && commandName(norm[0]) == "git" {
@@ -161,7 +168,9 @@ func (state *shellParseState) parseShellInvocations(command string, depth int, i
 				hidden = "shell interpreter script is not visible to policy evaluator"
 			}
 			if hidden != "" {
-				invocations = append(invocations, undecidableInvocation(norm, hidden))
+				blocked := undecidableInvocation(norm, hidden)
+				blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
+				invocations = append(invocations, blocked)
 				return true
 			}
 			if canExecute {
@@ -173,15 +182,19 @@ func (state *shellParseState) parseShellInvocations(command string, depth int, i
 		if hasScript && !inv.Dynamic {
 			nested, err := state.parseShellInvocations(script, depth+1, shellStartupReason)
 			if err != nil {
-				invocations = append(invocations, undecidableInvocation(norm, "nested command: "+err.Error()))
+				blocked := undecidableInvocation(norm, "nested command: "+err.Error())
+				blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
+				invocations = append(invocations, blocked)
 				return true
 			}
 			nested = markInvocationsDynamicForCommand(nested, "git", gitConfigDispatch, gitConfigReason)
 			nested = markInvocationsDynamicForCommand(nested, "gh", ghConfigDispatch, ghConfigReason)
+			nested = attachAuditArgv(nested, wrappers.auditArgv)
 			invocations = append(invocations, nested...)
 			return true
 		}
 		inv.Argv = norm
+		inv.auditArgv = cloneArgvList(wrappers.auditArgv)
 		if dynamicCommand {
 			inv.Dynamic = true
 			inv.DynamicCommand = true
@@ -193,6 +206,28 @@ func (state *shellParseState) parseShellInvocations(command string, depth int, i
 		return true
 	})
 	return invocations, nil
+}
+
+func attachAuditArgv(invocations []Invocation, argv [][]string) []Invocation {
+	if len(argv) == 0 {
+		return invocations
+	}
+	if len(invocations) == 0 {
+		return []Invocation{{auditArgv: cloneArgvList(argv)}}
+	}
+	invocations[0].auditArgv = append(invocations[0].auditArgv, cloneArgvList(argv)...)
+	return invocations
+}
+
+func cloneArgvList(values [][]string) [][]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([][]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, append([]string(nil), value...))
+	}
+	return out
 }
 
 func sourceInvocation(source string, sourceID int, node syntax.Node) Invocation {
@@ -765,6 +800,7 @@ func parseWrapper(argv []string) (wrapperParse, bool) {
 
 type wrapperChain struct {
 	argv             []string
+	auditArgv        [][]string
 	undecidable      string
 	loginShell       bool
 	gitEnvironment   bool
@@ -785,6 +821,9 @@ func parseWrapperChain(argv []string) wrapperChain {
 		p, ok := parseWrapper(chain.argv)
 		if !ok {
 			return chain
+		}
+		if wrapperName == "sudo" {
+			chain.auditArgv = append(chain.auditArgv, append([]string(nil), chain.argv...))
 		}
 		switch wrapperName {
 		case "command", "builtin":

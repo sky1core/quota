@@ -104,6 +104,9 @@ var gitCommandOptions = map[string]map[string]optionValue{
 		optionGroup{optionNoValue, `-h --help --help-all`},
 		optionGroup{optionRequiredValue, `--config`},
 	),
+	"http-push": optionValues(
+		optionGroup{optionNoValue, `-h --help --help-all`},
+	),
 	"update-ref": optionValues(
 		optionGroup{optionNoValue, `-h --help --help-all -d --delete --stdin --no-deref --create-reflog`},
 		optionGroup{optionRequiredValue, `-m`},

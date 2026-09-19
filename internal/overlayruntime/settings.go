@@ -165,12 +165,15 @@ const (
 )
 
 func claudeInstructionMode(data map[string]any) (string, bool) {
+	newModeDefault := false
 	if value, ok := claudeInstructionFilesOption(data); ok {
 		switch value {
-		case claudeModeClaudeOnly, claudeModeAgentsDefault, claudeModeClaudeAnd, claudeModeManagedOnly:
+		case claudeModeClaudeOnly, claudeModeClaudeAnd, claudeModeManagedOnly:
 			return value, true
+		case claudeModeAgentsDefault:
+			newModeDefault = true
 		default:
-			return claudeModeAgentsDefault, true
+			newModeDefault = true
 		}
 	}
 	if value, ok := claudeProjectInstructionsOption(data); ok {
@@ -186,6 +189,9 @@ func claudeInstructionMode(data map[string]any) (string, bool) {
 		default:
 			return claudeModeClaudeOnly, true
 		}
+	}
+	if newModeDefault {
+		return claudeModeAgentsDefault, true
 	}
 	return claudeModeAgentsDefault, false
 }

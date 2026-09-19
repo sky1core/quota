@@ -35,11 +35,12 @@ func TestAgentHooksInitListVerifyEval(t *testing.T) {
 	if !strings.Contains(stdout.String(), "github-history-guard enabled=true") {
 		t.Fatalf("list stdout = %q", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "groups=2") {
+	if !strings.Contains(stdout.String(), "groups=3") {
 		t.Fatalf("list stdout missing groups: %q", stdout.String())
 	}
 	for _, want := range []string{
 		"group remote-code-ref-mutation:",
+		"group local-system-secret-safety:",
 		"group github-collaboration-metadata:",
 	} {
 		if !strings.Contains(stdout.String(), want) {
@@ -65,6 +66,11 @@ func TestAgentHooksInitListVerifyEval(t *testing.T) {
 		"github-history-guard/remote-code-ref-mutation/deny gh agent task create",
 		"github-history-guard/remote-code-ref-mutation/deny gh codespace ssh",
 		"github-history-guard/remote-code-ref-mutation/deny gh pr merge",
+		"github-history-guard/local-system-secret-safety/deny rm",
+		"github-history-guard/local-system-secret-safety/deny sudo",
+		"github-history-guard/local-system-secret-safety/deny killall",
+		"github-history-guard/local-system-secret-safety/allow kill single pid",
+		"github-history-guard/local-system-secret-safety/deny gh auth token",
 		"github-history-guard/github-collaboration-metadata/allow pr close without branch delete",
 		"github-history-guard/github-collaboration-metadata/allow pr comment",
 		"github-history-guard/github-collaboration-metadata/allow issue edit",
@@ -159,6 +165,109 @@ func TestAgentHooksApplyUsesPolicyDirInHookCommand(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "--policy-dir") || !strings.Contains(string(b), policyDir) {
 		t.Fatalf("settings = %s", string(b))
+	}
+}
+
+func TestAgentHooksApplyTargetsRegisteredAccounts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "caller-claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(home, "caller-codex"))
+	configPath := filepath.Join(home, ".config", "quota", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{
+  "claudeAccounts": [{"key": "claude-2", "configDir": "~/.claude-2"}],
+  "codexAccounts": [{"key": "codex-2", "home": "~/.codex-2"}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	policyDir := filepath.Join(home, "policies")
+	policy, err := agenthooks.Preset(agenthooks.PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agenthooks.SavePolicy(policyDir, policy, false); err != nil {
+		t.Fatal(err)
+	}
+	binary := writeTestExecutable(t, filepath.Join(home, "bin", "quota-cli"))
+
+	var stdout, stderr bytes.Buffer
+	code := runAgentHooks([]string{"apply", "--policy-dir", policyDir, "--runtime", "all", "--binary", binary, "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("apply code = %d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var report struct {
+		Hooks []agenthooks.HookPlan `json:"hooks"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"claude/claude":   canonicalTestPath(t, filepath.Join(home, ".claude", "settings.json")),
+		"claude/claude-2": canonicalTestPath(t, filepath.Join(home, ".claude-2", "settings.json")),
+		"codex/codex":     canonicalTestPath(t, filepath.Join(home, ".codex", "hooks.json")),
+		"codex/codex-2":   canonicalTestPath(t, filepath.Join(home, ".codex-2", "hooks.json")),
+	}
+	if len(report.Hooks) != len(want) {
+		t.Fatalf("hooks=%+v want %d", report.Hooks, len(want))
+	}
+	for _, hook := range report.Hooks {
+		key := hook.Runtime + "/" + hook.Account
+		if hook.Path != want[key] {
+			t.Fatalf("hook %s path=%q want %q; hooks=%+v", key, hook.Path, want[key], report.Hooks)
+		}
+		if !hook.Present {
+			t.Fatalf("hook was not present: %+v", hook)
+		}
+		detected := agenthooks.DetectPath(hook.Runtime, hook.Path, binary, policyDir)
+		if !detected.Present {
+			t.Fatalf("installed hook not detected for %s at %s: %+v", key, hook.Path, detected)
+		}
+	}
+	for _, unexpected := range []string{
+		filepath.Join(home, "caller-claude", "settings.json"),
+		filepath.Join(home, "caller-codex", "hooks.json"),
+	} {
+		if _, err := os.Stat(unexpected); !os.IsNotExist(err) {
+			t.Fatalf("caller environment path was touched: %s err=%v", unexpected, err)
+		}
+	}
+}
+
+func TestAgentHooksApplyInvalidAccountWritesNothing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, ".config", "quota", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{
+  "claudeAccounts": [{"key": "claude-2", "configDir": "~/.claude"}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	policyDir := filepath.Join(home, "policies")
+	policy, err := agenthooks.Preset(agenthooks.PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agenthooks.SavePolicy(policyDir, policy, false); err != nil {
+		t.Fatal(err)
+	}
+	binary := writeTestExecutable(t, filepath.Join(home, "bin", "quota-cli"))
+
+	var stdout, stderr bytes.Buffer
+	code := runAgentHooks([]string{"apply", "--policy-dir", policyDir, "--runtime", "claude", "--binary", binary}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("apply code = %d want 1 stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "same directory") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); !os.IsNotExist(err) {
+		t.Fatalf("apply wrote settings despite invalid account config: %v", err)
 	}
 }
 
@@ -419,7 +528,8 @@ func TestAgentHooksDoctorMissingHookFails(t *testing.T) {
 
 func TestAgentHooksDiagnosticOutputContract(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", home)
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "caller-claude"))
 	policyDir := filepath.Join(home, "policies")
 	binary, err := os.Executable()
 	if err != nil {
@@ -439,7 +549,10 @@ func TestAgentHooksDiagnosticOutputContract(t *testing.T) {
 	if _, err := agenthooks.SavePolicy(policyDir, policy, false); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(home, "settings.json")
+	path := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte(`{"disableAllHooks":true}`), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -489,8 +602,7 @@ func TestAgentHooksDiagnosticOutputContract(t *testing.T) {
 
 func TestAgentHooksApplyAllPreservesPartialDiagnostics(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
-	t.Setenv("CODEX_HOME", filepath.Join(home, "codex"))
+	t.Setenv("HOME", home)
 	policyDir := filepath.Join(home, "policies")
 	policy, err := agenthooks.Preset(agenthooks.PresetGitHubHistoryGuard)
 	if err != nil {
@@ -499,10 +611,11 @@ func TestAgentHooksApplyAllPreservesPartialDiagnostics(t *testing.T) {
 	if _, err := agenthooks.SavePolicy(policyDir, policy, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(agenthooks.ClaudeSettingsPath()), 0700); err != nil {
+	claudeSettings := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(claudeSettings), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(agenthooks.ClaudeSettingsPath(), []byte(`{"disableAllHooks":true}`), 0600); err != nil {
+	if err := os.WriteFile(claudeSettings, []byte(`{"disableAllHooks":true}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	binary, err := os.Executable()
@@ -526,7 +639,7 @@ func TestAgentHooksApplyAllPreservesPartialDiagnostics(t *testing.T) {
 			t.Fatalf("installation skipped: %+v", hook)
 		}
 	}
-	if !agenthooks.Detect("codex", binary, policyDir).Present {
+	if !agenthooks.DetectPath("codex", filepath.Join(home, ".codex", "hooks.json"), binary, policyDir).Present {
 		t.Fatal("Codex was not installed")
 	}
 }
@@ -614,4 +727,13 @@ func TestAgentHooksEvalUndecidableWrappersWithAllowOnlyPolicy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func canonicalTestPath(t *testing.T, path string) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(dir, filepath.Base(path))
 }

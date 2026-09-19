@@ -53,6 +53,7 @@ type Match struct {
 	Exact    bool         `json:"exact,omitempty"`
 	Contains []ArgPattern `json:"contains,omitempty"`
 	HasFlag  []string     `json:"hasFlag,omitempty"`
+	Risk     string       `json:"risk,omitempty"`
 }
 
 type ArgPattern struct {
@@ -235,7 +236,7 @@ func fileSafeID(id string) bool {
 }
 
 func validateMatch(match Match) error {
-	if len(match.Argv) == 0 && len(match.Contains) == 0 && len(match.HasFlag) == 0 {
+	if len(match.Argv) == 0 && len(match.Contains) == 0 && len(match.HasFlag) == 0 && match.Risk == "" {
 		return errors.New("at least one matcher is required")
 	}
 	for _, p := range append(append([]ArgPattern{}, match.Argv...), match.Contains...) {
@@ -247,6 +248,11 @@ func validateMatch(match Match) error {
 		if !strings.HasPrefix(flag, "-") {
 			return fmt.Errorf("flag %q must start with '-'", flag)
 		}
+	}
+	switch match.Risk {
+	case "", riskKillMultiplePIDs, riskKillMultiplePIDsWithSignal, riskKillNegativePID, riskKillNegativePIDAfterEnd:
+	default:
+		return fmt.Errorf("unsupported risk %q", match.Risk)
 	}
 	return nil
 }

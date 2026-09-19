@@ -75,6 +75,26 @@ func TestValidatePolicyRejectsInvalidGlob(t *testing.T) {
 	}
 }
 
+func TestValidatePolicyRejectsInvalidRisk(t *testing.T) {
+	policy := Policy{
+		Version: PolicyVersion,
+		ID:      "bad-risk",
+		Enabled: true,
+		Rules: []Rule{{
+			ID:     "bad-risk-rule",
+			Effect: EffectDeny,
+			Match:  Match{Argv: exactArgs("kill"), Risk: "unknown-risk"},
+		}},
+	}
+	err := ValidatePolicy(policy)
+	if err == nil {
+		t.Fatal("invalid risk should fail validation")
+	}
+	if !strings.Contains(err.Error(), "risk") {
+		t.Fatalf("error = %v, want risk error", err)
+	}
+}
+
 func findRule(policy Policy, id string) *Rule {
 	for i := range policy.Rules {
 		if policy.Rules[i].ID == id {

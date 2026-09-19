@@ -391,25 +391,19 @@ func resolveSessionLogProviderAccounts(provider string, candidates []sessionLogC
 }
 
 func claudeConfigSessionLogRoot(configDir string) (string, error) {
-	if _, err := config.CanonicalAccountDirectory(configDir); err != nil {
-		return "", err
-	}
-	abs, err := filepath.Abs(config.ExpandTilde(configDir))
+	dir, err := config.CanonicalAccountDirectory(configDir)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(filepath.Clean(abs), "projects"), nil
+	return filepath.Join(dir, "projects"), nil
 }
 
 func codexHomeSessionLogRoot(homeDir string) (string, error) {
-	if _, err := config.CanonicalAccountDirectory(homeDir); err != nil {
-		return "", err
-	}
-	abs, err := filepath.Abs(config.ExpandTilde(homeDir))
+	dir, err := config.CanonicalAccountDirectory(homeDir)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(filepath.Clean(abs), "sessions"), nil
+	return filepath.Join(dir, "sessions"), nil
 }
 
 func sessionLogCanonicalRoot(root string) (string, error) {

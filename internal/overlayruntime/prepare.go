@@ -699,6 +699,11 @@ func isClaudeBridgeRel(rel string) bool {
 	return rel == "CLAUDE.md" || rel == "CLAUDE.local.md" || rel == claudeAgentsRule || rel == claudeBridgeRule
 }
 
+func removalNeedsPreparedClaudeBridge(rel string) bool {
+	name := filepath.Base(filepath.ToSlash(rel))
+	return isClaudeBridgeRel(rel) || name == "CLAUDE.md" || name == "CLAUDE.local.md"
+}
+
 func (r repoContext) claudePreparedBridgeReady(w string, state RepositoryState, excludePatterns []string, replacing string) bool {
 	local := filepath.Join(w, localRule)
 	if !exists(local) {
@@ -883,7 +888,7 @@ func (r repoContext) evaluateCheckout(w string, state RepositoryState, local []b
 	actions := make([]plannedAction, 0, len(plans))
 	for _, plan := range plans {
 		action := r.evaluateGenerated(w, plan, state)
-		if local != nil && plan.Data == nil && action.Action == actionRemove && isClaudeBridgeRel(plan.Rel) {
+		if local != nil && plan.Data == nil && action.Action == actionRemove && removalNeedsPreparedClaudeBridge(plan.Rel) {
 			action.removeRequiresClaudeBridge = true
 		}
 		actions = append(actions, action)

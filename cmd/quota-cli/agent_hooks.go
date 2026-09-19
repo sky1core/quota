@@ -19,6 +19,12 @@ type agentHooksOptions struct {
 	jsonOut   bool
 }
 
+type agentHookTarget struct {
+	runtime string
+	account string
+	path    string
+}
+
 func runAgent(args []string) int {
 	if len(args) == 0 {
 		printAgentUsage(os.Stderr)
@@ -193,11 +199,21 @@ func agentHooksPlan(args []string, stdout, stderr io.Writer) int {
 	}
 	res := agenthooks.LoadPolicies(policyDir)
 	var plans []agenthooks.HookPlan
-	for _, rt := range runtimes {
-		plans = append(plans, agenthooks.Detect(rt, *binary, policyDir))
+	cfg, cfgErr := config.Load()
+	var targetErrs []error
+	if cfgErr != nil {
+		targetErrs = append(targetErrs, cfgErr)
+	} else {
+		var targets []agentHookTarget
+		targets, targetErrs = agentHookTargets(cfg, runtimes)
+		for _, target := range targets {
+			plan := agenthooks.DetectPath(target.runtime, target.path, *binary, policyDir)
+			plan.Account = target.account
+			plans = append(plans, plan)
+		}
 	}
 	if opts.jsonOut {
-		return writeJSON(stdout, map[string]any{"policies": res.Policies, "errors": errorsAsStrings(res.Errors), "hooks": plans}, stderr)
+		return writeJSONWithCode(stdout, stderr, map[string]any{"policies": res.Policies, "errors": errorsAsStrings(append(res.Errors, targetErrs...)), "hooks": plans}, len(res.Errors)+len(targetErrs) > 0)
 	}
 	fmt.Fprintln(stdout, "Policies")
 	if len(res.Policies) == 0 {
@@ -220,7 +236,7 @@ func agentHooksPlan(args []string, stdout, stderr io.Writer) int {
 		default:
 			status = "present"
 		}
-		fmt.Fprintf(stdout, "  %s %s\n    path: %s\n    command: %s\n", plan.Runtime, status, plan.Path, plan.Command)
+		fmt.Fprintf(stdout, "  %s %s\n    account: %s\n    path: %s\n    command: %s\n", plan.Runtime, status, plan.Account, plan.Path, plan.Command)
 		if plan.Error != "" {
 			fmt.Fprintf(stdout, "    error: %s\n", plan.Error)
 		}
@@ -231,7 +247,10 @@ func agentHooksPlan(args []string, stdout, stderr io.Writer) int {
 	for _, err := range res.Errors {
 		fmt.Fprintln(stderr, err)
 	}
-	if len(res.Errors) > 0 {
+	for _, err := range targetErrs {
+		fmt.Fprintln(stderr, err)
+	}
+	if len(res.Errors)+len(targetErrs) > 0 {
 		return 1
 	}
 	return 0
@@ -280,6 +299,21 @@ func agentHooksApply(args []string, stdout, stderr io.Writer) int {
 	if len(res.Errors) > 0 {
 		return 1
 	}
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	targets, targetErrs := agentHookTargets(cfg, runtimes)
+	if len(targetErrs) > 0 {
+		for _, err := range targetErrs {
+			fmt.Fprintln(stderr, err)
+		}
+		if opts.jsonOut {
+			return writeJSONWithCode(stdout, stderr, map[string]any{"hooks": []agenthooks.HookPlan{}, "errors": errorsAsStrings(targetErrs)}, true)
+		}
+		return 1
+	}
 	if enabledPolicyCount(res.Policies) == 0 {
 		fmt.Fprintf(stderr, "no enabled agent hook policies found in %s\n", policyDirForDisplay(policyDir))
 		return 1
@@ -290,8 +324,9 @@ func agentHooksApply(args []string, stdout, stderr io.Writer) int {
 	}
 	var plans []agenthooks.HookPlan
 	var applyErrors []string
-	for _, rt := range runtimes {
-		plan, err := agenthooks.Apply(rt, *binary, policyDir)
+	for _, target := range targets {
+		plan, err := agenthooks.ApplyPath(target.runtime, target.path, *binary, policyDir)
+		plan.Account = target.account
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			applyErrors = append(applyErrors, err.Error())
@@ -311,7 +346,7 @@ func agentHooksApply(args []string, stdout, stderr io.Writer) int {
 	}
 	for _, plan := range plans {
 		if plan.Present {
-			fmt.Fprintf(stdout, "installed %s hook: %s\n", plan.Runtime, plan.Path)
+			fmt.Fprintf(stdout, "installed %s hook account=%s: %s\n", plan.Runtime, plan.Account, plan.Path)
 		}
 	}
 	if failed {
@@ -403,12 +438,27 @@ func agentHooksDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 	res := agenthooks.LoadPolicies(policyDir)
 	var hooks []agenthooks.HookPlan
-	for _, rt := range runtimes {
-		hooks = append(hooks, agenthooks.Detect(rt, *binary, policyDir))
+	cfg, cfgErr := config.Load()
+	var targetErrs []error
+	if cfgErr != nil {
+		targetErrs = append(targetErrs, cfgErr)
+	} else {
+		var targets []agentHookTarget
+		targets, targetErrs = agentHookTargets(cfg, runtimes)
+		for _, target := range targets {
+			plan := agenthooks.DetectPath(target.runtime, target.path, *binary, policyDir)
+			plan.Account = target.account
+			hooks = append(hooks, plan)
+		}
 	}
-	sort.Slice(hooks, func(i, j int) bool { return hooks[i].Runtime < hooks[j].Runtime })
+	sort.Slice(hooks, func(i, j int) bool {
+		if hooks[i].Runtime != hooks[j].Runtime {
+			return hooks[i].Runtime < hooks[j].Runtime
+		}
+		return hooks[i].Account < hooks[j].Account
+	})
 	policyErrs := policyLoadErrors(res, policyDir, true)
-	failed := len(policyErrs) > 0
+	failed := len(policyErrs)+len(targetErrs) > 0
 	statuses := make([]string, len(hooks))
 	for i := range hooks {
 		switch {
@@ -438,10 +488,10 @@ func agentHooksDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if opts.jsonOut {
-		return writeJSONWithCode(stdout, stderr, map[string]any{"errors": errorsAsStrings(policyErrs), "hooks": hooks}, failed)
+		return writeJSONWithCode(stdout, stderr, map[string]any{"errors": errorsAsStrings(append(policyErrs, targetErrs...)), "hooks": hooks}, failed)
 	}
 	for i, hook := range hooks {
-		fmt.Fprintf(stdout, "%s %s hook path=%s\n", statuses[i], hook.Runtime, hook.Path)
+		fmt.Fprintf(stdout, "%s %s hook account=%s path=%s\n", statuses[i], hook.Runtime, hook.Account, hook.Path)
 		if hook.Error != "" {
 			fmt.Fprintf(stdout, "  %s\n", hook.Error)
 		}
@@ -450,6 +500,9 @@ func agentHooksDoctor(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	for _, err := range policyErrs {
+		fmt.Fprintln(stderr, err)
+	}
+	for _, err := range targetErrs {
 		fmt.Fprintln(stderr, err)
 	}
 	if failed {
@@ -541,6 +594,95 @@ func selectedRuntimes(runtime string) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("--runtime must be all, claude, or codex")
 	}
+}
+
+func agentHookTargets(cfg config.Config, runtimes []string) ([]agentHookTarget, []error) {
+	var targets []agentHookTarget
+	var errs []error
+	for _, runtime := range runtimes {
+		providerTargets, providerErrs := agentHookProviderTargets(cfg, runtime)
+		targets = append(targets, providerTargets...)
+		errs = append(errs, providerErrs...)
+	}
+	return targets, errs
+}
+
+func agentHookProviderTargets(cfg config.Config, runtime string) ([]agentHookTarget, []error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, []error{err}
+	}
+	var raw []struct {
+		key string
+		dir string
+	}
+	switch runtime {
+	case "claude":
+		raw = append(raw, struct {
+			key string
+			dir string
+		}{"claude", filepath.Join(home, ".claude")})
+		for _, account := range cfg.ClaudeAccounts {
+			raw = append(raw, struct {
+				key string
+				dir string
+			}{account.Key, account.ConfigDir})
+		}
+	case "codex":
+		raw = append(raw, struct {
+			key string
+			dir string
+		}{"codex", filepath.Join(home, ".codex")})
+		for _, account := range cfg.CodexAccounts {
+			raw = append(raw, struct {
+				key string
+				dir string
+			}{account.Key, account.Home})
+		}
+	default:
+		return nil, []error{fmt.Errorf("unsupported runtime %q", runtime)}
+	}
+	seenKeys := map[string]bool{}
+	seenDirs := map[string]string{}
+	var targets []agentHookTarget
+	var errs []error
+	for i, item := range raw {
+		if i > 0 {
+			switch runtime {
+			case "claude":
+				if !config.ClaudeExtraKeyRe.MatchString(item.key) {
+					errs = append(errs, fmt.Errorf("claude account key %q must match claude-<N>", item.key))
+					continue
+				}
+			case "codex":
+				if !config.CodexExtraKeyRe.MatchString(item.key) {
+					errs = append(errs, fmt.Errorf("codex account key %q must match codex-<N>", item.key))
+					continue
+				}
+			}
+		}
+		if seenKeys[item.key] {
+			errs = append(errs, fmt.Errorf("%s account key %q is duplicated", runtime, item.key))
+			continue
+		}
+		seenKeys[item.key] = true
+		dir, err := config.CanonicalAccountDirectory(item.dir)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s account %q directory is invalid: %v", runtime, item.key, err))
+			continue
+		}
+		if other := seenDirs[dir]; other != "" {
+			errs = append(errs, fmt.Errorf("%s accounts %q and %q use the same directory %s", runtime, other, item.key, dir))
+			continue
+		}
+		seenDirs[dir] = item.key
+		path := agenthooks.ClaudeSettingsPathForConfigDir(dir)
+		if runtime == "codex" {
+			path = agenthooks.CodexHooksPathForHome(dir)
+		}
+		targets = append(targets, agentHookTarget{runtime: runtime, account: item.key, path: path})
+	}
+	return targets, errs
 }
 
 func writeJSON(output io.Writer, payload any, stderr io.Writer) int {

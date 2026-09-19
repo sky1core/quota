@@ -42,6 +42,13 @@ const (
 
 var intArgRe = regexp.MustCompile(`^[0-9]+$`)
 
+const (
+	riskKillMultiplePIDs           = "kill-multiple-pids"
+	riskKillMultiplePIDsWithSignal = "kill-multiple-pids-with-signal"
+	riskKillNegativePID            = "kill-negative-pid"
+	riskKillNegativePIDAfterEnd    = "kill-negative-pid-after-end"
+)
+
 func EvaluateCommand(policies []Policy, command string) (Decision, error) {
 	invocations, err := ParseShellInvocations(command)
 	if err != nil {
@@ -154,7 +161,7 @@ func literalSourceCandidate(inv Invocation, spans []invocationSourceSpan) string
 }
 
 func literalDenyMatch(rule Rule, command string) ([]string, bool) {
-	if len(rule.Match.Argv) == 0 || len(rule.Match.Contains) > 0 {
+	if len(rule.Match.Argv) == 0 || len(rule.Match.Contains) > 0 || rule.Match.Risk != "" {
 		return nil, false
 	}
 	seq, ok := exactArgSequence(rule.Match.Argv)
@@ -210,7 +217,7 @@ func literalAnyMatchAtStart(command string, matches []Match) bool {
 }
 
 func literalMatchSpans(command string, match Match, exact bool) []literalSpan {
-	if len(match.Argv) == 0 || len(match.Contains) > 0 {
+	if len(match.Argv) == 0 || len(match.Contains) > 0 || match.Risk != "" {
 		return nil
 	}
 	pattern, ok := literalMatchPattern(match.Argv, exact)
@@ -312,6 +319,17 @@ func evaluateInvocations(policies []Policy, invocations []Invocation) Decision {
 }
 
 func evaluateInvocation(policies []Policy, inv Invocation) Decision {
+	for _, argv := range inv.auditArgv {
+		audit := Invocation{Argv: append([]string(nil), argv...), command: parseCommand(argv)}
+		decision := evaluateInvocationWithoutAudit(policies, audit)
+		if !decision.Allowed {
+			return decision
+		}
+	}
+	return evaluateInvocationWithoutAudit(policies, inv)
+}
+
+func evaluateInvocationWithoutAudit(policies []Policy, inv Invocation) Decision {
 	if inv.command.undecidable != "" {
 		return Decision{Decision: DecisionDeny, Allowed: false, Reason: inv.command.undecidable, Command: visibleArgv(inv.Argv, inv.Dynamic), source: decisionSourceUndecidable}
 	}
@@ -366,6 +384,61 @@ func evaluateInvocation(policies []Policy, inv Invocation) Decision {
 	}
 
 	return Decision{Decision: DecisionAllow, Allowed: true, source: decisionSourceAllow}
+}
+
+func killRisk(argv []string) string {
+	sawSignal := false
+	sawEnd := false
+	signalConsumed := false
+	operands := make([]string, 0, len(argv))
+	for i := 1; i < len(argv); i++ {
+		arg := argv[i]
+		if sawEnd {
+			operands = append(operands, arg)
+			continue
+		}
+		switch {
+		case arg == "--":
+			sawEnd = true
+		case !signalConsumed && (arg == "-s" || arg == "--signal" || arg == "-n"):
+			sawSignal = true
+			signalConsumed = true
+			if i+1 < len(argv) {
+				i++
+			}
+		case !signalConsumed && (strings.HasPrefix(arg, "--signal=") || strings.HasPrefix(arg, "-s") && len(arg) > 2 || strings.HasPrefix(arg, "-n") && len(arg) > 2):
+			sawSignal = true
+			signalConsumed = true
+		case !signalConsumed && strings.HasPrefix(arg, "-") && len(arg) > 1 && i+1 < len(argv):
+			sawSignal = true
+			signalConsumed = true
+		default:
+			operands = append(operands, arg)
+		}
+	}
+	positivePIDs := 0
+	for _, operand := range operands {
+		if negativeIntArg(operand) {
+			if sawEnd {
+				return riskKillNegativePIDAfterEnd
+			}
+			return riskKillNegativePID
+		}
+		if intArgRe.MatchString(operand) {
+			positivePIDs++
+		}
+	}
+	if positivePIDs >= 2 {
+		if sawSignal {
+			return riskKillMultiplePIDsWithSignal
+		}
+		return riskKillMultiplePIDs
+	}
+	return ""
+}
+
+func negativeIntArg(arg string) bool {
+	return strings.HasPrefix(arg, "-") && len(arg) > 1 && intArgRe.MatchString(arg[1:])
 }
 
 func EvaluateHookEvent(policies []Policy, input []byte) (Decision, error) {
@@ -471,11 +544,26 @@ func matchCommand(match Match, inv Invocation) bool {
 			return false
 		}
 	}
+	if match.Risk != "" && !matchRisk(match.Risk, inv) {
+		return false
+	}
 	return true
 }
 
+func matchRisk(risk string, inv Invocation) bool {
+	if len(inv.Argv) == 0 || commandName(inv.Argv[0]) != "kill" {
+		return false
+	}
+	switch risk {
+	case riskKillMultiplePIDs, riskKillMultiplePIDsWithSignal, riskKillNegativePID, riskKillNegativePIDAfterEnd:
+		return killRisk(inv.Argv) == risk
+	default:
+		return false
+	}
+}
+
 func matchArg(pattern ArgPattern, arg string, command bool) bool {
-	if command && pattern.Exact != "" && !strings.Contains(pattern.Exact, "/") {
+	if command && ((pattern.Exact != "" && !strings.Contains(pattern.Exact, "/")) || (pattern.Glob != "" && !strings.Contains(pattern.Glob, "/"))) {
 		arg = commandName(arg)
 	}
 	switch {
@@ -494,11 +582,18 @@ func matchArg(pattern ArgPattern, arg string, command bool) bool {
 			glob = strings.ToLower(glob)
 			arg = strings.ToLower(arg)
 		}
-		ok, err := path.Match(glob, arg)
-		return err == nil && ok
+		return matchArgGlob(glob, arg)
 	default:
 		return false
 	}
+}
+
+func matchArgGlob(pattern, arg string) bool {
+	const slash = "\x00"
+	pattern = strings.ReplaceAll(pattern, "/", slash)
+	arg = strings.ReplaceAll(arg, "/", slash)
+	ok, err := path.Match(pattern, arg)
+	return err == nil && ok
 }
 
 func argvContains(argv []string, pattern ArgPattern) bool {
@@ -537,7 +632,7 @@ func protectedInvocation(inv Invocation) bool {
 		return false
 	}
 	switch commandName(inv.Argv[0]) {
-	case "git", "gh":
+	case "git", "gh", "dd", "kill":
 		return true
 	default:
 		return false
@@ -569,7 +664,7 @@ var knownGitSubcommands = map[string]struct{}{
 	"diff-tree": {}, "difftool": {}, "fast-export": {}, "fast-import": {}, "fetch": {}, "fetch-pack": {},
 	"filter-branch": {}, "fmt-merge-msg": {}, "for-each-ref": {}, "for-each-repo": {}, "format-patch": {},
 	"fsck": {}, "gc": {}, "get-tar-commit-id": {}, "grep": {}, "hash-object": {}, "help": {},
-	"hook": {}, "http-backend": {}, "imap-send": {}, "index-pack": {}, "init": {}, "instaweb": {},
+	"hook": {}, "http-backend": {}, "http-push": {}, "imap-send": {}, "index-pack": {}, "init": {}, "instaweb": {},
 	"interpret-trailers": {}, "log": {}, "ls-files": {}, "ls-remote": {}, "ls-tree": {}, "mailinfo": {},
 	"mailsplit": {}, "maintenance": {}, "merge": {}, "merge-base": {}, "merge-file": {},
 	"merge-index": {}, "merge-one-file": {}, "merge-tree": {}, "mergetool": {}, "mktag": {}, "mktree": {},

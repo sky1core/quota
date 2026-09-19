@@ -31,20 +31,42 @@ func TestGitHubHistoryGuardPresetGroups(t *testing.T) {
 	for _, group := range policy.Groups {
 		groups[group.ID] = true
 	}
-	for _, group := range []string{PolicyGroupRemoteCodeRefMutation, PolicyGroupGitHubCollaborationMetadata} {
+	for _, group := range []string{PolicyGroupRemoteCodeRefMutation, PolicyGroupLocalSystemSecretSafety, PolicyGroupGitHubCollaborationMetadata} {
 		if !groups[group] {
 			t.Fatalf("missing group %s", group)
 		}
 	}
 	for _, rule := range policy.Rules {
-		if rule.Group != PolicyGroupRemoteCodeRefMutation {
-			t.Fatalf("rule %s group = %q, want %q", rule.ID, rule.Group, PolicyGroupRemoteCodeRefMutation)
+		switch rule.ID {
+		case "deny-rm", "deny-rmdir", "deny-unlink", "deny-mkfs-family", "deny-newfs-family", "deny-fdisk",
+			"deny-dd-input", "deny-dd-output", "deny-sudo", "deny-doas", "deny-su", "deny-shutdown",
+			"deny-reboot", "deny-poweroff", "deny-halt", "deny-init-stop", "deny-init-reboot",
+			"deny-killall", "deny-pkill", "deny-kill-multiple-pids", "deny-kill-multiple-pids-with-signal",
+			"deny-kill-negative-pid", "deny-kill-negative-pid-after-end", "deny-chmod", "deny-chown",
+			"deny-chgrp", "deny-gh-auth-token", "deny-gh-auth-status-token-long", "deny-gh-auth-status-token-short":
+			if rule.Group != PolicyGroupLocalSystemSecretSafety {
+				t.Fatalf("rule %s group = %q, want %q", rule.ID, rule.Group, PolicyGroupLocalSystemSecretSafety)
+			}
+		default:
+			if rule.Group != PolicyGroupRemoteCodeRefMutation {
+				t.Fatalf("rule %s group = %q, want %q", rule.ID, rule.Group, PolicyGroupRemoteCodeRefMutation)
+			}
 		}
 	}
 	wantTests := map[string]string{
 		"deny git push":                        PolicyGroupRemoteCodeRefMutation,
+		"deny git http push":                   PolicyGroupRemoteCodeRefMutation,
 		"deny git bisect run":                  PolicyGroupRemoteCodeRefMutation,
 		"deny git submodule foreach":           PolicyGroupRemoteCodeRefMutation,
+		"deny rm":                              PolicyGroupLocalSystemSecretSafety,
+		"deny mkfs variant":                    PolicyGroupLocalSystemSecretSafety,
+		"deny sudo":                            PolicyGroupLocalSystemSecretSafety,
+		"deny command sudo":                    PolicyGroupLocalSystemSecretSafety,
+		"deny killall":                         PolicyGroupLocalSystemSecretSafety,
+		"allow kill single pid":                PolicyGroupLocalSystemSecretSafety,
+		"deny kill multiple pids":              PolicyGroupLocalSystemSecretSafety,
+		"deny gh auth token":                   PolicyGroupLocalSystemSecretSafety,
+		"deny gh auth status show token":       PolicyGroupLocalSystemSecretSafety,
 		"deny gh pr merge":                     PolicyGroupRemoteCodeRefMutation,
 		"deny gh pr update branch":             PolicyGroupRemoteCodeRefMutation,
 		"deny gh issue develop":                PolicyGroupRemoteCodeRefMutation,
@@ -120,6 +142,98 @@ func TestRunPolicyTestsChecksDecisionSource(t *testing.T) {
 	}
 	if results[3].Passed {
 		t.Fatalf("%s: result = %+v, want source mismatch failure", results[3].Name, results[3])
+	}
+}
+
+func TestRiskMatchRespectsRuleOrderAndExcept(t *testing.T) {
+	tests := []struct {
+		name   string
+		rules  []Rule
+		want   string
+		ruleID string
+	}{
+		{
+			name: "allow before kill risk deny",
+			rules: []Rule{
+				{ID: "allow-test-command", Effect: EffectAllow, Match: Match{Argv: []ArgPattern{{Exact: "kill"}, {Exact: "12345"}, {Exact: "23456"}}, Exact: true}},
+				{ID: "deny-kill-multiple-pids", Effect: EffectDeny, Match: Match{Argv: exactArgs("kill"), Risk: riskKillMultiplePIDs}},
+			},
+			want:   DecisionAllow,
+			ruleID: "allow-test-command",
+		},
+		{
+			name: "except on kill risk deny",
+			rules: []Rule{
+				{
+					ID:     "deny-kill-multiple-pids",
+					Effect: EffectDeny,
+					Match:  Match{Argv: exactArgs("kill"), Risk: riskKillMultiplePIDs},
+					Except: []Match{{Argv: []ArgPattern{{Exact: "kill"}, {Exact: "12345"}, {Exact: "23456"}}, Exact: true}},
+				},
+			},
+			want: DecisionAllow,
+		},
+	}
+	for _, tt := range tests {
+		policy := Policy{Version: PolicyVersion, ID: "risk-order", Enabled: true, Rules: tt.rules}
+		decision, err := EvaluateCommand([]Policy{policy}, `kill 12345 23456`)
+		if err != nil {
+			t.Fatalf("%s: %v", tt.name, err)
+		}
+		if decision.Decision != tt.want || decision.RuleID != tt.ruleID {
+			t.Fatalf("%s: decision = %+v, want decision=%s rule=%s", tt.name, decision, tt.want, tt.ruleID)
+		}
+	}
+}
+
+func TestRiskMatchIsScopedToKillCommand(t *testing.T) {
+	policy := Policy{
+		Version: PolicyVersion,
+		ID:      "risk-scope",
+		Enabled: true,
+		Rules: []Rule{
+			{ID: "allow-risk", Effect: EffectAllow, Match: Match{Risk: riskKillMultiplePIDs}},
+			{ID: "deny-push", Effect: EffectDeny, Match: Match{Argv: exactArgs("git", "push")}},
+		},
+	}
+	decision, err := EvaluateCommand([]Policy{policy}, `git push origin 12345 23456`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Decision != DecisionDeny || decision.RuleID != "deny-push" {
+		t.Fatalf("decision = %+v, want deny-push", decision)
+	}
+
+	policy.Rules = []Rule{{ID: "deny-risk", Effect: EffectDeny, Match: Match{Risk: riskKillMultiplePIDs}}}
+	decision, err = EvaluateCommand([]Policy{policy}, `echo 12345 23456`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Decision != DecisionAllow {
+		t.Fatalf("decision = %+v, want allow", decision)
+	}
+}
+
+func TestLiteralExceptDoesNotIgnoreRisk(t *testing.T) {
+	policy := Policy{
+		Version: PolicyVersion,
+		ID:      "literal-risk-except",
+		Enabled: true,
+		Rules: []Rule{{
+			ID:     "deny-push",
+			Effect: EffectDeny,
+			Match:  Match{Argv: exactArgs("git", "push")},
+			Except: []Match{{Argv: exactArgs("git", "push"), Risk: riskKillMultiplePIDs}},
+		}},
+	}
+	for _, command := range []string{`git push origin main`, `echo 'git push origin main'`} {
+		decision, err := EvaluateCommand([]Policy{policy}, command)
+		if err != nil {
+			t.Fatalf("%s: %v", command, err)
+		}
+		if decision.Decision != DecisionDeny || decision.RuleID != "deny-push" {
+			t.Fatalf("%s: decision = %+v, want deny-push", command, decision)
+		}
 	}
 }
 
@@ -592,8 +706,7 @@ func TestEvaluateCommandEmptyCommitArgs(t *testing.T) {
 	}
 	wrappers := []string{
 		``, `command -- `, `builtin command `, `exec -a '' `,
-		`env -u '' `, `sudo -p '' `,
-		`command exec -a '' env FOO= sudo -p '' `,
+		`env -u '' `,
 	}
 	for _, wrapper := range wrappers {
 		for _, args := range []string{
@@ -876,12 +989,12 @@ func TestWrapperFamilyOptionTables(t *testing.T) {
 			{`env -S`, false},
 		},
 		"sudo": {
-			{`sudo git status`, true},
-			{`sudo -n git status`, true},
-			{`sudo -h`, true},
-			{`sudo -u nobody git status`, true},
-			{`sudo -nu nobody git status`, true},
-			{`sudo -- git status`, true},
+			{`sudo git status`, false},
+			{`sudo -n git status`, false},
+			{`sudo -h`, false},
+			{`sudo -u nobody git status`, false},
+			{`sudo -nu nobody git status`, false},
+			{`sudo -- git status`, false},
 			{`sudo -- git push`, false},
 			{`sudo -h host git push`, false},
 			{`sudo -Z git status`, false},

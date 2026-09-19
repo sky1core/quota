@@ -16,7 +16,6 @@ func TestProcessWrappersThroughHookEvent(t *testing.T) {
 		"nice --adjustment=5 --", "timeout 5", "timeout --signal TERM --kill-after 1 5",
 		"timeout -vsTERM -k1 5", "timeout --foreground --preserve-status -- 5",
 		"nohup nice -n 5 timeout 5", "command env EXAMPLE=value nohup timeout 5 nice",
-		"sudo -u example nohup nice timeout 5",
 	} {
 		for _, tc := range []struct {
 			command string

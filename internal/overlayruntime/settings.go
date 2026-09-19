@@ -140,6 +140,17 @@ func claudeInstructionFilesOption(data map[string]any) (string, bool) {
 	return value, ok
 }
 
+func claudeEffectiveInstructionFilesOption(r repoContext) (string, bool) {
+	var problems []string
+	for _, session := range claudeSessionSettings(r) {
+		if len(session.Paths) == 0 {
+			continue
+		}
+		return claudeInstructionFilesOption(readJSONSettingsLayer(session.Paths[0], &problems).data)
+	}
+	return "", false
+}
+
 func claudeEffectiveExclusionPatterns(r repoContext) []string {
 	var problems []string
 	var patterns []string
@@ -221,7 +232,7 @@ func claudeInstructionFileFindings(r repoContext) []string {
 		return nil
 	}
 	var problems []string
-	files := r.claudeInstructionFiles(r.Top, RepositoryState{}, false)
+	files := r.claudeInstructionFiles(r.Top, RepositoryState{}, false, nil)
 	var projectClaude []claudeInstructionFile
 	for _, file := range files {
 		if file.Local {
@@ -311,7 +322,7 @@ func claudeSettingsFindings(r repoContext) []string {
 		if disabled.value == true {
 			problems = append(problems, disabled.path+": disableAllHooks is true; Claude instruction hooks are disabled")
 		}
-		projectClaude := r.claudeInstructionFiles(session.Worktree, RepositoryState{}, false)
+		projectClaude := r.claudeInstructionFiles(session.Worktree, RepositoryState{}, false, nil)
 		var loadedProjectClaude []claudeInstructionFile
 		var excludedProjectClaude []string
 		for _, file := range projectClaude {

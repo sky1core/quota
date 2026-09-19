@@ -50,6 +50,7 @@ func CheckRepository(ctx context.Context, dir, agent string, options CheckOption
 	if e != nil {
 		problems = append(problems, e.Error())
 	}
+	actions = r.statusActions(r.Top, state, actions)
 	if problem := sharedRuleProblem(r.Top); problem != "" {
 		problems = append(problems, problem)
 	}

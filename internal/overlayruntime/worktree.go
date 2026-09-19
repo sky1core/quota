@@ -229,7 +229,7 @@ func removeLinkedWorktreeAndBranch(r repoContext, target, branch string, stderr 
 		}
 		var res PrepareResult
 		for _, a := range actions {
-			r.applyAction(target, a, &state, &res)
+			r.applyAction(target, a, &state, &res, nil)
 		}
 		if len(res.Skipped) > 0 {
 			return fmt.Errorf("refusing to remove worktree %s: %s", target, strings.Join(res.SkipReasons(), "; "))

@@ -55,17 +55,19 @@ func (p PrepareResult) SkipReasons() []string {
 }
 
 type generatedFile struct {
-	Path, Rel       string
-	Data            []byte
-	Private         bool
-	OwnerExecutable bool
-	Bridge          bool
-	SourceErr       error
+	Path, Rel           string
+	Data                []byte
+	Private             bool
+	OwnerExecutable     bool
+	Bridge              bool
+	SourceErr           error
+	RequiresAnyPrepared []string
 }
 
 type claudeInstructionFile struct {
-	Path  string
-	Local bool
+	Path    string
+	Local   bool
+	Planned bool
 }
 
 func mergedCodexInstructions(shared, local []byte) []byte {
@@ -186,23 +188,37 @@ func claudeFileImports(path, target string) (bool, error) {
 	return bridgeImportsPath(data, rel), nil
 }
 
-func (r repoContext) claudeInstructionFiles(w string, state RepositoryState, ignoreOwnedGenerated bool) []claudeInstructionFile {
+func (r repoContext) claudeInstructionFiles(w string, state RepositoryState, ignoreOwnedGenerated bool, local []byte) []claudeInstructionFile {
 	userClaudeMD := resolvePath(filepath.Join(nativeConfigHome("CLAUDE_CONFIG_DIR", ".claude"), "CLAUDE.md"))
+	start := r.Start
+	if !within(start, w) {
+		start = w
+	}
 	var files []claudeInstructionFile
 	seen := map[string]bool{}
-	for dir := resolvePath(w); ; dir = filepath.Dir(dir) {
+	for dir := resolvePath(start); ; dir = filepath.Dir(dir) {
 		for _, rel := range []string{"CLAUDE.md", filepath.Join(".claude", "CLAUDE.md"), "CLAUDE.local.md"} {
 			path := filepath.Join(dir, rel)
 			resolved := resolvePath(path)
-			if seen[resolved] || resolved == userClaudeMD || !exists(path) {
+			plannedCopy := false
+			if !exists(path) && ignoreOwnedGenerated && within(path, w) {
+				checkoutRel, err := filepath.Rel(w, path)
+				sourceRel := filepath.ToSlash(checkoutRel)
+				plannedCopy = err == nil && contains(state.LocalFiles, sourceRel) && r.localFileCopyPrepared(w, state, sourceRel, local != nil)
+			}
+			if seen[resolved] || resolved == userClaudeMD || (!exists(path) && !plannedCopy) {
 				continue
 			}
 			seen[resolved] = true
+			if plannedCopy {
+				files = append(files, claudeInstructionFile{Path: path, Local: filepath.Base(path) == "CLAUDE.local.md", Planned: true})
+				continue
+			}
 			if ignoreOwnedGenerated && within(path, w) {
-				_, _, _, owned, problem := inspectGeneratedWithStat(path, state)
-				if owned && problem == nil {
-					checkoutRel, err := filepath.Rel(w, path)
-					if err == nil {
+				checkoutRel, err := filepath.Rel(w, path)
+				if err == nil && isClaudeBridgeRel(checkoutRel) {
+					_, _, _, owned, problem := inspectGeneratedWithStat(path, state)
+					if owned && problem == nil {
 						tracked, err := r.tracked(w, checkoutRel)
 						if err == nil && !tracked {
 							continue
@@ -247,20 +263,107 @@ func claudeFilePaths(files []claudeInstructionFile) string {
 
 func (r repoContext) claudeBridgePlan(w string, state RepositoryState, local []byte) generatedFile {
 	rel, body := claudeAgentsRule, claudeAgentsRuleBody
-	if len(r.claudeInstructionFiles(w, state, true)) > 0 {
+	files := r.claudeInstructionFiles(w, state, true, local)
+	if len(files) > 0 {
 		rel, body = claudeBridgeRule, claudeBridgeRuleBody
 	}
 	plan := generatedFile{Path: filepath.Join(w, rel), Rel: rel, Private: true, Bridge: true}
+	hasExisting := false
+	for _, file := range files {
+		if !file.Planned {
+			hasExisting = true
+			break
+		}
+	}
+	if !hasExisting {
+		for _, file := range files {
+			if file.Planned {
+				plan.RequiresAnyPrepared = append(plan.RequiresAnyPrepared, file.Path)
+			}
+		}
+	}
 	if local != nil {
 		plan.Data = []byte(body)
 	}
 	return plan
 }
 
+func claudePlannedBridge(actions []plannedAction) (generatedFile, bool) {
+	for _, action := range actions {
+		if action.plan.Bridge && action.plan.Rel == claudeBridgeRule && len(action.plan.RequiresAnyPrepared) > 0 {
+			return action.plan, true
+		}
+	}
+	return generatedFile{}, false
+}
+
+func removeCurrentGeneratedFile(path string, state *RepositoryState) (bool, error) {
+	current, _, _, owned, problem := inspectGeneratedWithStat(path, *state)
+	if problem != nil {
+		return false, problem
+	}
+	if current == nil {
+		forgetGeneratedFile(state, path)
+		return false, nil
+	}
+	if !owned {
+		return false, fmt.Errorf("exists and is not quota-generated; preserved")
+	}
+	if err := os.Remove(path); err != nil {
+		return false, err
+	}
+	forgetGeneratedFile(state, path)
+	return true, nil
+}
+
+func removePathValue(paths []string, path string) []string {
+	out := paths[:0]
+	for _, existing := range paths {
+		if existing != path {
+			out = append(out, existing)
+		}
+	}
+	return out
+}
+
+func (r repoContext) rollbackUnbridgedClaudeCopies(w string, state *RepositoryState, res *PrepareResult, actions []plannedAction, before map[string]bool, excludePatterns []string) {
+	bridge, ok := claudePlannedBridge(actions)
+	if !ok || r.claudePreparedBridgeReady(w, *state, excludePatterns, "") {
+		return
+	}
+	for _, path := range bridge.RequiresAnyPrepared {
+		if before[path] || !exists(path) {
+			continue
+		}
+		removed, err := removeCurrentGeneratedFile(path, state)
+		if err != nil {
+			res.Skipped = append(res.Skipped, PrepareSkip{Path: path, Reason: err.Error()})
+			continue
+		}
+		if removed {
+			res.Created = removePathValue(res.Created, path)
+			res.Updated = removePathValue(res.Updated, path)
+			res.Skipped = append(res.Skipped, PrepareSkip{Path: path, Reason: "replacement Claude bridge was not prepared; rolled back"})
+		}
+	}
+	if !before[bridge.Path] && exists(bridge.Path) {
+		removed, err := removeCurrentGeneratedFile(bridge.Path, state)
+		if err != nil {
+			res.Skipped = append(res.Skipped, PrepareSkip{Path: bridge.Path, Reason: err.Error()})
+			return
+		}
+		if removed {
+			res.Created = removePathValue(res.Created, bridge.Path)
+			res.Updated = removePathValue(res.Updated, bridge.Path)
+			res.Skipped = append(res.Skipped, PrepareSkip{Path: bridge.Path, Reason: "replacement Claude bridge was not prepared; rolled back"})
+		}
+	}
+}
+
 func (r repoContext) claudeNativeLoadPaths(w string, state RepositoryState) (sharedPaths, localPaths []string) {
 	shared := filepath.Join(w, sharedRule)
 	local := filepath.Join(w, localRule)
-	files := r.claudeInstructionFiles(w, state, false)
+	files := r.claudeInstructionFiles(w, state, false, nil)
 	for _, file := range files {
 		if file.Local {
 			if exists(local) {
@@ -369,26 +472,50 @@ func (r repoContext) planGenerated(w string, state RepositoryState, local []byte
 		return plans
 	}
 	copyLocal := generatedFile{Path: filepath.Join(w, localRule), Rel: localRule, Private: true, Data: local}
-	plans = append(plans, copyLocal)
+	var copyPlans []generatedFile
+	copyPlans = append(copyPlans, copyLocal)
 	for _, rel := range state.LocalFiles {
-		plan := generatedFile{Path: filepath.Join(w, rel), Rel: rel, Private: true}
-		data, err := r.localFileSource(rel)
-		if err != nil {
-			plan.SourceErr = err
-		} else {
-			if local != nil {
-				plan.Data = data
-			}
-			info, err := os.Lstat(filepath.Join(r.Root, rel))
-			if err != nil {
-				plan.SourceErr = err
-			} else {
-				plan.OwnerExecutable = info.Mode().Perm()&0o100 != 0
+		copyPlans = append(copyPlans, r.localFileCopyPlan(w, rel, local != nil))
+	}
+	if !r.claudeBridgeCanBePrepared(w, state, claudeLocal) {
+		for i := range copyPlans {
+			if contains(claudeLocal.RequiresAnyPrepared, copyPlans[i].Path) {
+				copyPlans[i].SourceErr = fmt.Errorf("replacement Claude bridge was not prepared; preserved")
 			}
 		}
-		plans = append(plans, plan)
 	}
-	return plans
+	return append(copyPlans, claudeLocal, override)
+}
+
+func (r repoContext) localFileCopyPlan(w, rel string, enabled bool) generatedFile {
+	plan := generatedFile{Path: filepath.Join(w, rel), Rel: rel, Private: true}
+	data, err := r.localFileSource(rel)
+	if err != nil {
+		plan.SourceErr = err
+		return plan
+	}
+	if enabled {
+		plan.Data = data
+	}
+	info, err := os.Lstat(filepath.Join(r.Root, rel))
+	if err != nil {
+		plan.SourceErr = err
+	} else {
+		plan.OwnerExecutable = info.Mode().Perm()&0o100 != 0
+	}
+	return plan
+}
+
+func (r repoContext) localFileCopyPrepared(w string, state RepositoryState, rel string, enabled bool) bool {
+	if !enabled {
+		return false
+	}
+	plan := r.localFileCopyPlan(w, rel, true)
+	if plan.SourceErr != nil || plan.Data == nil {
+		return false
+	}
+	action := r.evaluateGenerated(w, plan, state)
+	return action.Action == actionNone || action.Action == actionCreate || action.Action == actionUpdate
 }
 
 // inspectGenerated reads the current file at path and decides ownership.
@@ -458,6 +585,10 @@ type plannedAction struct {
 	current        []byte
 	currentStat    unix.Stat_t
 	hasCurrentStat bool
+	// removeRequiresClaudeBridge preserves a stale Claude bridge until its
+	// replacement is actually present, so upgrades do not delete the only
+	// working local-instruction link when the new ignored path is not ready.
+	removeRequiresClaudeBridge bool
 	// forget drops a stale ownership record whose file no longer exists.
 	forget bool
 	// recordMode backfills the permission record of an unchanged owned file.
@@ -563,6 +694,171 @@ func orphanPlans(w string, state RepositoryState, plans []generatedFile) []gener
 	return orphans
 }
 
+func isClaudeBridgeRel(rel string) bool {
+	return rel == "CLAUDE.md" || rel == "CLAUDE.local.md" || rel == claudeAgentsRule || rel == claudeBridgeRule
+}
+
+func (r repoContext) claudePreparedBridgeReady(w string, state RepositoryState, excludePatterns []string, replacing string) bool {
+	local := filepath.Join(w, localRule)
+	if !exists(local) {
+		return false
+	}
+	plan := r.claudeBridgePlan(w, state, []byte{'\n'})
+	if resolvePath(plan.Path) == resolvePath(replacing) {
+		return false
+	}
+	if !r.claudeBridgeSettingsAllow(plan, excludePatterns) {
+		return false
+	}
+	action := r.evaluateGenerated(w, plan, state)
+	if action.Action != actionNone {
+		return false
+	}
+	current, _, _, _, problem := inspectGeneratedWithStat(plan.Path, state)
+	if problem != nil || current == nil {
+		return false
+	}
+	return bridgeImportsRequiredLocal(plan, current)
+}
+
+func (r repoContext) claudeBridgeSettingsAllow(plan generatedFile, excludePatterns []string) bool {
+	if plan.Rel == claudeAgentsRule {
+		if value, ok := claudeEffectiveInstructionFilesOption(r); ok && value == "claude-md" {
+			return false
+		}
+	}
+	if !claudePathLoaded([]string{plan.Path}, excludePatterns) {
+		return false
+	}
+	return true
+}
+
+func (r repoContext) claudeBridgeCanBePrepared(w string, state RepositoryState, plan generatedFile) bool {
+	if !r.claudeBridgeSettingsAllow(plan, claudeEffectiveExclusionPatterns(r)) {
+		return false
+	}
+	action := r.evaluateGenerated(w, plan, state)
+	return action.Action == actionNone || action.Action == actionCreate || action.Action == actionUpdate
+}
+
+func (r repoContext) claudeBridgeReadyAfterActions(w string, state RepositoryState, actions []plannedAction, excludePatterns []string, replacing string) bool {
+	if !localRuleReadyAfterActions(w, state, actions) {
+		return false
+	}
+	plan := r.claudeBridgePlan(w, state, []byte{'\n'})
+	if resolvePath(plan.Path) == resolvePath(replacing) {
+		return false
+	}
+	if !r.claudeBridgeSettingsAllow(plan, excludePatterns) {
+		return false
+	}
+	for _, action := range actions {
+		if action.Path != plan.Path {
+			continue
+		}
+		switch action.Action {
+		case actionNone:
+			current, _, _, _, problem := inspectGeneratedWithStat(plan.Path, state)
+			return problem == nil && current != nil && bridgeImportsRequiredLocal(plan, current)
+		case actionCreate, actionUpdate:
+			if len(plan.RequiresAnyPrepared) > 0 && !anyPathReadyAfterActions(state, actions, plan.RequiresAnyPrepared) {
+				return false
+			}
+			return action.plan.Data != nil && bridgeImportsRequiredLocal(plan, action.plan.Data)
+		default:
+			return false
+		}
+	}
+	current, _, _, _, problem := inspectGeneratedWithStat(plan.Path, state)
+	return problem == nil && current != nil && bridgeImportsRequiredLocal(plan, current)
+}
+
+func anyPathExists(paths []string) bool {
+	for _, path := range paths {
+		if exists(path) {
+			return true
+		}
+	}
+	return false
+}
+
+func anyPathReadyAfterActions(state RepositoryState, actions []plannedAction, paths []string) bool {
+	for _, path := range paths {
+		if exists(path) {
+			return true
+		}
+		for _, action := range actions {
+			if action.Path != path {
+				continue
+			}
+			switch action.Action {
+			case actionNone:
+				current, _, _, _, problem := inspectGeneratedWithStat(path, state)
+				if problem == nil && current != nil {
+					return true
+				}
+			case actionCreate, actionUpdate:
+				if action.plan.Data != nil {
+					return true
+				}
+			}
+			break
+		}
+	}
+	return false
+}
+
+func localRuleReadyAfterActions(w string, state RepositoryState, actions []plannedAction) bool {
+	local := filepath.Join(w, localRule)
+	if exists(local) {
+		return true
+	}
+	for _, action := range actions {
+		if action.Path != local {
+			continue
+		}
+		switch action.Action {
+		case actionNone:
+			current, _, _, _, problem := inspectGeneratedWithStat(local, state)
+			return problem == nil && current != nil
+		case actionCreate, actionUpdate:
+			return action.plan.Data != nil
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+func (r repoContext) statusActions(w string, state RepositoryState, actions []plannedAction) []plannedAction {
+	excludePatterns := claudeEffectiveExclusionPatterns(r)
+	out := make([]plannedAction, len(actions))
+	copy(out, actions)
+	for i := range out {
+		if out[i].Action == actionRemove && out[i].removeRequiresClaudeBridge && !r.claudeBridgeReadyAfterActions(w, state, out, excludePatterns, out[i].Path) {
+			out[i].Action = actionSkip
+			out[i].Reason = "replacement Claude bridge was not prepared; preserved"
+			continue
+		}
+		if (out[i].Action == actionCreate || out[i].Action == actionUpdate) && out[i].plan.Bridge && !r.claudeBridgeReadyAfterActions(w, state, out, excludePatterns, "") {
+			out[i].Action = actionSkip
+			out[i].Reason = "required Claude instruction file was not prepared; preserved"
+		}
+	}
+	for _, action := range out {
+		if !action.plan.Bridge || len(action.plan.RequiresAnyPrepared) == 0 || r.claudeBridgeReadyAfterActions(w, state, out, excludePatterns, "") {
+			continue
+		}
+		for i := range out {
+			if (out[i].Action == actionCreate || out[i].Action == actionUpdate) && contains(action.plan.RequiresAnyPrepared, out[i].Path) {
+				out[i].Action = actionSkip
+				out[i].Reason = "replacement Claude bridge was not prepared; preserved"
+			}
+		}
+	}
+	return out
+}
+
 // evaluateWithSource reads the primary AGENTS.local.md and evaluates checkout
 // w from it. A source error yields no actions; preparation aborts on it and
 // status reports it instead of any file decision.
@@ -581,7 +877,11 @@ func (r repoContext) evaluateCheckout(w string, state RepositoryState, local []b
 	plans = append(plans, orphanPlans(w, state, plans)...)
 	actions := make([]plannedAction, 0, len(plans))
 	for _, plan := range plans {
-		actions = append(actions, r.evaluateGenerated(w, plan, state))
+		action := r.evaluateGenerated(w, plan, state)
+		if local != nil && plan.Data == nil && action.Action == actionRemove && isClaudeBridgeRel(plan.Rel) {
+			action.removeRequiresClaudeBridge = true
+		}
+		actions = append(actions, action)
 	}
 	return actions
 }
@@ -619,7 +919,7 @@ func removeGeneratedFile(path string, state RepositoryState, expected []byte, ex
 	return true, nil
 }
 
-func (r repoContext) applyAction(w string, a plannedAction, state *RepositoryState, res *PrepareResult) {
+func (r repoContext) applyAction(w string, a plannedAction, state *RepositoryState, res *PrepareResult, claudeExcludePatterns []string) {
 	skip := func(reason string) { res.Skipped = append(res.Skipped, PrepareSkip{Path: a.Path, Reason: reason}) }
 	switch a.Action {
 	case actionSkip:
@@ -634,6 +934,10 @@ func (r repoContext) applyAction(w string, a plannedAction, state *RepositorySta
 			}
 		}
 	case actionRemove:
+		if a.removeRequiresClaudeBridge && !r.claudePreparedBridgeReady(w, *state, claudeExcludePatterns, a.Path) {
+			skip("replacement Claude bridge was not prepared; preserved")
+			return
+		}
 		removed, err := removeGeneratedFile(a.Path, *state, a.current, a.currentStat, a.hasCurrentStat)
 		if err != nil {
 			skip(err.Error())
@@ -644,6 +948,18 @@ func (r repoContext) applyAction(w string, a plannedAction, state *RepositorySta
 			res.Removed = append(res.Removed, a.Path)
 		}
 	case actionCreate, actionUpdate:
+		if a.plan.Bridge && !r.claudeBridgeSettingsAllow(a.plan, claudeExcludePatterns) {
+			skip("Claude settings prevent loading this bridge; preserved")
+			return
+		}
+		if a.plan.Bridge && !exists(filepath.Join(w, localRule)) {
+			skip("required AGENTS.local.md was not prepared; preserved")
+			return
+		}
+		if len(a.plan.RequiresAnyPrepared) > 0 && !anyPathExists(a.plan.RequiresAnyPrepared) {
+			skip("required Claude instruction file was not prepared; preserved")
+			return
+		}
 		if err := managedParents(w, a.plan.Rel, true); err != nil {
 			skip(err.Error())
 			return
@@ -677,9 +993,18 @@ func (r repoContext) prepareCheckoutFiles(w string, state *RepositoryState, res 
 		res.SharedBody, _ = decodeRule(shared, filepath.Join(w, sharedRule))
 	}
 	res.ClaudeSharedBefore, res.ClaudeLocalBefore = r.claudeNativeLoadPaths(w, *state)
-	for _, a := range actions {
-		r.applyAction(w, a, state, res)
+	claudeExcludePatterns := claudeEffectiveExclusionPatterns(r)
+	claudeCopyBefore := map[string]bool{}
+	if bridge, ok := claudePlannedBridge(actions); ok {
+		claudeCopyBefore[bridge.Path] = exists(bridge.Path)
+		for _, path := range bridge.RequiresAnyPrepared {
+			claudeCopyBefore[path] = exists(path)
+		}
 	}
+	for _, a := range actions {
+		r.applyAction(w, a, state, res, claudeExcludePatterns)
+	}
+	r.rollbackUnbridgedClaudeCopies(w, state, res, actions, claudeCopyBefore, claudeExcludePatterns)
 	res.ClaudeSharedAfter, res.ClaudeLocalAfter = r.claudeNativeLoadPaths(w, *state)
 	return nil
 }

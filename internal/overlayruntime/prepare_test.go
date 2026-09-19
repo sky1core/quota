@@ -399,7 +399,7 @@ func TestRemoveRechecksGeneratedFileBeforeDelete(t *testing.T) {
 			}
 			tc.mutate(t, target)
 			var res PrepareResult
-			r.applyAction(repo, remove, &state, &res)
+			r.applyAction(repo, remove, &state, &res, nil)
 			if len(res.Removed) != 0 || len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0].Reason, "changed") && !strings.Contains(res.Skipped[0].Reason, "user edits") && !strings.Contains(res.Skipped[0].Reason, "regular") {
 				t.Fatalf("result = %+v, want skipped removal", res)
 			}
@@ -1570,6 +1570,25 @@ func TestCheckRepositoryReportsClaudeFilesAboveCheckout(t *testing.T) {
 	}
 }
 
+func TestClaudeStartDirectoryInstructionBlocksRootAgentFallback(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	prepare(t, repo)
+	subdir := filepath.Join(repo, "subdir")
+	write(t, filepath.Join(subdir, "CLAUDE.md"), "# subdir rules\n")
+	code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": subdir, "source": "startup"})
+	ctxText := additionalContext(t, stdout)
+	if code != 0 || stderr != "" || strings.Contains(ctxText, "private body") || !strings.Contains(ctxText, filepath.Join(subdir, "CLAUDE.md")+" do not import") {
+		t.Fatalf("subdir Claude blocker was not reported: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	status, err := CheckRepository(context.Background(), subdir, "claude", CheckOptions{})
+	if err != nil || !strings.Contains(strings.Join(status.Problems, "\n"), filepath.Join(subdir, "CLAUDE.md")+" do not import") {
+		t.Fatalf("status did not report subdir Claude blocker: %+v err=%v", status, err)
+	}
+}
+
 func TestCheckRepositoryAllowsExcludedDuplicateClaudeFile(t *testing.T) {
 	testHome(t)
 	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
@@ -1963,6 +1982,464 @@ func TestLegacyClaudeBridgeIsRemovedWhenOwned(t *testing.T) {
 	res := prepare(t, repo)
 	if len(res.Removed) != 1 || res.Removed[0] != bridge || exists(bridge) {
 		t.Fatalf("legacy Claude bridge was not removed: %+v", res)
+	}
+}
+
+func TestLegacyClaudeBridgeIsPreservedWhenReplacementBridgeIsSkipped(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", "CLAUDE.local.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	legacy := filepath.Join(repo, "CLAUDE.local.md")
+	write(t, legacy, "@AGENTS.local.md\n")
+	recordGeneratedForTest(t, repo, legacy)
+	res := prepare(t, repo)
+	if contains(res.Removed, legacy) || !exists(legacy) {
+		t.Fatalf("legacy bridge was removed before replacement was ready: %+v", res)
+	}
+	var replacementSkip, preservedSkip bool
+	for _, skip := range res.Skipped {
+		if skip.Path == filepath.Join(repo, ".claude", "AGENTS.md") && strings.Contains(skip.Reason, "not git-ignored") {
+			replacementSkip = true
+		}
+		if skip.Path == legacy && strings.Contains(skip.Reason, "replacement Claude bridge was not prepared") {
+			preservedSkip = true
+		}
+	}
+	if !replacementSkip || !preservedSkip {
+		t.Fatalf("missing replacement/preserve skips: %+v", res.Skipped)
+	}
+}
+
+func TestLegacyClaudeBridgeIsPreservedWhenReplacementBridgeIsExcluded(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", "CLAUDE.local.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	write(t, filepath.Join(repo, "CLAUDE.md"), "@AGENTS.md\n")
+	replacement := filepath.Join(repo, ".claude", "CLAUDE.md")
+	settings, _ := json.Marshal(map[string]any{"claudeMdExcludes": []string{replacement}})
+	write(t, filepath.Join(repo, ".claude", "settings.local.json"), string(settings))
+	legacy := filepath.Join(repo, "CLAUDE.local.md")
+	write(t, legacy, "@AGENTS.local.md\n")
+	recordGeneratedForTest(t, repo, legacy)
+	res := prepare(t, repo)
+	if contains(res.Created, replacement) || exists(replacement) || contains(res.Removed, legacy) || !exists(legacy) {
+		t.Fatalf("legacy bridge was not preserved with excluded replacement: %+v", res)
+	}
+	var preservedSkip bool
+	for _, skip := range res.Skipped {
+		if skip.Path == legacy && strings.Contains(skip.Reason, "replacement Claude bridge was not prepared") {
+			preservedSkip = true
+		}
+	}
+	if !preservedSkip {
+		t.Fatalf("missing preserve skip: %+v", res.Skipped)
+	}
+	status, err := CheckRepository(context.Background(), repo, "claude", CheckOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	problems := strings.Join(status.Problems, "\n")
+	if !strings.Contains(problems, "replacement Claude bridge was not prepared; preserved") || strings.Contains(problems, "the next session start removes it") {
+		t.Fatalf("status did not match prepare preservation: %+v", status.Problems)
+	}
+}
+
+func TestLegacyClaudeBridgeIsPreservedWhenAgentsNativeLoadingIsDisabled(t *testing.T) {
+	home := testHome(t)
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", "CLAUDE.md", "CLAUDE.local.md")
+	write(t, filepath.Join(home, ".claude", "settings.json"), `{"pluginConfigs":{"agents-md@builtin":{"options":{"instructionFiles":"claude-md"}}}}`)
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	rootBridge := filepath.Join(repo, "CLAUDE.md")
+	localBridge := filepath.Join(repo, "CLAUDE.local.md")
+	write(t, rootBridge, "@AGENTS.md\n")
+	write(t, localBridge, "@AGENTS.local.md\n")
+	recordGeneratedForTest(t, repo, rootBridge)
+	recordGeneratedForTest(t, repo, localBridge)
+	res := prepare(t, repo)
+	if contains(res.Created, filepath.Join(repo, ".claude", "AGENTS.md")) || contains(res.Removed, rootBridge) || contains(res.Removed, localBridge) || !exists(rootBridge) || !exists(localBridge) {
+		t.Fatalf("legacy bridges were not preserved while AGENTS loading is disabled: %+v", res)
+	}
+}
+
+func TestManagedClaudeCopyStillBlocksAgentFallback(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", ".claude/AGENTS.md", "subdir/CLAUDE.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	write(t, filepath.Join(repo, "subdir", "CLAUDE.md"), "@../AGENTS.md\n")
+	if _, err := AddLocalFiles(context.Background(), repo, []string{"subdir/CLAUDE.md"}); err != nil {
+		t.Fatal(err)
+	}
+	linked := addWorktree(t, repo, "feature")
+	subdir := filepath.Join(linked, "subdir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res := prepare(t, subdir)
+	localBridge := filepath.Join(linked, ".claude", "CLAUDE.md")
+	agentsBridge := filepath.Join(linked, ".claude", "AGENTS.md")
+	managedCopy := filepath.Join(linked, "subdir", "CLAUDE.md")
+	if !contains(res.Created, localBridge) || !contains(res.Created, managedCopy) || exists(agentsBridge) || !exists(localBridge) {
+		t.Fatalf("local bridge was not selected while managed CLAUDE copy was created: %+v", res)
+	}
+	res = prepare(t, subdir)
+	if contains(res.Removed, localBridge) || contains(res.Created, agentsBridge) || !exists(localBridge) || exists(agentsBridge) {
+		t.Fatalf("managed CLAUDE copy was ignored during fallback planning: %+v", res)
+	}
+
+	repoWithMissingSource := newRepo(t)
+	write(t, filepath.Join(repoWithMissingSource, "AGENTS.local.md"), "private body\n")
+	linked = addWorktree(t, repoWithMissingSource, "missing-source")
+	prepare(t, linked)
+	sourceCopy := filepath.Join(repoWithMissingSource, "subdir", "CLAUDE.md")
+	write(t, sourceCopy, "@../AGENTS.md\n")
+	if _, err := AddLocalFiles(context.Background(), repoWithMissingSource, []string{"subdir/CLAUDE.md"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(sourceCopy); err != nil {
+		t.Fatal(err)
+	}
+	subdir = filepath.Join(linked, "subdir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agentsBridge = filepath.Join(linked, ".claude", "AGENTS.md")
+	localBridge = filepath.Join(linked, ".claude", "CLAUDE.md")
+	res = prepare(t, subdir)
+	if contains(res.Removed, agentsBridge) || contains(res.Created, localBridge) || !exists(agentsBridge) || exists(localBridge) {
+		t.Fatalf("missing managed CLAUDE source changed the active bridge: %+v", res)
+	}
+
+	linked = addWorktree(t, repo, "feature-with-bridge")
+	subdir = filepath.Join(linked, "subdir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	localBridge = filepath.Join(linked, ".claude", "CLAUDE.md")
+	agentsBridge = filepath.Join(linked, ".claude", "AGENTS.md")
+	write(t, localBridge, "@../AGENTS.local.md\n")
+	recordGeneratedForTest(t, linked, localBridge)
+	res = prepare(t, subdir)
+	if contains(res.Removed, localBridge) || contains(res.Created, agentsBridge) || !exists(localBridge) || exists(agentsBridge) || !exists(filepath.Join(linked, "subdir", "CLAUDE.md")) {
+		t.Fatalf("existing local bridge was replaced before managed CLAUDE copy was considered: %+v", res)
+	}
+}
+
+func TestManagedClaudeCopyRequiresTargetPreparation(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", ".claude/AGENTS.md")
+	repo := newRepo(t)
+	linked := addWorktree(t, repo, "target-not-ignored")
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	write(t, filepath.Join(repo, "subdir", "CLAUDE.md"), "@../AGENTS.md\n")
+	write(t, filepath.Join(repo, ".gitignore"), "AGENTS.local.md\nsubdir/CLAUDE.md\n")
+	if _, err := AddLocalFiles(context.Background(), repo, []string{"subdir/CLAUDE.md"}); err != nil {
+		t.Fatal(err)
+	}
+	subdir := filepath.Join(linked, "subdir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res := prepare(t, subdir)
+	agentsBridge := filepath.Join(linked, ".claude", "AGENTS.md")
+	localBridge := filepath.Join(linked, ".claude", "CLAUDE.md")
+	managedCopy := filepath.Join(linked, "subdir", "CLAUDE.md")
+	if !contains(res.Created, agentsBridge) || contains(res.Created, localBridge) || exists(localBridge) || exists(managedCopy) {
+		t.Fatalf("unprepared managed CLAUDE copy selected local-only bridge: %+v", res)
+	}
+	var copySkipped bool
+	for _, skip := range res.Skipped {
+		if skip.Path == managedCopy && strings.Contains(skip.Reason, "not git-ignored") {
+			copySkipped = true
+		}
+	}
+	if !copySkipped {
+		t.Fatalf("missing managed copy skip: %+v", res.Skipped)
+	}
+}
+
+func TestManagedClaudeCopyWriteFailurePreservesAgentsBridge(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", ".claude/AGENTS.md", "subdir/CLAUDE.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	linked := addWorktree(t, repo, "copy-write-fails")
+	prepare(t, linked)
+	write(t, filepath.Join(repo, "subdir", "CLAUDE.md"), "@../AGENTS.md\n")
+	if _, err := AddLocalFiles(context.Background(), repo, []string{"subdir/CLAUDE.md"}); err != nil {
+		t.Fatal(err)
+	}
+	subdir := filepath.Join(linked, "subdir")
+	if err := os.MkdirAll(subdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(subdir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(subdir, 0o700) })
+	res := prepare(t, subdir)
+	agentsBridge := filepath.Join(linked, ".claude", "AGENTS.md")
+	localBridge := filepath.Join(linked, ".claude", "CLAUDE.md")
+	managedCopy := filepath.Join(linked, "subdir", "CLAUDE.md")
+	if contains(res.Removed, agentsBridge) || contains(res.Created, localBridge) || !exists(agentsBridge) || exists(localBridge) || exists(managedCopy) {
+		t.Fatalf("copy write failure changed active bridge: %+v", res)
+	}
+	var copySkipped, bridgeSkipped, removalSkipped bool
+	for _, skip := range res.Skipped {
+		if skip.Path == managedCopy {
+			copySkipped = true
+		}
+		if skip.Path == localBridge && strings.Contains(skip.Reason, "required Claude instruction file was not prepared") {
+			bridgeSkipped = true
+		}
+		if skip.Path == agentsBridge && strings.Contains(skip.Reason, "replacement Claude bridge was not prepared") {
+			removalSkipped = true
+		}
+	}
+	if !copySkipped || !bridgeSkipped || !removalSkipped {
+		t.Fatalf("missing copy/bridge preservation skips: %+v", res.Skipped)
+	}
+}
+
+func TestManagedClaudeCopyRollsBackWhenBridgeWriteFails(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", ".claude/AGENTS.md", "subdir/CLAUDE.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	linked := addWorktree(t, repo, "bridge-write-fails")
+	prepare(t, linked)
+	write(t, filepath.Join(repo, "subdir", "CLAUDE.md"), "@../AGENTS.md\n")
+	if _, err := AddLocalFiles(context.Background(), repo, []string{"subdir/CLAUDE.md"}); err != nil {
+		t.Fatal(err)
+	}
+	claudeDir := filepath.Join(linked, ".claude")
+	if err := os.Chmod(claudeDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(claudeDir, 0o700) })
+	subdir := filepath.Join(linked, "subdir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res := prepare(t, subdir)
+	agentsBridge := filepath.Join(linked, ".claude", "AGENTS.md")
+	localBridge := filepath.Join(linked, ".claude", "CLAUDE.md")
+	managedCopy := filepath.Join(linked, "subdir", "CLAUDE.md")
+	if exists(managedCopy) || exists(localBridge) || !exists(agentsBridge) || contains(res.Removed, agentsBridge) {
+		t.Fatalf("bridge write failure left a CLAUDE blocker: %+v", res)
+	}
+	var rolledBack bool
+	for _, skip := range res.Skipped {
+		if skip.Path == managedCopy && strings.Contains(skip.Reason, "rolled back") {
+			rolledBack = true
+		}
+	}
+	if !rolledBack {
+		t.Fatalf("missing managed copy rollback skip: %+v", res.Skipped)
+	}
+}
+
+func TestManagedClaudeCopyRollsBackWhenLocalCopyMissing(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", ".claude/AGENTS.md", "subdir/CLAUDE.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	linked := addWorktree(t, repo, "local-copy-missing")
+	prepare(t, linked)
+	localCopy := filepath.Join(linked, "AGENTS.local.md")
+	if err := os.Remove(localCopy); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(repo, "subdir", "CLAUDE.md"), "@../AGENTS.md\n")
+	if _, err := AddLocalFiles(context.Background(), repo, []string{"subdir/CLAUDE.md"}); err != nil {
+		t.Fatal(err)
+	}
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", ".claude/CLAUDE.md", "subdir/CLAUDE.md")
+	write(t, filepath.Join(linked, ".gitignore"), "")
+	subdir := filepath.Join(linked, "subdir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	status, err := CheckRepository(context.Background(), subdir, "claude", CheckOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	localBridge := filepath.Join(linked, ".claude", "CLAUDE.md")
+	managedCopy := filepath.Join(linked, "subdir", "CLAUDE.md")
+	problems := strings.Join(status.Problems, "\n")
+	if strings.Contains(problems, localBridge+" is not prepared yet; the next session start creates it") || strings.Contains(problems, managedCopy+" is not prepared yet; the next session start creates it") {
+		t.Fatalf("status predicted bridge creation without local copy: %+v", status.Problems)
+	}
+	res := prepare(t, subdir)
+	if exists(localCopy) || exists(localBridge) || exists(managedCopy) {
+		t.Fatalf("local-missing prepare left invalid Claude path: %+v", res)
+	}
+	var rolledBack bool
+	for _, skip := range res.Skipped {
+		if skip.Path == managedCopy && strings.Contains(skip.Reason, "rolled back") {
+			rolledBack = true
+		}
+	}
+	if !rolledBack {
+		t.Fatalf("missing managed copy rollback after local skip: %+v", res.Skipped)
+	}
+}
+
+func TestExistingClaudeFileDoesNotDependOnPlannedCopy(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", ".claude/CLAUDE.md", "subdir/CLAUDE.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "CLAUDE.md"), "@AGENTS.md\n")
+	git(t, repo, "add", "CLAUDE.md")
+	git(t, repo, "commit", "-q", "-m", "add claude bridge")
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	write(t, filepath.Join(repo, "subdir", "CLAUDE.md"), "@../AGENTS.md\n")
+	if _, err := AddLocalFiles(context.Background(), repo, []string{"subdir/CLAUDE.md"}); err != nil {
+		t.Fatal(err)
+	}
+	linked := addWorktree(t, repo, "existing-claude")
+	subdir := filepath.Join(linked, "subdir")
+	if err := os.MkdirAll(subdir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(subdir, 0o700) })
+	res := prepare(t, subdir)
+	localBridge := filepath.Join(linked, ".claude", "CLAUDE.md")
+	managedCopy := filepath.Join(linked, "subdir", "CLAUDE.md")
+	if !contains(res.Created, localBridge) || !exists(localBridge) || exists(managedCopy) {
+		t.Fatalf("existing CLAUDE file did not get local bridge independently: %+v", res)
+	}
+}
+
+func TestPartialManagedClaudeCopySuccessCreatesLocalBridge(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", ".claude/AGENTS.md", "subdir/CLAUDE.md", "subdir/deep/CLAUDE.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	linked := addWorktree(t, repo, "partial-copy")
+	prepare(t, linked)
+	write(t, filepath.Join(repo, "subdir", "CLAUDE.md"), "@../AGENTS.md\n")
+	write(t, filepath.Join(repo, "subdir", "deep", "CLAUDE.md"), "@../../AGENTS.md\n")
+	if _, err := AddLocalFiles(context.Background(), repo, []string{"subdir/CLAUDE.md", "subdir/deep/CLAUDE.md"}); err != nil {
+		t.Fatal(err)
+	}
+	subdir := filepath.Join(linked, "subdir")
+	deep := filepath.Join(subdir, "deep")
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(deep, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(deep, 0o700) })
+	res := prepare(t, deep)
+	agentsBridge := filepath.Join(linked, ".claude", "AGENTS.md")
+	localBridge := filepath.Join(linked, ".claude", "CLAUDE.md")
+	if !contains(res.Created, filepath.Join(linked, "subdir", "CLAUDE.md")) || !contains(res.Created, localBridge) || contains(res.Removed, localBridge) || !exists(localBridge) {
+		t.Fatalf("successful CLAUDE copy did not activate local bridge: %+v", res)
+	}
+	if !contains(res.Removed, agentsBridge) || exists(agentsBridge) || exists(filepath.Join(linked, "subdir", "deep", "CLAUDE.md")) {
+		t.Fatalf("old bridge or failed copy state is wrong: %+v", res)
+	}
+}
+
+func TestManagedClaudeCopyWaitsForClaudeBridgeTarget(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", ".claude/AGENTS.md", "subdir/CLAUDE.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	linked := addWorktree(t, repo, "bridge-target-skipped")
+	prepare(t, linked)
+	write(t, filepath.Join(repo, "subdir", "CLAUDE.md"), "@../AGENTS.md\n")
+	if _, err := AddLocalFiles(context.Background(), repo, []string{"subdir/CLAUDE.md"}); err != nil {
+		t.Fatal(err)
+	}
+	globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", "subdir/CLAUDE.md")
+	subdir := filepath.Join(linked, "subdir")
+	localBridge := filepath.Join(linked, ".claude", "CLAUDE.md")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	status, err := CheckRepository(context.Background(), subdir, "claude", CheckOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	problems := strings.Join(status.Problems, "\n")
+	if strings.Contains(problems, localBridge+" is not prepared yet; the next session start creates it") {
+		t.Fatalf("status predicted skipped bridge creation: %+v", status.Problems)
+	}
+	res := prepare(t, subdir)
+	agentsBridge := filepath.Join(linked, ".claude", "AGENTS.md")
+	managedCopy := filepath.Join(linked, "subdir", "CLAUDE.md")
+	if exists(managedCopy) || exists(localBridge) || !exists(agentsBridge) || contains(res.Removed, agentsBridge) {
+		t.Fatalf("managed CLAUDE copy was created without a usable local bridge: %+v", res)
+	}
+	var copySkipped bool
+	for _, skip := range res.Skipped {
+		if skip.Path == managedCopy && strings.Contains(skip.Reason, "replacement Claude bridge was not prepared") {
+			copySkipped = true
+		}
+	}
+	if !copySkipped {
+		t.Fatalf("missing managed copy preservation skip: %+v", res.Skipped)
+	}
+}
+
+func TestStatusSkipsBridgeWhenExcludedBridgeSkipsDependentCopy(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", ".claude/AGENTS.md", "subdir/CLAUDE.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	write(t, filepath.Join(repo, "subdir", "CLAUDE.md"), "@../AGENTS.md\n")
+	if _, err := AddLocalFiles(context.Background(), repo, []string{"subdir/CLAUDE.md"}); err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(repo, ".claude", "CLAUDE.md")
+	settings, _ := json.Marshal(map[string]any{"claudeMdExcludes": []string{replacement}})
+	write(t, filepath.Join(repo, ".claude", "settings.local.json"), string(settings))
+	status, err := CheckRepository(context.Background(), filepath.Join(repo, "subdir"), "claude", CheckOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	problems := strings.Join(status.Problems, "\n")
+	if strings.Contains(problems, replacement+" is not prepared yet; the next session start creates it") || !strings.Contains(problems, "required Claude instruction file was not prepared; preserved") {
+		t.Fatalf("status did not skip excluded dependent bridge: %+v", status.Problems)
+	}
+	res := prepare(t, filepath.Join(repo, "subdir"))
+	if exists(replacement) {
+		t.Fatalf("prepare created excluded bridge or dependent copy: %+v", res)
+	}
+}
+
+func TestSkippedReplacementBridgeDoesNotRemoveLegacyBridge(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	write(t, filepath.Join(repo, "CLAUDE.md"), "@AGENTS.md\n")
+	git(t, repo, "add", "CLAUDE.md")
+	git(t, repo, "commit", "-q", "-m", "add claude bridge")
+	replacement := filepath.Join(repo, ".claude", "CLAUDE.md")
+	legacy := filepath.Join(repo, "CLAUDE.local.md")
+	write(t, replacement, "@../AGENTS.local.md\n")
+	write(t, legacy, "@AGENTS.local.md\n")
+	recordGeneratedForTest(t, repo, replacement)
+	recordGeneratedForTest(t, repo, legacy)
+	globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", "CLAUDE.local.md")
+	status, err := CheckRepository(context.Background(), repo, "claude", CheckOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	problems := strings.Join(status.Problems, "\n")
+	if !strings.Contains(problems, "replacement Claude bridge was not prepared; preserved") || strings.Contains(problems, legacy+" is a stale generated file; the next session start removes it") {
+		t.Fatalf("status did not preserve skipped replacement: %+v", status.Problems)
+	}
+	res := prepare(t, repo)
+	if contains(res.Removed, legacy) || !exists(legacy) {
+		t.Fatalf("legacy bridge was removed after skipped replacement: %+v", res)
 	}
 }
 

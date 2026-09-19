@@ -15,9 +15,9 @@ import (
 func TestSessionLogAccountsUseConfiguredRoots(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude-two"))
 	t.Setenv("CLAUDE_PROJECTS_DIR", "")
-	t.Setenv("CODEX_HOME", "")
+	t.Setenv("CODEX_HOME", filepath.Join(home, "codex-two"))
 	t.Setenv("CODEX_SESSIONS_DIR", "")
 
 	cfg := config.Config{
@@ -42,6 +42,62 @@ func TestSessionLogAccountsUseConfiguredRoots(t *testing.T) {
 		if got[key] != root {
 			t.Fatalf("%s root = %q, want %q", key, got[key], root)
 		}
+	}
+}
+
+func TestSessionLogAccountsRejectDuplicateClaudeLogRoots(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "caller-claude-config"))
+	t.Setenv("CLAUDE_PROJECTS_DIR", "")
+
+	cfg := config.Config{
+		ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude"}},
+	}
+	_, err := sessionLogAccounts(cfg, "claude", "")
+	if err == nil || !strings.Contains(err.Error(), "duplicate key or session log root") {
+		t.Fatalf("sessionLogAccounts error = %v, want duplicate log root", err)
+	}
+}
+
+func TestSessionLogDefaultClaudeIgnoresInheritedConfigDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "caller-claude-config"))
+	t.Setenv("CLAUDE_PROJECTS_DIR", "")
+
+	got := claudeDefaultSessionLogRoot()
+	want := filepath.Join(home, ".claude", "projects")
+	if got != want {
+		t.Fatalf("default Claude session log root = %q, want %q", got, want)
+	}
+}
+
+func TestSessionLogAccountsRejectDuplicateCodexLogRoots(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, "caller-codex-home"))
+	t.Setenv("CODEX_SESSIONS_DIR", "")
+
+	cfg := config.Config{
+		CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: "~/.codex"}},
+	}
+	_, err := sessionLogAccounts(cfg, "codex", "")
+	if err == nil || !strings.Contains(err.Error(), "duplicate key or session log root") {
+		t.Fatalf("sessionLogAccounts error = %v, want duplicate log root", err)
+	}
+}
+
+func TestSessionLogDefaultCodexIgnoresInheritedHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, "caller-codex-home"))
+	t.Setenv("CODEX_SESSIONS_DIR", "")
+
+	got := codexDefaultSessionLogRoot()
+	want := filepath.Join(home, ".codex", "sessions")
+	if got != want {
+		t.Fatalf("default Codex session log root = %q, want %q", got, want)
 	}
 }
 

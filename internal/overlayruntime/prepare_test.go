@@ -963,7 +963,7 @@ func TestSessionStartReportsClaudeMDOnlyInstructionFiles(t *testing.T) {
 	write(t, filepath.Join(home, ".claude", "settings.json"), `{"pluginConfigs":{"agents-md@builtin":{"options":{"instructionFiles":"claude-md"}}}}`)
 	code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
 	context := additionalContext(t, stdout)
-	if code != 0 || stderr != "" || strings.Contains(context, "private body") || !strings.Contains(context, "instructionFiles=claude-md") {
+	if code != 0 || stderr != "" || strings.Contains(context, "private body") || !strings.Contains(context, "claude-md disables") {
 		t.Fatalf("claude-md-only setting was not reported: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
@@ -979,8 +979,48 @@ func TestSessionStartReportsClaudeMDOnlyInstructionFilesForLocalOnlyRepo(t *test
 	write(t, filepath.Join(home, ".claude", "settings.json"), `{"pluginConfigs":{"agents-md@builtin":{"options":{"instructionFiles":"claude-md"}}}}`)
 	code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
 	context := additionalContext(t, stdout)
-	if code != 0 || stderr != "" || strings.Contains(context, "private body") || !strings.Contains(context, "instructionFiles=claude-md") {
+	if code != 0 || stderr != "" || strings.Contains(context, "private body") || !strings.Contains(context, "claude-md disables") {
 		t.Fatalf("local-only claude-md setting was not reported: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
+func TestSessionStartReportsManagedOnlyInstructionFiles(t *testing.T) {
+	home := testHome(t)
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", ".claude/CLAUDE.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	write(t, filepath.Join(home, ".claude", "settings.json"), `{"pluginConfigs":{"agents-md@builtin":{"options":{"instructionFiles":"managed-only"}}}}`)
+	code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
+	context := additionalContext(t, stdout)
+	if code != 0 || stderr != "" || strings.Contains(context, "private body") || !strings.Contains(context, "managed-only") {
+		t.Fatalf("managed-only setting was not reported: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if exists(filepath.Join(repo, ".claude", "AGENTS.md")) || exists(filepath.Join(repo, ".claude", "CLAUDE.md")) {
+		t.Fatalf("managed-only mode created a Claude bridge")
+	}
+
+	write(t, filepath.Join(home, ".claude", "settings.json"), `{"pluginConfigs":{"agents-md@builtin":{"options":{"projectInstructions":"none"}}}}`)
+	code, stdout, stderr = hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
+	context = additionalContext(t, stdout)
+	if code != 0 || stderr != "" || strings.Contains(context, "private body") || !strings.Contains(context, "managed-only") {
+		t.Fatalf("legacy managed-only setting was not reported: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
+func TestClaudeAndAgentsModeAllowsClaudeFileWithoutSharedImport(t *testing.T) {
+	home := testHome(t)
+	globalIgnore(t, "AGENTS.override.md", ".claude/CLAUDE.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	write(t, filepath.Join(repo, "CLAUDE.md"), "# project instructions\n")
+	write(t, filepath.Join(home, ".claude", "settings.json"), `{"pluginConfigs":{"agents-md@builtin":{"options":{"instructionFiles":"claude-md-and-agents-md"}}}}`)
+	code, stdout, stderr := hook(t, "claude", "SessionStart", map[string]any{"cwd": repo, "source": "startup"})
+	context := additionalContext(t, stdout)
+	if code != 0 || stderr != "" || strings.Contains(context, "do not import") || context != "private body" {
+		t.Fatalf("claude-and mode was incorrectly blocked: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if !exists(filepath.Join(repo, ".claude", "CLAUDE.md")) {
+		t.Fatalf("claude-and mode did not create the local bridge")
 	}
 }
 
@@ -2128,6 +2168,39 @@ func TestManagedClaudeCopyStillBlocksAgentFallback(t *testing.T) {
 	}
 }
 
+func TestUnregisteredManagedClaudeCopyNoLongerBlocksAgentFallback(t *testing.T) {
+	testHome(t)
+	globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", ".claude/AGENTS.md", ".claude/CLAUDE.md", "subdir/CLAUDE.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	write(t, filepath.Join(repo, "subdir", "CLAUDE.md"), "@../AGENTS.md\n")
+	if _, err := AddLocalFiles(context.Background(), repo, []string{"subdir/CLAUDE.md"}); err != nil {
+		t.Fatal(err)
+	}
+	linked := addWorktree(t, repo, "unregister-claude-copy")
+	subdir := filepath.Join(linked, "subdir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prepare(t, subdir)
+	localBridge := filepath.Join(linked, ".claude", "CLAUDE.md")
+	agentsBridge := filepath.Join(linked, ".claude", "AGENTS.md")
+	managedCopy := filepath.Join(linked, "subdir", "CLAUDE.md")
+	if !exists(localBridge) || !exists(managedCopy) || exists(agentsBridge) {
+		t.Fatalf("initial managed copy setup did not select local bridge")
+	}
+	if _, err := RemoveLocalFiles(context.Background(), repo, []string{"subdir/CLAUDE.md"}); err != nil {
+		t.Fatal(err)
+	}
+	res := prepare(t, subdir)
+	if !contains(res.Created, agentsBridge) || !contains(res.Removed, localBridge) || !contains(res.Removed, managedCopy) {
+		t.Fatalf("unregistered managed copy still affected bridge plan: %+v", res)
+	}
+	if exists(localBridge) || exists(managedCopy) || !exists(agentsBridge) {
+		t.Fatalf("unregistered managed copy left the wrong Claude bridge")
+	}
+}
+
 func TestManagedClaudeCopyRequiresTargetPreparation(t *testing.T) {
 	testHome(t)
 	globalIgnore(t, "AGENTS.override.md", "AGENTS.local.md", ".claude/AGENTS.md")
@@ -2277,14 +2350,14 @@ func TestManagedClaudeCopyRollsBackWhenLocalCopyMissing(t *testing.T) {
 	if exists(localCopy) || exists(localBridge) || exists(managedCopy) {
 		t.Fatalf("local-missing prepare left invalid Claude path: %+v", res)
 	}
-	var rolledBack bool
+	var preserved bool
 	for _, skip := range res.Skipped {
-		if skip.Path == managedCopy && strings.Contains(skip.Reason, "rolled back") {
-			rolledBack = true
+		if skip.Path == managedCopy && strings.Contains(skip.Reason, "replacement Claude bridge was not prepared") {
+			preserved = true
 		}
 	}
-	if !rolledBack {
-		t.Fatalf("missing managed copy rollback after local skip: %+v", res.Skipped)
+	if !preserved {
+		t.Fatalf("missing managed copy preservation after local skip: %+v", res.Skipped)
 	}
 }
 

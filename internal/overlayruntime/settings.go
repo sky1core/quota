@@ -140,15 +140,65 @@ func claudeInstructionFilesOption(data map[string]any) (string, bool) {
 	return value, ok
 }
 
-func claudeEffectiveInstructionFilesOption(r repoContext) (string, bool) {
+func claudeProjectInstructionsOption(data map[string]any) (string, bool) {
+	plugins, ok := data["pluginConfigs"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	plugin, ok := plugins["agents-md@builtin"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	options, ok := plugin["options"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	value, ok := options["projectInstructions"].(string)
+	return value, ok
+}
+
+const (
+	claudeModeClaudeOnly    = "claude-md"
+	claudeModeAgentsDefault = "claude-md-or-agents-md"
+	claudeModeClaudeAnd     = "claude-md-and-agents-md"
+	claudeModeManagedOnly   = "managed-only"
+)
+
+func claudeInstructionMode(data map[string]any) (string, bool) {
+	if value, ok := claudeInstructionFilesOption(data); ok {
+		switch value {
+		case claudeModeClaudeOnly, claudeModeAgentsDefault, claudeModeClaudeAnd, claudeModeManagedOnly:
+			return value, true
+		default:
+			return claudeModeAgentsDefault, true
+		}
+	}
+	if value, ok := claudeProjectInstructionsOption(data); ok {
+		switch value {
+		case "none":
+			return claudeModeManagedOnly, true
+		case "claude":
+			return claudeModeClaudeOnly, true
+		case "agents-fallback":
+			return claudeModeAgentsDefault, true
+		case "both":
+			return claudeModeClaudeAnd, true
+		default:
+			return claudeModeClaudeOnly, true
+		}
+	}
+	return claudeModeAgentsDefault, false
+}
+
+func claudeEffectiveInstructionMode(r repoContext) (string, bool) {
 	var problems []string
 	for _, session := range claudeSessionSettings(r) {
 		if len(session.Paths) == 0 {
 			continue
 		}
-		return claudeInstructionFilesOption(readJSONSettingsLayer(session.Paths[0], &problems).data)
+		return claudeInstructionMode(readJSONSettingsLayer(session.Paths[0], &problems).data)
 	}
-	return "", false
+	return claudeModeAgentsDefault, false
 }
 
 func claudeEffectiveExclusionPatterns(r repoContext) []string {
@@ -227,7 +277,7 @@ func claudeExclusionFindings(patterns []string, instructionFile string) []string
 	return problems
 }
 
-func claudeInstructionFileFindings(r repoContext) []string {
+func claudeInstructionFileFindings(r repoContext, mode string) []string {
 	if !exists(filepath.Join(r.Top, sharedRule)) && !exists(r.localSource()) {
 		return nil
 	}
@@ -245,7 +295,7 @@ func claudeInstructionFileFindings(r repoContext) []string {
 		return uniqueStrings(problems...)
 	}
 	shared := filepath.Join(r.Top, sharedRule)
-	if exists(shared) {
+	if exists(shared) && mode != claudeModeClaudeAnd && mode != claudeModeManagedOnly {
 		imported, err := claudeFilesImportTarget(projectClaude, shared)
 		if err != nil {
 			problems = append(problems, err.Error())
@@ -274,14 +324,15 @@ func claudeSettingsFindings(r repoContext) []string {
 	if err != nil {
 		return []string{err.Error()}
 	}
-	problems = append(problems, claudeInstructionFileFindings(r)...)
+	effectiveMode, _ := claudeEffectiveInstructionMode(r)
+	problems = append(problems, claudeInstructionFileFindings(r, effectiveMode)...)
 	for _, session := range claudeSessionSettings(r) {
 		var layers []settingsLayer
 		for _, path := range session.Paths {
 			layers = append(layers, readJSONSettingsLayer(path, &problems))
 		}
 		var disabled sourcedSetting
-		var instructionFiles sourcedSetting
+		instructionMode := sourcedSetting{value: effectiveMode}
 		var patterns []string
 		for index, layer := range layers {
 			hooks, err := agenthooks.ClaudeInstructionHooks(layer.data, executable)
@@ -299,8 +350,8 @@ func claudeSettingsFindings(r repoContext) []string {
 				disabled = sourcedSetting{value, layer.path}
 			}
 			if index == 0 {
-				if value, ok := claudeInstructionFilesOption(layer.data); ok {
-					instructionFiles = sourcedSetting{value, layer.path}
+				if value, ok := claudeInstructionMode(layer.data); ok {
+					instructionMode = sourcedSetting{value, layer.path}
 				}
 			}
 			if value, ok := layer.data["claudeMdExcludes"]; ok {
@@ -338,12 +389,15 @@ func claudeSettingsFindings(r repoContext) []string {
 		}
 		shared := filepath.Join(session.Worktree, sharedRule)
 		localSourcePresent := exists(r.localSource())
-		if instructionFiles.value == "claude-md" && len(projectClaude) == 0 && (exists(shared) || localSourcePresent) {
-			problems = append(problems, instructionFiles.path+": pluginConfigs.agents-md@builtin.options.instructionFiles=claude-md disables AGENTS.md native loading and no Claude project instruction file imports "+sharedRule+" or "+localRule)
+		if instructionMode.value == claudeModeManagedOnly && (exists(shared) || localSourcePresent || len(projectClaude) != 0) {
+			problems = append(problems, instructionMode.path+": Claude instruction mode managed-only drops project and local instruction files")
+		}
+		if instructionMode.value == claudeModeClaudeOnly && len(projectClaude) == 0 && (exists(shared) || localSourcePresent) {
+			problems = append(problems, instructionMode.path+": Claude instruction mode claude-md disables AGENTS.md native loading and no Claude project instruction file imports "+sharedRule+" or "+localRule)
 		}
 		if exists(shared) {
 			problems = append(problems, claudeExclusionFindings(patterns, shared)...)
-			if len(projectClaude) != 0 {
+			if len(projectClaude) != 0 && instructionMode.value != claudeModeClaudeAnd && instructionMode.value != claudeModeManagedOnly {
 				imported := false
 				imported, err = claudeFilesImportTarget(loadedProjectClaude, shared)
 				if err != nil {

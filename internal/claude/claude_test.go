@@ -50,7 +50,9 @@ func TestGetQuotaForConfigDirReturnsWhenCacheLockBusy(t *testing.T) {
 	t.Setenv("HOME", home)
 	binDir := t.TempDir()
 	claudePath := filepath.Join(binDir, "claude")
-	script := "#!/bin/sh\nprintf '%s\\n' '{\"result\":\"Current session: 10% used\\n\",\"is_error\":false}'\n"
+	marker := filepath.Join(t.TempDir(), "probe-done")
+	t.Setenv("QUOTA_TEST_MARKER", marker)
+	script := "#!/bin/sh\n: > \"$QUOTA_TEST_MARKER\"\nprintf '%s\\n' '{\"result\":\"Current session: 10% used\\n\",\"is_error\":false}'\n"
 	if err := os.WriteFile(claudePath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -70,12 +72,15 @@ func TestGetQuotaForConfigDirReturnsWhenCacheLockBusy(t *testing.T) {
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 
-	start := time.Now()
 	result, err := GetQuotaForConfigDir(5*time.Second, t.TempDir(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
+	probeDone, err := os.Stat(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(probeDone.ModTime()); elapsed > 2*time.Second {
 		t.Fatalf("quota probe waited on cache lock for %s", elapsed)
 	}
 	session, ok := windowByKey(result, "session")

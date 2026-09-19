@@ -40,11 +40,13 @@ func TestGetQuotaForHomeReturnsWhenCacheLockBusy(t *testing.T) {
 	t.Setenv("HOME", home)
 	binDir := t.TempDir()
 	codexPath := filepath.Join(binDir, "codex")
+	marker := filepath.Join(t.TempDir(), "probe-done")
+	t.Setenv("QUOTA_TEST_MARKER", marker)
 	script := `#!/bin/sh
 while IFS= read -r line; do
 	case "$line" in
 		*'"id":1'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}' ;;
-		*'"id":2'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300}}}}'; exit 0 ;;
+		*'"id":2'*) : > "$QUOTA_TEST_MARKER"; printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300}}}}'; exit 0 ;;
 	esac
 done
 `
@@ -67,12 +69,15 @@ done
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 
-	start := time.Now()
 	result, err := GetQuotaForHome(5*time.Second, t.TempDir(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
+	probeDone, err := os.Stat(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(probeDone.ModTime()); elapsed > 2*time.Second {
 		t.Fatalf("quota probe waited on cache lock for %s", elapsed)
 	}
 	windows := windowsOf(t, result)

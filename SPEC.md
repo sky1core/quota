@@ -292,8 +292,8 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 
 - 세션 로그 조회는 읽기 전용이다. 로그 파일을 삭제, 이동, 수정, compact하지 않는다.
 - 기본 범위는 `agent=all`이며 `account`를 지정하면 해당 key만 본다. `claude-2`, `codex-2` 같은 추가 계정은 기존 `config.json` 계정 설정에서 로그 root를 계산한다.
-- Claude 기본 계정 로그 root는 `CLAUDE_PROJECTS_DIR`, `CLAUDE_CONFIG_DIR/projects`, `~/.claude/projects` 순서로 정한다. 추가 Claude 계정은 `<configDir>/projects`를 본다.
-- Codex 기본 계정 로그 root는 `CODEX_SESSIONS_DIR`, `CODEX_HOME/sessions`, `~/.codex/sessions` 순서로 정한다. 추가 Codex 계정은 `<home>/sessions`를 본다.
+- Claude 기본 계정 로그 root는 `CLAUDE_PROJECTS_DIR`, `~/.claude/projects` 순서로 정한다. 호출자 환경의 `CLAUDE_CONFIG_DIR`는 기본 세션 로그 조회에 영향을 주지 않는다. 추가 Claude 계정은 등록된 `<configDir>/projects`를 본다.
+- Codex 기본 계정 로그 root는 `CODEX_SESSIONS_DIR`, `~/.codex/sessions` 순서로 정한다. 호출자 환경의 `CODEX_HOME`은 기본 세션 로그 조회에 영향을 주지 않는다. 추가 Codex 계정은 등록된 `<home>/sessions`를 본다.
 - 기본 출력은 user/assistant 메시지 텍스트만 포함한다. tool call/result 원문은 `--include-tools`가 있을 때만 검색/출력한다.
 - 토큰 소모를 제한하기 위해 `search` 기본값은 `limit=20`, `max-chars=220`이고, `show` 기본값은 `tail=40`, `max-chars=880`이다. `max-chars=0`은 해당 truncation을 끈다.
 - `show`의 `session-ref`는 configured 로그 root 아래 파일의 정확한 path, basename, 또는 path 부분 문자열로 해석한다. 여러 파일이 맞으면 후보를 출력하고 실패한다.

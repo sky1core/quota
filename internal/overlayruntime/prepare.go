@@ -216,7 +216,8 @@ func (r repoContext) claudeInstructionFiles(w string, state RepositoryState, ign
 			}
 			if ignoreOwnedGenerated && within(path, w) {
 				checkoutRel, err := filepath.Rel(w, path)
-				if err == nil && isClaudeBridgeRel(checkoutRel) {
+				sourceRel := filepath.ToSlash(checkoutRel)
+				if err == nil && (isClaudeBridgeRel(checkoutRel) || !contains(state.LocalFiles, sourceRel) || local == nil) {
 					_, _, _, owned, problem := inspectGeneratedWithStat(path, state)
 					if owned && problem == nil {
 						tracked, err := r.tracked(w, checkoutRel)
@@ -722,8 +723,12 @@ func (r repoContext) claudePreparedBridgeReady(w string, state RepositoryState, 
 }
 
 func (r repoContext) claudeBridgeSettingsAllow(plan generatedFile, excludePatterns []string) bool {
+	mode, _ := claudeEffectiveInstructionMode(r)
+	if mode == claudeModeManagedOnly {
+		return false
+	}
 	if plan.Rel == claudeAgentsRule {
-		if value, ok := claudeEffectiveInstructionFilesOption(r); ok && value == "claude-md" {
+		if mode == claudeModeClaudeOnly {
 			return false
 		}
 	}
@@ -988,6 +993,7 @@ func (r repoContext) prepareCheckoutFiles(w string, state *RepositoryState, res 
 	if err != nil {
 		return err
 	}
+	actions = r.statusActions(w, *state, actions)
 	res.LocalPresent, res.LocalBody = local != nil, text
 	if shared, err := readSharedSource(w); err == nil && shared != nil {
 		res.SharedBody, _ = decodeRule(shared, filepath.Join(w, sharedRule))

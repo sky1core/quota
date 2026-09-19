@@ -298,22 +298,18 @@ func sessionLogAccounts(cfg config.Config, agent, account string) ([]sessionLogA
 	}
 	var accounts []sessionLogAccount
 	if agent == "all" || agent == "claude" {
-		claudeAccounts, skipped := cfg.ResolveAccounts()
+		claudeAccounts, skipped := claudeSessionLogAccounts(cfg)
 		if len(skipped) > 0 {
 			return nil, fmt.Errorf("invalid Claude account config: %s", strings.Join(skipped, "; "))
 		}
-		for _, a := range claudeAccounts {
-			accounts = append(accounts, sessionLogAccount{Provider: "claude", Key: a.Key, Root: claudeSessionLogRoot(a.ConfigDir)})
-		}
+		accounts = append(accounts, claudeAccounts...)
 	}
 	if agent == "all" || agent == "codex" {
-		codexAccounts, skipped := cfg.ResolveCodexAccounts()
+		codexAccounts, skipped := codexSessionLogAccounts(cfg)
 		if len(skipped) > 0 {
 			return nil, fmt.Errorf("invalid Codex account config: %s", strings.Join(skipped, "; "))
 		}
-		for _, a := range codexAccounts {
-			accounts = append(accounts, sessionLogAccount{Provider: "codex", Key: a.Key, Root: codexSessionLogRoot(a.Home)})
-		}
+		accounts = append(accounts, codexAccounts...)
 	}
 	if account == "" {
 		return accounts, nil
@@ -330,29 +326,112 @@ func sessionLogAccounts(cfg config.Config, agent, account string) ([]sessionLogA
 	return filtered, nil
 }
 
-func claudeSessionLogRoot(configDir string) string {
-	if configDir != "" {
-		return filepath.Join(configDir, "projects")
+type sessionLogCandidate struct {
+	key  string
+	root string
+	err  error
+}
+
+func claudeSessionLogAccounts(cfg config.Config) ([]sessionLogAccount, []string) {
+	candidates := []sessionLogCandidate{{key: "claude", root: claudeDefaultSessionLogRoot()}}
+	for _, a := range cfg.ClaudeAccounts {
+		root, err := claudeConfigSessionLogRoot(a.ConfigDir)
+		candidates = append(candidates, sessionLogCandidate{key: a.Key, root: root, err: err})
 	}
+	return resolveSessionLogProviderAccounts("claude", candidates, config.ClaudeExtraKeyRe.MatchString)
+}
+
+func codexSessionLogAccounts(cfg config.Config) ([]sessionLogAccount, []string) {
+	candidates := []sessionLogCandidate{{key: "codex", root: codexDefaultSessionLogRoot()}}
+	for _, a := range cfg.CodexAccounts {
+		root, err := codexHomeSessionLogRoot(a.Home)
+		candidates = append(candidates, sessionLogCandidate{key: a.Key, root: root, err: err})
+	}
+	return resolveSessionLogProviderAccounts("codex", candidates, config.CodexExtraKeyRe.MatchString)
+}
+
+func resolveSessionLogProviderAccounts(provider string, candidates []sessionLogCandidate, validExtraKey func(string) bool) ([]sessionLogAccount, []string) {
+	keys := map[string]int{}
+	roots := make([]string, len(candidates))
+	rootCounts := map[string]int{}
+	valid := make([]bool, len(candidates))
+	var skipped []string
+	for i, c := range candidates {
+		if i > 0 && !validExtraKey(c.key) {
+			skipped = append(skipped, fmt.Sprintf("%s account key %q must match %s-<N>, skipped", provider, c.key, provider))
+			continue
+		}
+		keys[c.key]++
+		if c.err != nil {
+			skipped = append(skipped, fmt.Sprintf("%s account %q directory is invalid: %v, skipped", provider, c.key, c.err))
+			continue
+		}
+		root, err := sessionLogCanonicalRoot(c.root)
+		if err != nil {
+			skipped = append(skipped, fmt.Sprintf("%s account %q session log root is invalid: %v, skipped", provider, c.key, err))
+			continue
+		}
+		roots[i] = root
+		rootCounts[root]++
+		valid[i] = true
+	}
+
+	var accounts []sessionLogAccount
+	for i, c := range candidates {
+		if !valid[i] {
+			continue
+		}
+		if keys[c.key] > 1 || rootCounts[roots[i]] > 1 {
+			skipped = append(skipped, fmt.Sprintf("%s account %q has a duplicate key or session log root; ownership is ambiguous, skipped", provider, c.key))
+			continue
+		}
+		accounts = append(accounts, sessionLogAccount{Provider: provider, Key: c.key, Root: c.root})
+	}
+	return accounts, skipped
+}
+
+func claudeConfigSessionLogRoot(configDir string) (string, error) {
+	if _, err := config.CanonicalAccountDirectory(configDir); err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(config.ExpandTilde(configDir))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Clean(abs), "projects"), nil
+}
+
+func codexHomeSessionLogRoot(homeDir string) (string, error) {
+	if _, err := config.CanonicalAccountDirectory(homeDir); err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(config.ExpandTilde(homeDir))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Clean(abs), "sessions"), nil
+}
+
+func sessionLogCanonicalRoot(root string) (string, error) {
+	expanded := config.ExpandTilde(root)
+	abs, err := filepath.Abs(expanded)
+	if err != nil {
+		return "", err
+	}
+	return config.CanonicalAccountDirectory(abs)
+}
+
+func claudeDefaultSessionLogRoot() string {
 	if override := strings.TrimSpace(os.Getenv("CLAUDE_PROJECTS_DIR")); override != "" {
 		return config.ExpandTilde(override)
-	}
-	if envDir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); envDir != "" {
-		return filepath.Join(config.ExpandTilde(envDir), "projects")
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".claude", "projects")
 }
 
-func codexSessionLogRoot(homeDir string) string {
-	if homeDir != "" {
-		return filepath.Join(homeDir, "sessions")
-	}
+func codexDefaultSessionLogRoot() string {
 	if override := strings.TrimSpace(os.Getenv("CODEX_SESSIONS_DIR")); override != "" {
 		return config.ExpandTilde(override)
-	}
-	if envHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); envHome != "" {
-		return filepath.Join(config.ExpandTilde(envHome), "sessions")
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".codex", "sessions")

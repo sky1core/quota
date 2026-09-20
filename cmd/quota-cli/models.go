@@ -191,26 +191,22 @@ func modelTarget(provider, accountDir string) (modelcatalog.Target, error) {
 	}
 	cacheDir := accountDir
 	if cacheDir == "" {
-		cacheDir = os.Getenv(envKey)
+		cacheDir, err = config.DefaultAccountDirectory(provider)
+		if err != nil {
+			return modelcatalog.Target{}, err
+		}
 	}
-	if cacheDir != "" && !filepath.IsAbs(cacheDir) {
+	if !filepath.IsAbs(cacheDir) {
 		return modelcatalog.Target{}, fmt.Errorf("model discovery requires an absolute %s path; relative paths depend on the CLI working directory", envKey)
 	}
 	if provider == "claude" {
-		env = claude.EnvForConfigDir(os.Environ(), accountDir)
+		env = claude.EnvForConfigDir(os.Environ(), cacheDir)
 	} else {
-		env = codex.EnvForHome(os.Environ(), accountDir)
+		env = codex.EnvForHome(os.Environ(), cacheDir)
 	}
 	binary, err = filepath.Abs(binary)
 	if err != nil {
 		return modelcatalog.Target{}, err
-	}
-	if cacheDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return modelcatalog.Target{}, err
-		}
-		cacheDir = filepath.Join(home, "."+provider)
 	}
 	cacheDir, err = filepath.Abs(cacheDir)
 	if err != nil {

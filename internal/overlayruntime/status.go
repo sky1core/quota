@@ -17,6 +17,8 @@ type RepositoryStatus struct {
 }
 
 type CheckOptions struct {
+	ClaudeConfigDir string
+	CodexHome       string
 	// CodexProjectDocMaxBytes is the effective limit reported by the native
 	// Codex inspection; nil when that inspection was unavailable.
 	CodexProjectDocMaxBytes *int64
@@ -32,7 +34,13 @@ func CheckRepository(ctx context.Context, dir, agent string, options CheckOption
 	if e := ValidateGitEnvironment(ctx); e != nil {
 		return status, e
 	}
-	r, e := resolveContext(ctx, dir)
+	paths := NativeAccountPaths{
+		ClaudeConfigDir: options.ClaudeConfigDir,
+		CodexHome:       options.CodexHome,
+		NeedClaude:      agent == "all" || agent == "claude",
+		NeedCodex:       agent == "all" || agent == "codex",
+	}
+	r, e := resolveContextWithNativePaths(ctx, dir, paths)
 	if e != nil {
 		return status, e
 	}

@@ -26,21 +26,40 @@ func ownsCurrentInstructionCommand(command, executable, agent, event string) boo
 		return false
 	}
 	argv := inv.Argv
-	if len(argv) != 6 || !sameExecutable(argv[0], executable) {
+	if len(argv) < 6 || !sameExecutable(argv[0], executable) {
 		return false
 	}
-	if argv[1] == "agent" &&
-		argv[2] == "instructions" &&
-		(argv[3] == "_prepare" || argv[3] == "_hook") &&
-		argv[4] == "--agent="+agent &&
-		argv[5] == "--event="+event {
-		return true
+	if argv[1] == "agent" && argv[2] == "instructions" && (argv[3] == "_prepare" || argv[3] == "_hook") {
+		return ownsInstructionPrepareArgs(argv[4:], agent, event)
 	}
 	return argv[1] == "agent" &&
 		argv[2] == "overlay" &&
 		argv[3] == "hook" &&
+		len(argv) == 6 &&
 		argv[4] == "--runtime="+agent &&
 		argv[5] == "--event="+event
+}
+
+func ownsInstructionPrepareArgs(args []string, agent, event string) bool {
+	seenAgent, seenEvent := false, false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--agent="+agent:
+			seenAgent = true
+		case arg == "--event="+event:
+			seenEvent = true
+		case strings.HasPrefix(arg, "--claude-config-dir="), strings.HasPrefix(arg, "--codex-home="):
+		case arg == "--claude-config-dir", arg == "--codex-home":
+			i++
+			if i >= len(args) || args[i] == "" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return seenAgent && seenEvent
 }
 func sameExecutable(a, b string) bool {
 	if a == b {

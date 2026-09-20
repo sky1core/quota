@@ -7,7 +7,7 @@ quota는 Claude 계정 여러 개의 사용량을 동시에 보여줄 수 있다
 
 - Claude 계정은 **`CLAUDE_CONFIG_DIR`(claude CLI의 설정 디렉터리)로 구분된다.** 디렉터리가
   다르면 서로 다른 계정으로 로그인할 수 있다.
-  - 기본 계정: `~/.claude` (환경변수 없을 때)
+  - 기본 계정: `~/.claude` (quota-cli가 항상 기본값으로 사용하는 경로)
   - 두 번째 계정: 예) `~/.claude-2`
 - quota는 **각 디렉터리에 이미 로그인돼 있는 계정을 읽기만** 한다. 로그인 자체는 claude CLI가
   한다. 즉 순서는 **① claude CLI로 두 번째 계정 로그인 → ② quota에 그 경로 등록**이다.

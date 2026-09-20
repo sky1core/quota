@@ -67,10 +67,10 @@ func TestSelectAgentSelectsAcrossProviders(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
 	validUntil := time.Now().Add(time.Hour)
 
-	quotacache.Put("claude:"+filepath.Join(home, ".claude"), "Current session: 40% used - resets in 4h\nCurrent week (all models): 50% used - resets in 3d", validUntil)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), "Current session: 40% used - resets in 4h\nCurrent week (all models): 40% used - resets in 3d", validUntil)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex"), `{"rateLimits":{"primary":{"usedPercent":40,"windowDurationMins":300},"secondary":{"usedPercent":50,"windowDurationMins":10080}}}`, validUntil)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex-2"), `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":10,"windowDurationMins":10080}}}`, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), "Current session: 40% used - resets in 4h\nCurrent week (all models): 50% used - resets in 3d", validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-2")), "Current session: 40% used - resets in 4h\nCurrent week (all models): 40% used - resets in 3d", validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), `{"rateLimits":{"primary":{"usedPercent":40,"windowDurationMins":300},"secondary":{"usedPercent":50,"windowDurationMins":10080}}}`, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex-2")), `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":10,"windowDurationMins":10080}}}`, validUntil)
 
 	cfg := config.Config{
 		ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}},
@@ -89,7 +89,7 @@ func TestSelectAgentSelectsAcrossProviders(t *testing.T) {
 	if got, want := result.Selected.Command, []string{"codex", "exec"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("command = %v, want %v", got, want)
 	}
-	if got, want := result.Selected.SetEnv["CODEX_HOME"], filepath.Join(home, ".codex-2"); got != want {
+	if got, want := result.Selected.SetEnv["CODEX_HOME"], quotaTestAccountDir(t, filepath.Join(home, ".codex-2")); got != want {
 		t.Fatalf("CODEX_HOME = %q, want %q", got, want)
 	}
 	if len(result.Candidates) != 4 {
@@ -105,8 +105,8 @@ func TestSelectAgentDefaultDoesNotUseClaudeModelRows(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
 	validUntil := time.Now().Add(time.Hour)
 
-	quotacache.Put("claude:"+filepath.Join(home, ".claude"), "Current session: 10% used - resets in 4h\nCurrent week (all models): 90% used - resets in 1d\nCurrent week (Fable): 0% used - resets in 1d", validUntil)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex"), `{"rateLimits":{"primary":{"usedPercent":40,"windowDurationMins":300},"secondary":{"usedPercent":40,"windowDurationMins":10080}}}`, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), "Current session: 10% used - resets in 4h\nCurrent week (all models): 90% used - resets in 1d\nCurrent week (Fable): 0% used - resets in 1d", validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), `{"rateLimits":{"primary":{"usedPercent":40,"windowDurationMins":300},"secondary":{"usedPercent":40,"windowDurationMins":10080}}}`, validUntil)
 
 	result, err := buildSelectAgentResult(config.Config{}, selectAgentOptions{agent: selectAgentAll}, time.Now())
 	if err != nil {
@@ -135,8 +135,8 @@ func TestSelectAgentAllModeComparesSharedFiveHours(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
 	validUntil := time.Now().Add(time.Hour)
 
-	quotacache.Put("claude:"+filepath.Join(home, ".claude"), "Current session: 10% used - resets in 4h", validUntil)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex"), `{"rateLimits":{"primary":{"usedPercent":70,"windowDurationMins":300},"secondary":{"usedPercent":70,"windowDurationMins":10080}}}`, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), "Current session: 10% used - resets in 4h", validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), `{"rateLimits":{"primary":{"usedPercent":70,"windowDurationMins":300},"secondary":{"usedPercent":70,"windowDurationMins":10080}}}`, validUntil)
 
 	result, err := buildSelectAgentResult(config.Config{}, selectAgentOptions{agent: selectAgentAll}, time.Now())
 	if err != nil {
@@ -154,8 +154,8 @@ func TestSelectAgentClaudeModelUsesRequestedModelRow(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	validUntil := time.Now().Add(time.Hour)
 
-	quotacache.Put("claude:"+filepath.Join(home, ".claude"), "Current session: 20% used - resets in 4h\nCurrent week (all models): 10% used - resets in 1d\nCurrent week (Fable): 80% used - resets in 1d", validUntil)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), "Current session: 20% used - resets in 4h\nCurrent week (all models): 80% used - resets in 1d\nCurrent week (Fable): 10% used - resets in 1d", validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), "Current session: 20% used - resets in 4h\nCurrent week (all models): 10% used - resets in 1d\nCurrent week (Fable): 80% used - resets in 1d", validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-2")), "Current session: 20% used - resets in 4h\nCurrent week (all models): 80% used - resets in 1d\nCurrent week (Fable): 10% used - resets in 1d", validUntil)
 
 	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}}}
 	result, err := buildSelectAgentResult(cfg, selectAgentOptions{agent: selectAgentClaude, model: "fable"}, time.Now())
@@ -175,8 +175,8 @@ func TestSelectAgentReturnsCandidatesWhenNoUsableAccount(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
 	validUntil := time.Now().Add(time.Hour)
 
-	quotacache.Put("claude:"+filepath.Join(home, ".claude"), "Current session: 99% used - resets in 1m\nCurrent week (all models): 99% used - resets in 1m", validUntil)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex"), `{"rateLimits":{"primary":{"usedPercent":99,"windowDurationMins":300},"secondary":{"usedPercent":99,"windowDurationMins":10080}}}`, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), "Current session: 99% used - resets in 1m\nCurrent week (all models): 99% used - resets in 1m", validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), `{"rateLimits":{"primary":{"usedPercent":99,"windowDurationMins":300},"secondary":{"usedPercent":99,"windowDurationMins":10080}}}`, validUntil)
 
 	result, err := buildSelectAgentResult(config.Config{}, selectAgentOptions{agent: selectAgentAll}, time.Now())
 	if err == nil {
@@ -222,7 +222,7 @@ func TestSelectAgentKeepsPartialProbeFailures(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
 	validUntil := time.Now().Add(time.Hour)
 
-	quotacache.Put("codex:"+filepath.Join(home, ".codex"), `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":10,"windowDurationMins":10080}}}`, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":10,"windowDurationMins":10080}}}`, validUntil)
 
 	result, err := buildSelectAgentResult(config.Config{}, selectAgentOptions{agent: selectAgentAll}, time.Now())
 	if err != nil {

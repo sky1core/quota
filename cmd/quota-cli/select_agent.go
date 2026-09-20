@@ -513,7 +513,7 @@ func formatSelectAgentResult(result selectAgentResult) string {
 
 func selectAgentSetEnvText(env map[string]string) string {
 	if len(env) == 0 {
-		return "none (default/inherited account)"
+		return "none"
 	}
 	keys := make([]string, 0, len(env))
 	for key := range env {

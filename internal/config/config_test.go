@@ -166,8 +166,12 @@ func TestResolveAccounts_DefaultOnly(t *testing.T) {
 		t.Fatalf("expected only the default account, got %v", resolvedKeys(accts))
 	}
 	got := accts[0]
-	if got.Key != "claude" || got.ConfigDir != "" || got.Label != "Claude" {
-		t.Errorf("default account = %+v, want inherited CLI environment", got)
+	want, err := DefaultAccountDirectory("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Key != "claude" || got.ConfigDir != want || got.Label != "Claude" {
+		t.Errorf("default account = %+v, want %s", got, want)
 	}
 }
 
@@ -193,7 +197,7 @@ func TestResolveAccounts_ValidExtras(t *testing.T) {
 		t.Errorf("claude-3 label = %q, want %q", accts[2].Label, "Claude 3")
 	}
 	// configDir must be tilde-expanded in the resolved result.
-	if want := filepath.Join(dir, ".claude-2"); accts[1].ConfigDir != want {
+	if want, err := CanonicalAccountDirectory(filepath.Join(dir, ".claude-2")); err != nil || accts[1].ConfigDir != want {
 		t.Errorf("claude-2 configDir = %q, want %q (expanded)", accts[1].ConfigDir, want)
 	}
 	if accts[2].ConfigDir != "/opt/c3" {
@@ -275,8 +279,12 @@ func TestResolveCodexAccounts_DefaultOnly(t *testing.T) {
 		t.Fatalf("expected only the default account, got %v", resolvedCodexKeys(accts))
 	}
 	got := accts[0]
-	if got.Key != "codex" || got.Home != "" || got.Label != "Codex" {
-		t.Errorf("default account = %+v, want inherited CLI environment", got)
+	want, err := DefaultAccountDirectory("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Key != "codex" || got.Home != want || got.Label != "Codex" {
+		t.Errorf("default account = %+v, want %s", got, want)
 	}
 }
 
@@ -298,7 +306,7 @@ func TestResolveCodexAccounts_ValidExtras(t *testing.T) {
 		t.Errorf("codex-2 label = %q, want %q", accts[1].Label, "Codex 2")
 	}
 	// home must be tilde-expanded in the resolved result.
-	if want := filepath.Join(dir, ".codex-2"); accts[1].Home != want {
+	if want, err := CanonicalAccountDirectory(filepath.Join(dir, ".codex-2")); err != nil || accts[1].Home != want {
 		t.Errorf("codex-2 home = %q, want %q (expanded)", accts[1].Home, want)
 	}
 	if accts[2].Home != "/opt/cx3" {

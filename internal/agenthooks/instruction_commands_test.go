@@ -20,6 +20,10 @@ func TestOwnsInstructionCommandAcceptsSameExecutableThroughSymlink(t *testing.T)
 	if !OwnsInstructionCommand(command, target, "claude", "WorktreeCreate") {
 		t.Fatal("symlinked executable was not treated as owned")
 	}
+	command = ShellQuote([]string{link, "agent", "instructions", "_prepare", "--agent=claude", "--event=WorktreeCreate", "--claude-config-dir", filepath.Join(dir, ".claude")})
+	if !OwnsInstructionCommand(command, target, "claude", "WorktreeCreate") {
+		t.Fatal("owned command with explicit account directory was not treated as owned")
+	}
 }
 
 func TestOwnsInstructionCommandRejectsDifferentExecutable(t *testing.T) {

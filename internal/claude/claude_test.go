@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky1core/quota/internal/config"
 	"github.com/sky1core/quota/internal/quotacache"
 )
 
@@ -33,7 +34,11 @@ func TestGetQuotaForConfigDirUsesSharedCache(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PATH", "")
 	configDir := t.TempDir()
-	quotacache.Put(claudeCacheKey(configDir), "Current session: 12% used\n", time.Now().Add(time.Hour))
+	canonicalConfigDir, err := config.CanonicalAccountDirectory(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quotacache.Put(claudeCacheKey(canonicalConfigDir), "Current session: 12% used\n", time.Now().Add(time.Hour))
 
 	result, err := GetQuotaForConfigDir(time.Second, configDir, time.Minute)
 	if err != nil {
@@ -746,6 +751,39 @@ func TestWindowLabel(t *testing.T) {
 	}
 }
 
+func TestGetQuotaForConfigDirDefaultIgnoresCallerEnvironment(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "caller-claude"))
+	binDir := t.TempDir()
+	record := filepath.Join(t.TempDir(), "env.txt")
+	t.Setenv("QUOTA_TEST_ENV_RECORD", record)
+	script := "#!/bin/sh\nprintf '%s\\n' \"$CLAUDE_CONFIG_DIR\" > \"$QUOTA_TEST_ENV_RECORD\"\nprintf '%s\\n' '{\"result\":\"Current session: 10% used\\n\",\"is_error\":false}'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	result, err := GetQuotaForConfigDir(5*time.Second, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session, ok := windowByKey(result, "session"); !ok || session["left"] != 90 {
+		t.Fatalf("session = %v, want left 90", session)
+	}
+	got, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultConfigDir, err := config.DefaultAccountDirectory("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := defaultConfigDir + "\n"; string(got) != want {
+		t.Fatalf("child CLAUDE_CONFIG_DIR = %q, want %q", got, want)
+	}
+}
+
 // TestWindowKeys_Finite: the vocabulary consumers pre-allocate slots from.
 func TestWindowKeys_Finite(t *testing.T) {
 	want := []string{"session", "weekly_all", "extra_1", "extra_2", "extra_3"}
@@ -785,23 +823,15 @@ func TestFetchEnv_ConfigDirReplacesInherited(t *testing.T) {
 	}
 }
 
-// TestFetchEnv_NoConfigDirKeepsInherited pins the other half of the contract:
-// an empty configDir means "the caller's default account", which is exactly the
-// inherited CLAUDE_CONFIG_DIR. Dropping it here would silently switch the
-// default account to ~/.claude.
-func TestFetchEnv_NoConfigDirKeepsInherited(t *testing.T) {
+func TestFetchEnv_NoConfigDirDropsInherited(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "/inherited")
 
 	env := fetchEnv("")
 
-	found := false
 	for _, kv := range env {
-		if kv == "CLAUDE_CONFIG_DIR=/inherited" {
-			found = true
+		if strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR=") {
+			t.Fatalf("empty configDir must not preserve inherited CLAUDE_CONFIG_DIR: %v", env)
 		}
-	}
-	if !found {
-		t.Error("empty configDir must leave the inherited CLAUDE_CONFIG_DIR in place")
 	}
 }
 

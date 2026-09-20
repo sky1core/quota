@@ -333,7 +333,8 @@ type sessionLogCandidate struct {
 }
 
 func claudeSessionLogAccounts(cfg config.Config) ([]sessionLogAccount, []string) {
-	candidates := []sessionLogCandidate{{key: "claude", root: claudeDefaultSessionLogRoot()}}
+	root, err := claudeDefaultSessionLogRoot()
+	candidates := []sessionLogCandidate{{key: "claude", root: root, err: err}}
 	for _, a := range cfg.ClaudeAccounts {
 		root, err := claudeConfigSessionLogRoot(a.ConfigDir)
 		candidates = append(candidates, sessionLogCandidate{key: a.Key, root: root, err: err})
@@ -342,7 +343,8 @@ func claudeSessionLogAccounts(cfg config.Config) ([]sessionLogAccount, []string)
 }
 
 func codexSessionLogAccounts(cfg config.Config) ([]sessionLogAccount, []string) {
-	candidates := []sessionLogCandidate{{key: "codex", root: codexDefaultSessionLogRoot()}}
+	root, err := codexDefaultSessionLogRoot()
+	candidates := []sessionLogCandidate{{key: "codex", root: root, err: err}}
 	for _, a := range cfg.CodexAccounts {
 		root, err := codexHomeSessionLogRoot(a.Home)
 		candidates = append(candidates, sessionLogCandidate{key: a.Key, root: root, err: err})
@@ -415,20 +417,20 @@ func sessionLogCanonicalRoot(root string) (string, error) {
 	return config.CanonicalAccountDirectory(abs)
 }
 
-func claudeDefaultSessionLogRoot() string {
-	if override := strings.TrimSpace(os.Getenv("CLAUDE_PROJECTS_DIR")); override != "" {
-		return config.ExpandTilde(override)
+func claudeDefaultSessionLogRoot() (string, error) {
+	dir, err := config.DefaultAccountDirectory("claude")
+	if err != nil {
+		return "", err
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", "projects")
+	return filepath.Join(dir, "projects"), nil
 }
 
-func codexDefaultSessionLogRoot() string {
-	if override := strings.TrimSpace(os.Getenv("CODEX_SESSIONS_DIR")); override != "" {
-		return config.ExpandTilde(override)
+func codexDefaultSessionLogRoot() (string, error) {
+	dir, err := config.DefaultAccountDirectory("codex")
+	if err != nil {
+		return "", err
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".codex", "sessions")
+	return filepath.Join(dir, "sessions"), nil
 }
 
 func discoverSessionLogRecords(accounts []sessionLogAccount) ([]sessionLogRecord, error) {

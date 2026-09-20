@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sky1core/quota/internal/claude"
+	"github.com/sky1core/quota/internal/config"
 	"github.com/sky1core/quota/internal/quotacache"
 )
 
@@ -24,7 +25,7 @@ func TestTextParsedQuotaWarnings(t *testing.T) {
 			t.Setenv("HOME", home)
 			t.Setenv("PATH", "")
 			dir := filepath.Join(home, ".claude")
-			quotacache.Put("claude:"+dir, tc.raw, time.Now().Add(time.Hour))
+			quotacache.Put(renderTestCacheKey(t, "claude", dir), tc.raw, time.Now().Add(time.Hour))
 			data, err := claude.GetQuotaForConfigDir(time.Second, dir, time.Minute)
 			if err != nil {
 				t.Fatal(err)
@@ -44,6 +45,15 @@ func TestTextParsedQuotaWarnings(t *testing.T) {
 			}
 		})
 	}
+}
+
+func renderTestCacheKey(t *testing.T, provider, dir string) string {
+	t.Helper()
+	canonical, err := config.CanonicalAccountDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return provider + ":" + canonical
 }
 
 func TestTextWarningsStayWithAccount(t *testing.T) {

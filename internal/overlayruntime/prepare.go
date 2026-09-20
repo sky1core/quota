@@ -189,7 +189,7 @@ func claudeFileImports(path, target string) (bool, error) {
 }
 
 func (r repoContext) claudeInstructionFiles(w string, state RepositoryState, ignoreOwnedGenerated bool, local []byte) []claudeInstructionFile {
-	userClaudeMD := resolvePath(filepath.Join(nativeConfigHome("CLAUDE_CONFIG_DIR", ".claude"), "CLAUDE.md"))
+	userClaudeMD := resolvePath(filepath.Join(r.ClaudeConfigDir, "CLAUDE.md"))
 	start := r.Start
 	if !within(start, w) {
 		start = w
@@ -1020,14 +1020,28 @@ func (r repoContext) prepareCheckoutFiles(w string, state *RepositoryState, res 
 	return nil
 }
 
+type PrepareOptions struct {
+	ClaudeConfigDir string
+	CodexHome       string
+}
+
 // PrepareCheckout creates, refreshes, or removes the quota-generated files of
 // the checkout containing dir according to the primary AGENTS.local.md.
 func PrepareCheckout(ctx context.Context, dir string) (PrepareResult, error) {
+	return PrepareCheckoutWithOptions(ctx, dir, PrepareOptions{})
+}
+
+func PrepareCheckoutWithOptions(ctx context.Context, dir string, options PrepareOptions) (PrepareResult, error) {
 	var res PrepareResult
 	if e := ValidateGitEnvironment(ctx); e != nil {
 		return res, e
 	}
-	r, e := resolveContext(ctx, dir)
+	r, e := resolveContextWithNativePaths(ctx, dir, NativeAccountPaths{
+		ClaudeConfigDir: options.ClaudeConfigDir,
+		CodexHome:       options.CodexHome,
+		NeedClaude:      true,
+		NeedCodex:       true,
+	})
 	if e != nil {
 		return res, e
 	}

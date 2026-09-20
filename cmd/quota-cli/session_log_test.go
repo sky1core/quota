@@ -41,9 +41,9 @@ func TestSessionLogAccountsUseConfiguredRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"claude":   filepath.Join(home, ".claude", "projects"),
+		"claude":   filepath.Join(quotaTestAccountDir(t, filepath.Join(home, ".claude")), "projects"),
 		"claude-2": filepath.Join(claudeExtra, "projects"),
-		"codex":    filepath.Join(home, ".codex", "sessions"),
+		"codex":    filepath.Join(quotaTestAccountDir(t, filepath.Join(home, ".codex")), "sessions"),
 		"codex-2":  filepath.Join(codexExtra, "sessions"),
 	}
 	for key, root := range want {
@@ -85,7 +85,7 @@ func TestSessionLogAccountsRejectDuplicateClaudeLogRoots(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "caller-claude-config"))
-	t.Setenv("CLAUDE_PROJECTS_DIR", "")
+	t.Setenv("CLAUDE_PROJECTS_DIR", filepath.Join(home, "caller-projects"))
 
 	cfg := config.Config{
 		ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude"}},
@@ -102,8 +102,11 @@ func TestSessionLogDefaultClaudeIgnoresInheritedConfigDir(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "caller-claude-config"))
 	t.Setenv("CLAUDE_PROJECTS_DIR", "")
 
-	got := claudeDefaultSessionLogRoot()
-	want := filepath.Join(home, ".claude", "projects")
+	got, err := claudeDefaultSessionLogRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(quotaTestAccountDir(t, filepath.Join(home, ".claude")), "projects")
 	if got != want {
 		t.Fatalf("default Claude session log root = %q, want %q", got, want)
 	}
@@ -113,7 +116,7 @@ func TestSessionLogAccountsRejectDuplicateCodexLogRoots(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "caller-codex-home"))
-	t.Setenv("CODEX_SESSIONS_DIR", "")
+	t.Setenv("CODEX_SESSIONS_DIR", filepath.Join(home, "caller-sessions"))
 
 	cfg := config.Config{
 		CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: "~/.codex"}},
@@ -130,8 +133,11 @@ func TestSessionLogDefaultCodexIgnoresInheritedHome(t *testing.T) {
 	t.Setenv("CODEX_HOME", filepath.Join(home, "caller-codex-home"))
 	t.Setenv("CODEX_SESSIONS_DIR", "")
 
-	got := codexDefaultSessionLogRoot()
-	want := filepath.Join(home, ".codex", "sessions")
+	got, err := codexDefaultSessionLogRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(quotaTestAccountDir(t, filepath.Join(home, ".codex")), "sessions")
 	if got != want {
 		t.Fatalf("default Codex session log root = %q, want %q", got, want)
 	}

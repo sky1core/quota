@@ -37,13 +37,22 @@ func TestExecPromptPreservesSharedCache(t *testing.T) {
 						if err := os.WriteFile(bin, []byte(script), 0700); err != nil {
 							t.Fatal(err)
 						}
-						dir := filepath.Join(home, "."+p)
+						dir := quotaTestAccountDir(t, filepath.Join(home, "."+p))
 						id := "fable"
 						if p == "codex" {
 							id = "code-model"
 						}
+						target, err := modelTarget(p, dir)
+						if err != nil {
+							t.Fatal(err)
+						}
 						snapshot := modelcatalog.Snapshot{SchemaVersion: 1, Provider: p, Binary: bin, ConfigDir: dir, CLIVersion: "test-cli-v1", FetchedAt: time.Now(), Models: []modelcatalog.Model{autoPromptTestModel(id, "high")}}
-						identity, _ := json.Marshal([]any{p, bin, dir, ""})
+						envKey := "CLAUDE_CONFIG_DIR"
+						if p == "codex" {
+							envKey = "CODEX_HOME"
+						}
+						override := envMap(target.Env)[envKey]
+						identity, _ := json.Marshal([]any{p, bin, dir, override})
 						sum := sha256.Sum256(identity)
 						data, err := json.Marshal(snapshot)
 						if err != nil {

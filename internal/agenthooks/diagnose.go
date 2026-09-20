@@ -49,9 +49,6 @@ func blockingBool(root map[string]any, key string, blocked bool) []string {
 }
 
 func codexConfigPath() string {
-	if dir := os.Getenv("CODEX_HOME"); dir != "" {
-		return filepath.Join(dir, "config.toml")
-	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".codex", "config.toml")
 }

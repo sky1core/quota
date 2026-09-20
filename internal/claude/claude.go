@@ -17,22 +17,28 @@ import (
 	"unicode"
 
 	"github.com/sky1core/quota/internal/childprocess"
+	"github.com/sky1core/quota/internal/config"
 	"github.com/sky1core/quota/internal/quotacache"
 )
 
-// GetQuota fetches Claude Code quota for the default account, always probing
-// live (maxAge 0 disables the shared cache read).
+// GetQuota fetches Claude Code quota for the default quota account, always
+// probing live (maxAge 0 disables the shared cache read).
 func GetQuota(timeout time.Duration) (map[string]any, error) {
 	return GetQuotaForConfigDir(timeout, "", 0)
 }
 
 // GetQuotaForConfigDir fetches Claude Code quota for the account identified by
-// configDir (its CLAUDE_CONFIG_DIR). An empty configDir queries the default
-// account, identical to GetQuota. When the shared cache holds this account's
-// last probe no older than maxAge, that raw output is re-parsed and returned
-// instead of spawning a new probe; a live probe's result is written back. A
-// non-positive maxAge skips the cache read but still refreshes it on success.
+// configDir (its CLAUDE_CONFIG_DIR). An empty configDir queries quota's default
+// Claude account directory, not the caller's inherited environment. When the
+// shared cache holds this account's last probe no older than maxAge, that raw
+// output is re-parsed and returned instead of spawning a new probe; a live
+// probe's result is written back. A non-positive maxAge skips the cache read but
+// still refreshes it on success.
 func GetQuotaForConfigDir(timeout time.Duration, configDir string, maxAge time.Duration) (map[string]any, error) {
+	configDir, err := resolveConfigDir(configDir)
+	if err != nil {
+		return nil, err
+	}
 	key := claudeCacheKey(configDir)
 	if raw, ok := quotacache.Get(key, maxAge); ok {
 		if res, err := parseUsage(raw); err == nil {
@@ -122,21 +128,21 @@ func earliestReset(result map[string]any) time.Time {
 }
 
 // claudeCacheKey is the shared-cache key for the account a given configDir
-// selects. It is the account's RESOLVED location, not its logical name: an empty
-// configDir means "the inherited CLAUDE_CONFIG_DIR, or ~/.claude" — exactly the
-// account fetchEnv will probe. Keying on the resolved path is what stops a
-// default-account entry cached under one inherited CLAUDE_CONFIG_DIR from being
-// served to a run that inherited a different one.
+// selects. It is the account's resolved location, not its logical name; an empty
+// configDir means quota's default Claude config directory.
 func claudeCacheKey(configDir string) string {
 	resolved := configDir
 	if resolved == "" {
-		resolved = os.Getenv("CLAUDE_CONFIG_DIR")
-		if resolved == "" {
-			home, _ := os.UserHomeDir()
-			resolved = filepath.Join(home, ".claude")
-		}
+		resolved, _ = config.DefaultAccountDirectory("claude")
 	}
 	return "claude:" + filepath.Clean(resolved)
+}
+
+func resolveConfigDir(configDir string) (string, error) {
+	if configDir == "" {
+		return config.DefaultAccountDirectory("claude")
+	}
+	return config.CanonicalAccountDirectory(configDir)
 }
 
 func FindBinary() (string, error) {
@@ -166,9 +172,7 @@ func EnvForConfigDir(base []string, configDir string) []string {
 		"CLAUDE_CODE_API_BASE_URL":        true,
 		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN": true,
 		"CLAUDE_CODE_OAUTH_TOKEN":         true,
-	}
-	if configDir != "" {
-		drop["CLAUDE_CONFIG_DIR"] = true
+		"CLAUDE_CONFIG_DIR":               true,
 	}
 	env := make([]string, 0, len(base)+1)
 	for _, kv := range base {

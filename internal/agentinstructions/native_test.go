@@ -279,7 +279,7 @@ func TestNativeMixedRepresentationsWithoutDuplicateInstructions(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := map[string]string{"sessionStart": "example-session-hook", "subagentStart": "example-subagent-hook"}
-	report, err := InspectNativeCodex(context.Background(), repo, expected)
+	report, err := InspectNativeCodexForHome(context.Background(), repo, codexHome, expected)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestNativeMixedRepresentationsWithoutDuplicateInstructions(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(setting.key+" = "+setting.value+"\n"+config), 0600); err != nil {
 			t.Fatal(err)
 		}
-		report, err = InspectNativeCodex(context.Background(), repo, expected)
+		report, err = InspectNativeCodexForHome(context.Background(), repo, codexHome, expected)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -381,7 +381,7 @@ func TestNativeCodexIsolatedDiscovery(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte("project_doc_max_bytes = 12345\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := InspectNativeCodex(context.Background(), repo, map[string]string{"sessionStart": command})
+	report, err := InspectNativeCodexForHome(context.Background(), repo, codexHome, map[string]string{"sessionStart": command})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +397,7 @@ func TestNativeCodexIsolatedDiscovery(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte("project_doc_max_bytes = 12345\nproject_root_markers = []\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	report, err = InspectNativeCodex(context.Background(), repo, map[string]string{"sessionStart": command})
+	report, err = InspectNativeCodexForHome(context.Background(), repo, codexHome, map[string]string{"sessionStart": command})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +408,7 @@ func TestNativeCodexIsolatedDiscovery(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(mergedConfig), 0600); err != nil {
 		t.Fatal(err)
 	}
-	report, err = InspectNativeCodex(context.Background(), repo, map[string]string{"sessionStart": command})
+	report, err = InspectNativeCodexForHome(context.Background(), repo, codexHome, map[string]string{"sessionStart": command})
 	if err != nil {
 		t.Fatalf("merged discovery: %v; report: %+v", err, report)
 	}
@@ -418,7 +418,7 @@ func TestNativeCodexIsolatedDiscovery(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte("project_doc_max_bytes = 12345\n[features]\nhooks = false\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	report, err = InspectNativeCodex(context.Background(), repo, map[string]string{"sessionStart": command})
+	report, err = InspectNativeCodexForHome(context.Background(), repo, codexHome, map[string]string{"sessionStart": command})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -440,7 +440,7 @@ func TestNativeCodexTrustSyncApprovesManagedHook(t *testing.T) {
 	if _, err := i.Apply(plan); err != nil {
 		t.Fatal(err)
 	}
-	before, err := InspectNativeCodex(context.Background(), repo, i.ExpectedCodexHooks())
+	before, err := InspectNativeCodexForHome(context.Background(), repo, i.targets.CodexHome, i.ExpectedCodexHooks())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -454,7 +454,7 @@ func TestNativeCodexTrustSyncApprovesManagedHook(t *testing.T) {
 	if !synced.Changed || synced.Key == "" {
 		t.Fatalf("sync result = %+v", synced)
 	}
-	after, err := InspectNativeCodex(context.Background(), repo, i.ExpectedCodexHooks())
+	after, err := InspectNativeCodexForHome(context.Background(), repo, i.targets.CodexHome, i.ExpectedCodexHooks())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -642,7 +642,7 @@ func TestNativeConfigInspectionIndependentOfHooks(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(codexHome, "hooks.json"), []byte(hooks), 0600); err != nil {
 			t.Fatal(err)
 		}
-		report, err := InspectNativeCodexConfig(context.Background(), repo)
+		report, err := InspectNativeCodexConfigForHome(context.Background(), repo, codexHome)
 		if err != nil || report.State != "configured" || len(report.Hooks) != 0 || report.ProjectDocMaxBytes == nil || *report.ProjectDocMaxBytes != 12345 {
 			t.Fatalf("config inspection depended on hook readiness: %+v %v", report, err)
 		}

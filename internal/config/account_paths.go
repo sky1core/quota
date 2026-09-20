@@ -105,24 +105,17 @@ func DefaultAccountDirectory(provider string) (string, error) {
 }
 
 func defaultAccountDirectoryPath(provider string) (string, error) {
-	var env string
 	switch provider {
 	case "claude":
-		env = "CLAUDE_CONFIG_DIR"
 	case "codex":
-		env = "CODEX_HOME"
 	default:
 		return "", fmt.Errorf("unsupported provider %q", provider)
 	}
-	dir := os.Getenv(env)
-	if dir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		dir = filepath.Join(home, "."+provider)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
 	}
-	return dir, nil
+	return filepath.Join(home, "."+provider), nil
 }
 
 type accountDirectory struct{ key, dir string }
@@ -148,18 +141,7 @@ func resolveAccountDirectories(provider string, extras []accountDirectory, keyPa
 			skipped = append(skipped, fmt.Sprintf("%s account %q directory is invalid: %v, skipped", provider, entry.key, err))
 			continue
 		}
-		abs, err := absoluteAccountPath(entry.dir)
-		if err != nil {
-			skipped = append(skipped, fmt.Sprintf("%s account %q directory is invalid: %v, skipped", provider, entry.key, err))
-			continue
-		}
-		for _, component := range strings.Split(abs, string(filepath.Separator)) {
-			if component == ".." {
-				abs = dir
-				break
-			}
-		}
-		entries[i].dir = filepath.Clean(abs)
+		entries[i].dir = filepath.Clean(dir)
 		canonicalDirs[i] = dir
 		dirs[dir]++
 		valid[i] = true

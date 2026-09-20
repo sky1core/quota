@@ -33,7 +33,7 @@ type ClaudeSessionSettings struct {
 }
 
 func claudeSessionSettings(r repoContext) []ClaudeSessionSettings {
-	user := filepath.Join(nativeConfigHome("CLAUDE_CONFIG_DIR", ".claude"), "settings.json")
+	user := filepath.Join(r.ClaudeConfigDir, "settings.json")
 	root := r.Top
 	if !r.Bare() {
 		root = r.Root
@@ -47,26 +47,18 @@ func claudeSessionSettings(r repoContext) []ClaudeSessionSettings {
 }
 
 func ClaudeSettingsLayers(ctx context.Context, dir string) ([]ClaudeSessionSettings, error) {
+	return ClaudeSettingsLayersForConfigDir(ctx, dir, "")
+}
+
+func ClaudeSettingsLayersForConfigDir(ctx context.Context, dir, configDir string) ([]ClaudeSessionSettings, error) {
 	if err := ValidateGitEnvironment(ctx); err != nil {
 		return nil, err
 	}
-	r, err := resolveContext(ctx, dir)
+	r, err := resolveContextWithNativePaths(ctx, dir, NativeAccountPaths{ClaudeConfigDir: configDir, NeedClaude: true})
 	if err != nil {
 		return nil, err
 	}
 	return claudeSessionSettings(r), nil
-}
-
-func nativeConfigHome(env, directory string) string {
-	if value := os.Getenv(env); value != "" {
-		if strings.HasPrefix(value, "~/") {
-			home, _ := os.UserHomeDir()
-			return filepath.Join(home, value[2:])
-		}
-		return value
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, directory)
 }
 
 func readSettingsFile(path string) ([]byte, error) {
@@ -474,7 +466,7 @@ func codexProjectTrust(data map[string]any, worktree string) string {
 // discovery, block hooks, or leave the effective instruction file over budget.
 func codexSettingsFindings(r repoContext, effectiveDocMaxBytes *int64) ([]string, []string) {
 	var problems, warnings []string
-	configPath := filepath.Join(nativeConfigHome("CODEX_HOME", ".codex"), "config.toml")
+	configPath := filepath.Join(r.CodexHome, "config.toml")
 	data := map[string]any{}
 	if exists(configPath) {
 		data = readCodexLayer(configPath, &problems)

@@ -21,7 +21,7 @@ func (i *Installation) InspectClaudeRepositoryHooks(ctx context.Context, dir str
 }
 
 func (i *Installation) inspectClaudeRepositoryHooks(ctx context.Context, dir string, readSettings func(string) (map[string]any, error)) ([]string, error) {
-	sessions, err := overlayruntime.ClaudeSettingsLayers(ctx, dir)
+	sessions, err := overlayruntime.ClaudeSettingsLayersForConfigDir(ctx, dir, i.targets.ClaudeConfigDir)
 	if err != nil {
 		return nil, err
 	}

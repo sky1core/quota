@@ -18,7 +18,7 @@ func TestFetchQuotaParsedWarnings(t *testing.T) {
 	dir := filepath.Join(home, ".claude")
 	healthyDir := filepath.Join(home, ".claude-2")
 	healthy := "Current session: 10% used\nCurrent week (all models): 10% used\nCurrent week (Opus): 10% used"
-	quotacache.Put("claude:"+healthyDir, healthy, time.Now().Add(time.Hour))
+	quotacache.Put(quotaBarTestCacheKey(t, "claude", healthyDir), healthy, time.Now().Add(time.Hour))
 	accounts := []config.ResolvedAccount{{Key: "claude", ConfigDir: dir}, {Key: "claude-2", ConfigDir: healthyDir}}
 	lastOK := newQuotaData()
 	stamps := map[string]time.Time{}
@@ -33,7 +33,7 @@ func TestFetchQuotaParsedWarnings(t *testing.T) {
 		{"healthy recovery", healthy, nil, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			quotacache.Put("claude:"+dir, tc.raw, time.Now().Add(time.Hour))
+			quotacache.Put(quotaBarTestCacheKey(t, "claude", dir), tc.raw, time.Now().Add(time.Hour))
 			data := fetchQuota(accounts, nil, time.Minute)
 			if len(data.errs) != 0 {
 				t.Fatalf("unexpected fetch failure: %v", data.errs)
@@ -73,6 +73,15 @@ func TestFetchQuotaParsedWarnings(t *testing.T) {
 			}
 		})
 	}
+}
+
+func quotaBarTestCacheKey(t *testing.T, provider, dir string) string {
+	t.Helper()
+	canonical, err := config.CanonicalAccountDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return provider + ":" + canonical
 }
 
 func TestQuotaDiagnosticText(t *testing.T) {

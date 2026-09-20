@@ -70,17 +70,11 @@ func CheckHookBinary(binary string) error {
 }
 
 func ClaudeSettingsPath() string {
-	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
-		return ClaudeSettingsPathForConfigDir(dir)
-	}
 	home, _ := os.UserHomeDir()
 	return ClaudeSettingsPathForConfigDir(filepath.Join(home, ".claude"))
 }
 
 func CodexHooksPath() string {
-	if dir := os.Getenv("CODEX_HOME"); dir != "" {
-		return CodexHooksPathForHome(dir)
-	}
 	home, _ := os.UserHomeDir()
 	return CodexHooksPathForHome(filepath.Join(home, ".codex"))
 }

@@ -69,21 +69,13 @@ func TestCanonicalAccountDirectory(t *testing.T) {
 
 func TestResolveAccountDirectoryConflicts(t *testing.T) {
 	for _, provider := range []string{"claude", "codex"} {
-		for _, kind := range []string{"default", "environment default", "extras", "dangling alias", "key", "key and directory", "invalid path"} {
+		for _, kind := range []string{"default", "extras", "dangling alias", "key", "key and directory", "invalid path"} {
 			t.Run(provider+"/"+kind, func(t *testing.T) {
 				root := t.TempDir()
 				t.Setenv("HOME", root)
 				t.Setenv("CLAUDE_CONFIG_DIR", "")
 				t.Setenv("CODEX_HOME", "")
 				base := filepath.Join(root, "."+provider)
-				if kind == "environment default" {
-					base = filepath.Join(root, "inherited")
-					env := "CLAUDE_CONFIG_DIR"
-					if provider == "codex" {
-						env = "CODEX_HOME"
-					}
-					t.Setenv(env, base)
-				}
 				if err := os.MkdirAll(base, 0700); err != nil {
 					t.Fatal(err)
 				}
@@ -177,7 +169,7 @@ func TestResolveAccountDirectoryConflicts(t *testing.T) {
 	}
 }
 
-func TestResolveDefaultDirectorySpellingAndInvalidDefaultIsolation(t *testing.T) {
+func TestResolveDefaultDirectoryIgnoresProviderEnvironment(t *testing.T) {
 	for _, provider := range []string{"claude", "codex"} {
 		t.Run(provider, func(t *testing.T) {
 			root := t.TempDir()
@@ -197,8 +189,12 @@ func TestResolveDefaultDirectorySpellingAndInvalidDefaultIsolation(t *testing.T)
 			}
 			t.Setenv(env, alias)
 			accounts, skipped := resolveAccountDirectories(provider, nil, pattern)
-			if len(skipped) != 0 || len(accounts) != 1 || accounts[0].dir != alias {
-				t.Fatalf("default spelling changed: %v %v", accounts, skipped)
+			want, err := CanonicalAccountDirectory(filepath.Join(root, "."+provider))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(skipped) != 0 || len(accounts) != 1 || accounts[0].dir != want {
+				t.Fatalf("default directory follows provider env: %v %v; want %s", accounts, skipped, want)
 			}
 			loop := filepath.Join(root, "loop")
 			if err := os.Symlink(loop, loop); err != nil {
@@ -206,8 +202,8 @@ func TestResolveDefaultDirectorySpellingAndInvalidDefaultIsolation(t *testing.T)
 			}
 			t.Setenv(env, loop)
 			accounts, skipped = resolveAccountDirectories(provider, []accountDirectory{{provider + "-2", real}}, pattern)
-			if len(skipped) != 1 || len(accounts) != 1 || accounts[0].key != provider+"-2" {
-				t.Fatalf("invalid default blocked independent account: %v %v", accounts, skipped)
+			if len(skipped) != 0 || len(accounts) != 2 || accounts[0].key != provider || accounts[1].key != provider+"-2" {
+				t.Fatalf("provider env changed resolved accounts: %v %v", accounts, skipped)
 			}
 		})
 	}

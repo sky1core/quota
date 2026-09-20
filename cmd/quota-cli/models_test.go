@@ -105,7 +105,7 @@ func targetForAccount(t *testing.T, cfg config.Config, provider, account string)
 	return modelcatalog.Target{}, ""
 }
 
-func TestModelTargetInheritsDefaultAccountEnvironment(t *testing.T) {
+func TestModelTargetUsesQuotaDefaultAccount(t *testing.T) {
 	bin := t.TempDir()
 	for _, p := range modelProviders() {
 		if err := os.WriteFile(filepath.Join(bin, p.name), []byte("placeholder"), 0o700); err != nil {
@@ -140,23 +140,20 @@ func TestModelTargetInheritsDefaultAccountEnvironment(t *testing.T) {
 					}
 
 					target, dir := targetForAccount(t, config.Config{}, p.name, "")
-					if dir != "" {
-						t.Fatalf("default account dir = %q, want empty", dir)
+					wantDir := quotaTestAccountDir(t, filepath.Join(home, "."+p.name))
+					if dir != wantDir {
+						t.Fatalf("default account dir = %q, want %q", dir, wantDir)
 					}
 
-					if want := p.env(os.Environ(), ""); !reflect.DeepEqual(target.Env, want) {
+					if want := p.env(os.Environ(), dir); !reflect.DeepEqual(target.Env, want) {
 						t.Fatal("model discovery and quota/delegation environments differ")
 					}
 					got := envMap(target.Env)
 					if _, ok := got[p.secretKey]; ok {
 						t.Fatalf("auth credential %s leaked into run env", p.secretKey)
 					}
-					if tc.setEnv {
-						if v, ok := got[p.envKey]; !ok || v != tc.inherited {
-							t.Fatalf("%s = %q (present=%v), want inherited %q", p.envKey, v, ok, tc.inherited)
-						}
-					} else if _, ok := got[p.envKey]; ok {
-						t.Fatalf("%s forced into run env for default account: %q", p.envKey, got[p.envKey])
+					if v, ok := got[p.envKey]; !ok || v != wantDir {
+						t.Fatalf("%s = %q (present=%v), want quota default %q", p.envKey, v, ok, wantDir)
 					}
 
 					if !filepath.IsAbs(target.ConfigDir) {
@@ -164,13 +161,13 @@ func TestModelTargetInheritsDefaultAccountEnvironment(t *testing.T) {
 					}
 
 					if slices.Contains(p.unsetEnv(dir), p.envKey) {
-						t.Fatal("recommendation removes inherited account environment")
+						t.Fatal("recommendation removes selected account environment")
 					}
-					if set := p.setEnv(dir); len(set) != 0 {
+					if set := p.setEnv(dir); len(set) != 1 || set[p.envKey] != wantDir {
 						t.Fatalf("default account recommended override: %v", set)
 					}
-					if v, ok := envMap(autoPromptEnv(autoPromptAccount{provider: p.name, dir: dir}, os.Environ()))[p.envKey]; ok != tc.setEnv || (tc.setEnv && v != tc.inherited) {
-						t.Fatalf("autoPromptEnv %s = %q (present=%v), want inherited", p.envKey, v, ok)
+					if v := envMap(autoPromptEnv(autoPromptAccount{provider: p.name, dir: dir}, os.Environ()))[p.envKey]; v != wantDir {
+						t.Fatalf("autoPromptEnv %s = %q, want quota default %q", p.envKey, v, wantDir)
 					}
 				})
 			}
@@ -213,7 +210,7 @@ func TestModelTargetInheritsDefaultAccountEnvironment(t *testing.T) {
 	}
 }
 
-func TestModelTargetRejectsRelativeAccountEnvironment(t *testing.T) {
+func TestModelTargetIgnoresRelativeInheritedAccountEnvironment(t *testing.T) {
 	bin := t.TempDir()
 	for _, p := range modelProviders() {
 		if err := os.WriteFile(filepath.Join(bin, p.name), []byte("placeholder"), 0o700); err != nil {
@@ -223,18 +220,25 @@ func TestModelTargetRejectsRelativeAccountEnvironment(t *testing.T) {
 	t.Setenv("PATH", bin)
 	for _, p := range modelProviders() {
 		t.Run(p.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
 			t.Setenv(p.envKey, "relative-account")
-			for _, dir := range []string{"", "relative-account"} {
-				_, err := modelTarget(p.name, dir)
-				if err == nil || !strings.Contains(err.Error(), "absolute "+p.envKey) {
-					t.Fatalf("relative account directory should fail before discovery: %v", err)
-				}
-				if os.Getenv(p.envKey) != "relative-account" {
-					t.Fatal("validation changed the inherited environment")
-				}
+			target, err := modelTarget(p.name, "")
+			if err != nil {
+				t.Fatalf("relative inherited account should not affect default: %v", err)
+			}
+			if got, want := envMap(target.Env)[p.envKey], quotaTestAccountDir(t, filepath.Join(home, "."+p.name)); got != want {
+				t.Fatalf("%s = %q, want default %q", p.envKey, got, want)
+			}
+			_, err = modelTarget(p.name, "relative-account")
+			if err == nil || !strings.Contains(err.Error(), "absolute "+p.envKey) {
+				t.Fatalf("explicit relative account directory should fail before discovery: %v", err)
+			}
+			if os.Getenv(p.envKey) != "relative-account" {
+				t.Fatal("validation changed the inherited environment")
 			}
 			explicit := t.TempDir()
-			target, err := modelTarget(p.name, explicit)
+			target, err = modelTarget(p.name, explicit)
 			if err != nil || envMap(target.Env)[p.envKey] != explicit {
 				t.Fatalf("relative inherited value blocked an explicit absolute account: %v", err)
 			}

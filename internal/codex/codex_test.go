@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky1core/quota/internal/config"
 	"github.com/sky1core/quota/internal/quotacache"
 )
 
@@ -23,7 +24,11 @@ func TestGetQuotaForHomeUsesSharedCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	quotacache.Put(codexCacheKey(codexHome), string(raw), time.Now().Add(time.Hour))
+	canonicalHome, err := config.CanonicalAccountDirectory(codexHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quotacache.Put(codexCacheKey(canonicalHome), string(raw), time.Now().Add(time.Hour))
 
 	result, err := GetQuotaForHome(time.Second, codexHome, time.Minute)
 	if err != nil {
@@ -83,6 +88,47 @@ done
 	windows := windowsOf(t, result)
 	if len(windows) != 1 || windows[0]["left"] != 90 {
 		t.Fatalf("windows = %v, want one window with left 90", windows)
+	}
+}
+
+func TestGetQuotaForHomeDefaultIgnoresCallerEnvironment(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, "caller-codex"))
+	binDir := t.TempDir()
+	record := filepath.Join(t.TempDir(), "env.txt")
+	t.Setenv("QUOTA_TEST_ENV_RECORD", record)
+	script := `#!/bin/sh
+while IFS= read -r line; do
+	case "$line" in
+		*'"id":1'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}' ;;
+		*'"id":2'*) printf '%s\n' "$CODEX_HOME" > "$QUOTA_TEST_ENV_RECORD"; printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300}}}}'; exit 0 ;;
+	esac
+done
+`
+	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	result, err := GetQuotaForHome(5*time.Second, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	windows := windowsOf(t, result)
+	if len(windows) != 1 || windows[0]["left"] != 90 {
+		t.Fatalf("windows = %v, want one window with left 90", windows)
+	}
+	got, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultHome, err := config.DefaultAccountDirectory("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := defaultHome + "\n"; string(got) != want {
+		t.Fatalf("child CODEX_HOME = %q, want %q", got, want)
 	}
 }
 

@@ -49,7 +49,7 @@ func worktreeRepoDir(r repoContext) (string, error) {
 	return filepath.Join(base, slug+"-"+key), nil
 }
 
-func createWorktree(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) error {
+func createWorktree(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, options PrepareHookOptions) error {
 	h, e := parseHook(stdin)
 	if e != nil {
 		return e
@@ -116,7 +116,7 @@ func createWorktree(ctx context.Context, stdin io.Reader, stdout, stderr io.Writ
 	if _, e = gitOutput(ctx, r.Top, "worktree", "add", "-q", "-b", branch, target, base); e != nil {
 		return e
 	}
-	result, prepareErr := PrepareCheckout(ctx, target)
+	result, prepareErr := PrepareCheckoutWithOptions(ctx, target, PrepareOptions{ClaudeConfigDir: options.ClaudeConfigDir, CodexHome: options.CodexHome})
 	if prepareErr != nil {
 		leftovers := discardWorktree(r, target, branch)
 		if len(leftovers) > 0 {
@@ -166,7 +166,7 @@ func deleteWorktreeBranch(r repoContext, branch string, stderr io.Writer) []stri
 	return []string{"branch " + branch + " kept: its commits are on no other branch"}
 }
 
-func removeWorktree(ctx context.Context, stdin io.Reader, stderr io.Writer) error {
+func removeWorktree(ctx context.Context, stdin io.Reader, stderr io.Writer, options PrepareHookOptions) error {
 	h, e := parseHook(stdin)
 	if e != nil {
 		return e
@@ -178,7 +178,7 @@ func removeWorktree(ctx context.Context, stdin io.Reader, stderr io.Writer) erro
 	if e := ValidateGitEnvironment(ctx); e != nil {
 		return e
 	}
-	r, e := resolveContext(ctx, path)
+	r, e := resolveContextWithNativePaths(ctx, path, NativeAccountPaths{ClaudeConfigDir: options.ClaudeConfigDir, NeedClaude: true})
 	if e != nil {
 		return e
 	}

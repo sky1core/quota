@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sky1core/quota/internal/config"
 	"github.com/sky1core/quota/internal/quotacache"
 )
 
@@ -71,22 +72,23 @@ type rpcResp struct {
 	Error   any             `json:"error"`
 }
 
-// GetQuota fetches Codex quota for the default account (the process's CODEX_HOME,
-// or ~/.codex when unset), always probing live (maxAge 0 disables the shared
-// cache read).
+// GetQuota fetches Codex quota for the default quota account, always probing
+// live (maxAge 0 disables the shared cache read).
 func GetQuota(timeout time.Duration) (map[string]any, error) {
 	return GetQuotaForHome(timeout, "", 0)
 }
 
 // GetQuotaForHome fetches Codex quota for the account identified by codexHome
-// (its CODEX_HOME). An empty codexHome queries the default account, identical to
-// GetQuota. codexHome must be an already-expanded absolute path; callers expand
-// "~" via config.ExpandTilde before passing it here (mirrors the Claude
-// GetQuotaForConfigDir contract). When the shared cache holds this account's last
-// probe no older than maxAge, that raw response is re-decoded and returned
+// (its CODEX_HOME). An empty codexHome queries quota's default Codex home, not
+// the caller's inherited environment. When the shared cache holds this account's
+// last probe no older than maxAge, that raw response is re-decoded and returned
 // instead of starting app-server; a live probe's response is written back. A
 // non-positive maxAge skips the cache read but still refreshes it on success.
 func GetQuotaForHome(timeout time.Duration, codexHome string, maxAge time.Duration) (map[string]any, error) {
+	codexHome, err := resolveHome(codexHome)
+	if err != nil {
+		return nil, err
+	}
 	key := codexCacheKey(codexHome)
 	if raw, ok := quotacache.Get(key, maxAge); ok {
 		if out, err := parseCachedQuota(raw); err == nil {
@@ -251,20 +253,21 @@ func cacheValidUntil(rr rateLimitsResponse) time.Time {
 }
 
 // codexCacheKey is the shared-cache key for the account a given codexHome
-// selects — the account's RESOLVED CODEX_HOME (inherited value or ~/.codex for
-// the default), not its logical name. Mirrors claudeCacheKey; keying on the
-// resolved path keeps one environment's default-account entry from being served
-// to a run that inherited a different CODEX_HOME.
+// selects: the resolved CODEX_HOME, not its logical name. An empty home means
+// quota's default Codex home.
 func codexCacheKey(codexHome string) string {
 	resolved := codexHome
 	if resolved == "" {
-		resolved = os.Getenv("CODEX_HOME")
-		if resolved == "" {
-			home, _ := os.UserHomeDir()
-			resolved = filepath.Join(home, ".codex")
-		}
+		resolved, _ = config.DefaultAccountDirectory("codex")
 	}
 	return "codex:" + filepath.Clean(resolved)
+}
+
+func resolveHome(home string) (string, error) {
+	if home == "" {
+		return config.DefaultAccountDirectory("codex")
+	}
+	return config.CanonicalAccountDirectory(home)
 }
 
 func EnvForHome(base []string, home string) []string {
@@ -278,9 +281,7 @@ func EnvForHome(base []string, home string) []string {
 		"OPENAI_BASE_URL":        true,
 		"OPENAI_ORGANIZATION":    true,
 		"OPENAI_PROJECT":         true,
-	}
-	if home != "" {
-		drop["CODEX_HOME"] = true
+		"CODEX_HOME":             true,
 	}
 	env := make([]string, 0, len(base)+1)
 	for _, kv := range base {

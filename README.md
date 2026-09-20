@@ -83,7 +83,7 @@ quota-cli account rm codex-2                   # 계정 제거
 - `key`는 `claude-<N>` 또는 `codex-<N>` 형식이어야 한다. 형식·중복은 `add`가 검증한다.
 - `dir`은 해당 계정의 config 디렉터리(Claude=`CLAUDE_CONFIG_DIR`, Codex=`CODEX_HOME`, `~` 확장 지원).
 - **Codex는 각 `CODEX_HOME`에 별도 로그인**해 두어야 한다(`CODEX_HOME=~/.codex-alt codex login`). 인증 파일 복사가 아니다. 같은 과금 계정을 여러 home에 로그인해도 되지만, 사용량 한도·초기화권은 서버측 계정 단위라 숫자는 동일하게 나온다.
-- **기본 계정은 실행 환경의 `CLAUDE_CONFIG_DIR`/`CODEX_HOME`을 그대로 따른다.** 그 변수가 설정된 셸(예: 에이전트 CLI 안)에서 `quota-cli`를 돌리면 기본 계정 행이 그 계정을 조회하므로, 같은 실제 디렉터리를 추가 계정으로도 등록해 두었다면 충돌한 계정들은 조회 대상에서 제외하고 오류를 보고한다. 심볼릭 링크로 같은 위치를 가리키는 경우도 중복으로 판단한다. 기본 계정을 고정해서 보려면 변수를 지우고 실행한다(`env -u CLAUDE_CONFIG_DIR quota-cli`).
+- **기본 계정은 quota 기본값인 `~/.claude`와 `~/.codex`로 고정된다.** 호출한 셸이나 에이전트의 `CLAUDE_CONFIG_DIR`/`CODEX_HOME`은 기본 계정 선택에 쓰지 않는다. 다른 계정을 함께 보려면 추가 계정으로 등록해야 하며, 심볼릭 링크로 같은 위치를 가리키는 경우도 중복으로 판단한다.
 
 등록하면 `quota-cli`가 기본 계정과 추가 계정을 함께 조회해 각각 `claude`/`claude-2`, `codex`/`codex-2` … 로
 출력한다. 설정은 `~/.config/quota/config.json`에 저장되며, 직접 편집해도 된다:
@@ -169,8 +169,8 @@ quota-cli models refresh --account=codex
 
 등록된 계정별 CLI 메타데이터에서 모델 ID, alias 해석값, effort 지원 정보를 조회한다.
 `~/.config/quota/model-cache/`에 조회 성공 시각과 CLI 버전을 함께 저장한다.
-기본 계정의 모델 조회는 CLI 환경을 상속한다. `CLAUDE_CONFIG_DIR`·`CODEX_HOME`을 직접 설정한다면 절대경로를 사용해야 하며, 상대경로이면 모델 조회를 오류로 중단한다.
-모델 캐시는 계정 경로와 해당 환경변수의 지정 여부·값을 함께 구분한다.
+기본 계정의 모델 조회도 quota 기본 계정 디렉터리를 명시해 실행한다. 호출 환경의 `CLAUDE_CONFIG_DIR`·`CODEX_HOME`은 조회 대상이나 캐시 identity를 바꾸지 않는다.
+모델 캐시는 확정된 계정 경로와 자식 프로세스에 전달한 계정 환경을 함께 구분한다.
 provider를 명시한 `exec-prompt`와 `select-agent`는 선택된 계정의 캐시가 없거나 3시간이 지났거나 CLI 버전이 바뀌면
 갱신한다. `models refresh`는 즉시 다시 조회한다. 갱신 실패 시 오래된 목록으로 진행하지 않고 오류를 반환한다.
 자동 라우팅은 분류 전에 Codex 계정들의 캐시만 확인한다. 조회 시각은 CLI 응답을 받은 시각이며,

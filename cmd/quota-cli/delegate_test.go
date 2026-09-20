@@ -403,13 +403,13 @@ func TestPromptEnvironmentsSelectOnlyRequestedAccount(t *testing.T) {
 	}
 }
 
-func TestDefaultPromptEnvironmentsPreserveInheritedAccount(t *testing.T) {
+func TestDefaultPromptEnvironmentsDropInheritedAccount(t *testing.T) {
 	base := []string{"CLAUDE_CONFIG_DIR=/inherited-claude", "CODEX_HOME=/inherited-codex"}
-	if got := envMap(claude.EnvForConfigDir(base, ""))["CLAUDE_CONFIG_DIR"]; got != "/inherited-claude" {
-		t.Fatalf("default Claude account changed inherited config dir: %q", got)
+	if _, ok := envMap(claude.EnvForConfigDir(base, ""))["CLAUDE_CONFIG_DIR"]; ok {
+		t.Fatal("empty Claude target preserved inherited config dir")
 	}
-	if got := envMap(codex.EnvForHome(base, ""))["CODEX_HOME"]; got != "/inherited-codex" {
-		t.Fatalf("default Codex account changed inherited home: %q", got)
+	if _, ok := envMap(codex.EnvForHome(base, ""))["CODEX_HOME"]; ok {
+		t.Fatal("empty Codex target preserved inherited home")
 	}
 }
 
@@ -453,8 +453,8 @@ func TestSelectClaudeAccountUsesSharedCache(t *testing.T) {
 	defaultRaw := "Current session: 10% used - resets in 4h\nCurrent week (all models): 80% used - resets in 6d"
 	extraRaw := "Current session: 10% used - resets in 4h\nCurrent week (all models): 20% used - resets in 1d"
 	validUntil := time.Now().Add(time.Hour)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude"), defaultRaw, validUntil)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), extraRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), defaultRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-2")), extraRaw, validUntil)
 
 	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}}}
 	selected, err := selectClaudeAccount(cfg, nil, time.Now())
@@ -475,8 +475,8 @@ func TestSelectClaudeAccountScoresSurplusOverConfiguredFloor(t *testing.T) {
 	defaultRaw := "Current session: 10% used - resets in 4h\nCurrent week (all models): 10% used - resets in 1d"
 	extraRaw := "Current session: 50% used - resets in 4h\nCurrent week (all models): 50% used - resets in 1d"
 	validUntil := time.Now().Add(time.Hour)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude"), defaultRaw, validUntil)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), extraRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), defaultRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-2")), extraRaw, validUntil)
 
 	cfg := config.Config{
 		ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}},
@@ -502,7 +502,7 @@ func TestSelectClaudeAccountRejectsWindowBelowConfiguredFloor(t *testing.T) {
 
 	raw := "Current session: 70% used - resets in 4h\nCurrent week (all models): 20% used - resets in 1d"
 	validUntil := time.Now().Add(time.Hour)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude"), raw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), raw, validUntil)
 
 	cfg := config.Config{ExecPrompt: &config.ExecPromptConfig{AccountSettings: map[string]config.ExecPromptAccountSettings{
 		"claude": {MinLeftPct: floatPtr(40)},
@@ -521,8 +521,8 @@ func TestSelectClaudeAccountSkipsBelowPromptFloor(t *testing.T) {
 	defaultRaw := "Current session: 10% used - resets in 4h\nCurrent week (all models): 99% used - resets in 1m"
 	extraRaw := "Current session: 10% used - resets in 4h\nCurrent week (all models): 50% used - resets in 6d"
 	validUntil := time.Now().Add(time.Hour)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude"), defaultRaw, validUntil)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), extraRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), defaultRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-2")), extraRaw, validUntil)
 
 	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}}}
 	selected, err := selectClaudeAccount(cfg, nil, time.Now())
@@ -543,8 +543,8 @@ func TestSelectClaudeAccountFailsWhenAllAccountsBelowPromptFloor(t *testing.T) {
 	defaultRaw := "Current session: 99% used - resets in 1m\nCurrent week (all models): 99% used - resets in 1m"
 	extraRaw := "Current session: 98% used - resets in 2m\nCurrent week (all models): 98% used - resets in 2m"
 	validUntil := time.Now().Add(time.Hour)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude"), defaultRaw, validUntil)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), extraRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), defaultRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-2")), extraRaw, validUntil)
 
 	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}}}
 	if _, err := selectClaudeAccount(cfg, nil, time.Now()); err == nil {
@@ -600,7 +600,7 @@ func TestSelectClaudeAccountModelFailureMessage(t *testing.T) {
 
 	raw := "Current session: 99% used - resets in 1m\nCurrent week (all models): 99% used - resets in 1m\nCurrent week (Fable): 99% used - resets in 1m"
 	validUntil := time.Now().Add(time.Hour)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude"), raw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), raw, validUntil)
 
 	_, err := selectClaudeAccount(config.Config{}, []string{"--model", "fable"}, time.Now())
 	if err == nil {
@@ -620,8 +620,8 @@ func TestSelectClaudeAccountUsesModelWindowWhenEveryUsableAccountHasIt(t *testin
 	defaultRaw := "Current session: 20% used - resets in 4h\nCurrent week (all models): 10% used - resets in 1d\nCurrent week (Fable): 80% used - resets in 1d"
 	extraRaw := "Current session: 20% used - resets in 4h\nCurrent week (all models): 80% used - resets in 1d\nCurrent week (Fable): 10% used - resets in 1d"
 	validUntil := time.Now().Add(time.Hour)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude"), defaultRaw, validUntil)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), extraRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), defaultRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-2")), extraRaw, validUntil)
 
 	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}}}
 	selected, err := selectClaudeAccount(cfg, []string{"--model", "fable"}, time.Now())
@@ -643,9 +643,9 @@ func TestSelectClaudeAccountModelWindowMixIsOrderIndependent(t *testing.T) {
 	bestRaw := "Current session: 20% used - resets in 4h\nCurrent week (all models): 10% used - resets in 1d\nCurrent week (Fable): 20% used - resets in 1d"
 	noModelRaw := "Current session: 20% used - resets in 4h\nCurrent week (all models): 50% used - resets in 1d"
 	validUntil := time.Now().Add(time.Hour)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude"), defaultRaw, validUntil)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), bestRaw, validUntil)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude-3"), noModelRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), defaultRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-2")), bestRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-3")), noModelRaw, validUntil)
 
 	firstOrder := config.Config{ClaudeAccounts: []config.ClaudeAccount{
 		{Key: "claude-2", ConfigDir: "~/.claude-2"},
@@ -676,9 +676,9 @@ func TestSelectClaudeAccountResetUnknownMixIsOrderIndependent(t *testing.T) {
 	unknownRaw := "Current session: 20% used\nCurrent week (all models): 20% used"
 	soonerRaw := "Current session: 20% used\nCurrent week (all models): 20% used - resets in 1d"
 	validUntil := time.Now().Add(time.Hour)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude"), defaultRaw, validUntil)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude-2"), unknownRaw, validUntil)
-	quotacache.Put("claude:"+filepath.Join(home, ".claude-3"), soonerRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), defaultRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-2")), unknownRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-3")), soonerRaw, validUntil)
 
 	firstOrder := config.Config{ClaudeAccounts: []config.ClaudeAccount{
 		{Key: "claude-2", ConfigDir: "~/.claude-2"},
@@ -708,8 +708,8 @@ func TestSelectCodexAccountUsesSharedCache(t *testing.T) {
 	defaultRaw := `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":80,"windowDurationMins":10080}}}`
 	extraRaw := `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":20,"windowDurationMins":10080}}}`
 	validUntil := time.Now().Add(time.Hour)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex"), defaultRaw, validUntil)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex-2"), extraRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), defaultRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex-2")), extraRaw, validUntil)
 
 	cfg := config.Config{CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: "~/.codex-2"}}}
 	selected, err := selectCodexAccount(cfg, time.Now())
@@ -730,8 +730,8 @@ func TestSelectCodexAccountScoresSurplusOverConfiguredFloor(t *testing.T) {
 	defaultRaw := `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":10,"windowDurationMins":10080}}}`
 	extraRaw := `{"rateLimits":{"primary":{"usedPercent":50,"windowDurationMins":300},"secondary":{"usedPercent":50,"windowDurationMins":10080}}}`
 	validUntil := time.Now().Add(time.Hour)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex"), defaultRaw, validUntil)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex-2"), extraRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), defaultRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex-2")), extraRaw, validUntil)
 
 	cfg := config.Config{
 		CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: "~/.codex-2"}},
@@ -804,8 +804,8 @@ func TestSelectCodexAccountRanksWeeklyOnlyByWeeklyQuota(t *testing.T) {
 	defaultRaw := `{"rateLimits":{"primary":{"usedPercent":50,"windowDurationMins":300},"secondary":{"usedPercent":50,"windowDurationMins":10080}}}`
 	extraRaw := `{"rateLimits":{"primary":{"usedPercent":1,"windowDurationMins":10080}}}`
 	validUntil := time.Now().Add(time.Hour)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex"), defaultRaw, validUntil)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex-2"), extraRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), defaultRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex-2")), extraRaw, validUntil)
 
 	cfg := config.Config{CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: "~/.codex-2"}}}
 	selected, err := selectCodexAccount(cfg, time.Now())
@@ -826,8 +826,8 @@ func TestSelectCodexAccountSkipsBelowPromptFloor(t *testing.T) {
 	defaultRaw := `{"rateLimits":{"primary":{"usedPercent":99,"windowDurationMins":300},"secondary":{"usedPercent":10,"windowDurationMins":10080}}}`
 	extraRaw := `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":50,"windowDurationMins":10080}}}`
 	validUntil := time.Now().Add(time.Hour)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex"), defaultRaw, validUntil)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex-2"), extraRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), defaultRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex-2")), extraRaw, validUntil)
 
 	cfg := config.Config{CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: "~/.codex-2"}}}
 	selected, err := selectCodexAccount(cfg, time.Now())
@@ -848,8 +848,8 @@ func TestSelectCodexAccountFailsWhenAllAccountsBelowPromptFloor(t *testing.T) {
 	defaultRaw := `{"rateLimits":{"primary":{"usedPercent":99,"windowDurationMins":300},"secondary":{"usedPercent":99,"windowDurationMins":10080}}}`
 	extraRaw := `{"rateLimits":{"primary":{"usedPercent":98,"windowDurationMins":300},"secondary":{"usedPercent":98,"windowDurationMins":10080}}}`
 	validUntil := time.Now().Add(time.Hour)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex"), defaultRaw, validUntil)
-	quotacache.Put("codex:"+filepath.Join(home, ".codex-2"), extraRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), defaultRaw, validUntil)
+	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex-2")), extraRaw, validUntil)
 
 	cfg := config.Config{CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: "~/.codex-2"}}}
 	if _, err := selectCodexAccount(cfg, time.Now()); err == nil {
@@ -940,7 +940,7 @@ func floatPtr(v float64) *float64 {
 	return &v
 }
 
-func TestResolvedDefaultAccountsPreserveProviderEnvironment(t *testing.T) {
+func TestResolvedDefaultAccountsUseQuotaDefaultEnvironment(t *testing.T) {
 	for _, provider := range []string{"claude", "codex"} {
 		for _, inherited := range []bool{false, true} {
 			t.Run(provider+"/"+map[bool]string{false: "unset", true: "inherited"}[inherited], func(t *testing.T) {
@@ -962,8 +962,9 @@ func TestResolvedDefaultAccountsPreserveProviderEnvironment(t *testing.T) {
 						t.Fatalf("resolution %v %v", accounts, errs)
 					}
 					got = claude.EnvForConfigDir(base, accounts[0].ConfigDir)
-					if len(selectAgentClaudeSetEnv(accounts[0].ConfigDir)) != 0 {
-						t.Fatal("default recommendation added an override")
+					defaultDir := quotaTestAccountDir(t, filepath.Join(home, ".claude"))
+					if set := selectAgentClaudeSetEnv(accounts[0].ConfigDir); set["CLAUDE_CONFIG_DIR"] != defaultDir {
+						t.Fatalf("default recommendation = %v", set)
 					}
 				} else {
 					accounts, errs := (config.Config{}).ResolveCodexAccounts()
@@ -971,12 +972,15 @@ func TestResolvedDefaultAccountsPreserveProviderEnvironment(t *testing.T) {
 						t.Fatalf("resolution %v %v", accounts, errs)
 					}
 					got = codex.EnvForHome(base, accounts[0].Home)
-					if len(selectAgentCodexSetEnv(accounts[0].Home)) != 0 {
-						t.Fatal("default recommendation added an override")
+					defaultDir := quotaTestAccountDir(t, filepath.Join(home, ".codex"))
+					if set := selectAgentCodexSetEnv(accounts[0].Home); set["CODEX_HOME"] != defaultDir {
+						t.Fatalf("default recommendation = %v", set)
 					}
 				}
-				if !reflect.DeepEqual(got, base) {
-					t.Fatalf("default account changed environment: %v, want %v", got, base)
+				gotMap := envMap(got)
+				defaultDir := quotaTestAccountDir(t, filepath.Join(home, "."+provider))
+				if gotMap["PATH"] != "/usr/bin" || gotMap[envKey] != defaultDir {
+					t.Fatalf("default account environment = %v", got)
 				}
 			})
 		}

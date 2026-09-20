@@ -91,8 +91,8 @@ github.com/sky1core/quota
 - 같은 라벨의 모델 행이 중복되면 첫 항목만 채택한다(개수 상한은 두지 않는다).
 
 **계정 단위**: `internal/claude`가 반환하는 이 구조는 Claude 계정 **하나**의 quota다.
-계정은 `CLAUDE_CONFIG_DIR`(Claude CLI config 디렉터리)로 구분된다 — config-dir이 다르면 다른 계정이다.
-config-dir 미지정 시 claude CLI 기본 계정(`~/.claude` 또는 프로세스의 `CLAUDE_CONFIG_DIR`)을 조회한다.
+계정은 Claude config 디렉터리로 구분된다 — config-dir이 다르면 다른 계정이다.
+config-dir 미지정 시 quota 기본 계정(`~/.claude`)을 조회한다. 호출자 환경의 `CLAUDE_CONFIG_DIR`는 계정 선택에 쓰지 않는다.
 여러 계정을 합쳐 출력하는 것은 `quota-cli`의 책임이며, `internal/claude`는 계정 분리 메커니즘을 알지 못한다.
 
 ### Codex quota
@@ -142,8 +142,8 @@ Codex 고유 사항:
 - 사용 가능한 grant가 하나도 없으면(items 비면) `resetCredits` 키 자체를 생략한다.
 
 **계정 단위**: `internal/codex`가 반환하는 이 구조는 Codex 계정 **하나**의 quota다.
-계정은 `CODEX_HOME`(Codex CLI home 디렉터리)로 구분된다 — home이 다르면 다른 계정이다.
-home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CODEX_HOME`)을 조회한다.
+계정은 Codex home 디렉터리로 구분된다 — home이 다르면 다른 계정이다.
+home 미지정 시 quota 기본 계정(`~/.codex`)을 조회한다. 호출자 환경의 `CODEX_HOME`는 계정 선택에 쓰지 않는다.
 같은 과금 계정을 서로 다른 `CODEX_HOME`에 각각 로그인해 쓸 수도 있으나, 사용량 한도·초기화권은
 서버측 계정 단위라 같은 계정이면 home이 달라도 동일하게 나온다(격리되는 것은 로컬 설정·세션뿐).
 여러 계정을 합쳐 출력하는 것은 `quota-cli`/`quota-bar`의 책임이며, `internal/codex`는 계정 분리
@@ -210,7 +210,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 - 장기 창을 최우선, 짧은 창을 다음 순서로 비교한다. 비교값은 `남은 % - minLeftPct`이며, 양쪽 모두 리셋 시각을 알면 `비교값 / 리셋까지 남은 분`이 큰 쪽을 우선해, 같은 비교값이면 먼저 리셋되는 계정을 먼저 소비한다. 리셋 시각을 모르는 쪽이 있으면 비교값으로 비교한다. 모든 비교값이 같으면 config 순서가 빠른 계정을 선택한다.
 - Codex는 실제 `windowMins`가 가장 큰 창을 장기 기준, 가장 작은 창을 짧은 기준으로 사용한다.
 - Claude는 기본적으로 `weekly_all` 다음 `session` 순서로 비교한다. `--model`/`-m`이 지정돼도 요청 모델값과 실제 추가 quota row label이 맞을 때만 그 row를 본다. Opus처럼 전용 row가 없는 모델은 별도 quota를 가정하지 않고 `weekly_all`, `session`으로 비교한다. Fable처럼 해당 모델 창의 남은 비율을 읽을 수 있으면 그 계정에는 해당 모델 창의 계정별 `minLeftPct` 하한선을 적용한다. 살아남은 모든 후보가 남은 비율을 읽을 수 있는 해당 모델 창을 갖고 있을 때만 해당 모델 창을 우선 비교하고, 일부 후보에만 있으면 `weekly_all`, `session`으로 비교한다.
-- 선택된 추가 Claude 계정은 `CLAUDE_CONFIG_DIR`, 추가 Codex 계정은 `CODEX_HOME`으로 실행한다. 기본 계정은 상속된 해당 변수를 유지한다. 조회한 로그인 계정과 실행 계정이 달라지지 않도록 Claude는 `ANTHROPIC_*`/`CLAUDE_*`의 인증·엔드포인트 override와 `CLAUDECODE`를, Codex는 `CODEX_*`/`OPENAI_*`의 인증·엔드포인트 override를 제거한다.
+- 선택된 Claude 계정은 `CLAUDE_CONFIG_DIR`, 선택된 Codex 계정은 `CODEX_HOME`으로 실행한다. 기본 계정도 quota가 확정한 기본 디렉터리를 명시하며 호출자 환경의 해당 변수를 상속하지 않는다. 조회한 로그인 계정과 실행 계정이 달라지지 않도록 Claude는 `ANTHROPIC_*`/`CLAUDE_*`의 인증·엔드포인트 override와 `CLAUDECODE`를, Codex는 `CODEX_*`/`OPENAI_*`의 인증·엔드포인트 override를 제거한다.
 - 대화형 Claude/Codex 실행은 지원하지 않는다.
 
 **`select-agent` 동작**:
@@ -269,8 +269,8 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 `agent hooks` JSON 설치와 Claude overlay 설치는 대상 경로별 프로세스 간 잠금 안에서 최신 파일 읽기·수정·백업·고유 임시 파일 쓰기·rename·저장 결과 재읽기를 수행한다. 값이 동일하면 파일과 백업을 쓰지 않는다. 신규 파일은 0644에 프로세스 umask를 적용하고, 기존 파일의 권한은 보존한다. 기존 내용을 담는 임시 파일은 원본보다 넓은 접근 권한으로 생성하지 않는다. 기존 JSON 숫자와 다른 설정값을 보존하고 파싱/변환 오류면 원본을 덮어쓰지 않는다. 직렬화 보장은 이 저장 경로를 사용하는 quota 명령 사이에 한정되며 외부 편집기를 통제하지 않는다.
 
 **`agent instructions` 동작**:
-- 목적은 공용 `AGENTS.md`와 개인 `AGENTS.local.md`를 Claude Code와 Codex CLI가 native로 읽게 하는 것이다. 사용자는 계정당 `setup` 한 번만 실행하며 저장소별 준비 명령은 없다. 지침 원본 파일명은 고정이고 별도 스크립트·사용자 작성 hook 없이 동작한다.
-- `setup [--agent=all|claude|codex] [--dry-run] [--no-global-ignore]`는 현재 CLI 계정에 연결을 설치한다. Claude는 `settings.json`의 SessionStart·WorktreeCreate·WorktreeRemove에 고정된 quota 준비 명령(`_prepare`)을 설치하며 Claude의 project instruction 옵션 값은 변경하지 않는다. Codex는 `hooks.json`의 SessionStart에 고정된 quota 준비 명령을 설치한다. Codex hook은 첫 세션 전달 본문이 preview로 잘리지 않도록 `additionalContextLimit = 0`을 포함한다. 이전 `_hook` 관리 항목과 정확히 식별된 이전 주입 hook은 교체·제거한다. Codex가 있으면 설치한 quota hook의 현재 native hook hash만 `config.toml`의 trust state에 동기화하고, 무관 hook·설정·주석·native 신뢰 상태는 보존한다. 전역 git ignore 파일(`core.excludesFile`, 미설정이면 `~/.config/git/ignore`)에 `AGENTS.override.md`, `.claude/AGENTS.md`, `.claude/CLAUDE.md`가 없으면 quota 관리 표식 주석 아래에 추가한다. 이미 있는 줄은 추가하지 않고 관리 대상으로 삼지 않는다. `--no-global-ignore`면 추가하지 않는다. 전역 ignore 파일은 읽은 내용을 기준으로 수정하고, 저장 직전에 다시 읽어 달라졌으면 저장하지 않고 실패한다(재읽기와 rename 사이의 경쟁은 보장 범위 밖이다). `all`은 상속된 환경으로 선택되는 Claude 계정 하나와 Codex 계정 하나이며 등록 계정 전체를 수정하지 않는다. dry-run은 같은 사전 검사와 변경 계획만 출력한다.
+- 목적은 공용 `AGENTS.md`와 개인 `AGENTS.local.md`를 Claude Code와 Codex CLI가 native로 읽게 하는 것이다. 사용자는 `setup` 한 번으로 선택한 runtime의 quota 기본 계정과 quota 설정에 등록된 추가 계정에 연결을 설치하며 저장소별 준비 명령은 없다. 지침 원본 파일명은 고정이고 별도 스크립트·사용자 작성 hook 없이 동작한다.
+- `setup [--agent=all|claude|codex] [--dry-run] [--no-global-ignore]`는 선택한 runtime의 기본 계정과 quota 설정에 등록된 추가 계정 모두에 연결을 설치한다. 대상 산출에는 호출 환경의 `CLAUDE_CONFIG_DIR`/`CODEX_HOME`을 사용하지 않는다. Claude는 각 계정 `settings.json`의 SessionStart·WorktreeCreate·WorktreeRemove에 해당 계정의 `--claude-config-dir`를 명시한 고정 quota 준비 명령(`_prepare`)을 설치하며 Claude의 project instruction 옵션 값은 변경하지 않는다. Codex는 각 계정 `hooks.json`의 SessionStart에 해당 계정의 `--codex-home`을 명시한 고정 quota 준비 명령을 설치한다. Codex hook은 첫 세션 전달 본문이 preview로 잘리지 않도록 `additionalContextLimit = 0`을 포함한다. 이전 `_hook` 관리 항목과 정확히 식별된 이전 주입 hook은 교체·제거한다. Codex 대상이 있으면 설치한 quota hook의 현재 native hook hash만 각 계정 `config.toml`의 trust state에 동기화하고, 무관 hook·설정·주석·native 신뢰 상태는 보존한다. 전역 git ignore 파일(`core.excludesFile`, 미설정이면 `~/.config/git/ignore`)에 `AGENTS.override.md`, `.claude/AGENTS.md`, `.claude/CLAUDE.md`가 없으면 quota 관리 표식 주석 아래에 추가한다. 이미 있는 줄은 추가하지 않고 관리 대상으로 삼지 않는다. `--no-global-ignore`면 추가하지 않는다. 전역 ignore 파일은 읽은 내용을 기준으로 수정하고, 저장 직전에 다시 읽어 달라졌으면 저장하지 않고 실패한다(재읽기와 rename 사이의 경쟁은 보장 범위 밖이다). dry-run은 같은 사전 검사와 변경 계획만 출력한다.
 - `uninstall [--agent=all|claude|codex] [--dry-run] [--remove-global-ignore]`은 계정 연결을 제거한다. 전역 ignore의 quota 관리 블록은 남아 있는 생성물의 노출을 막기 위해 기본적으로 유지하며, `--remove-global-ignore`를 `--agent=all`과 함께 명시할 때만 관리 표식 아래의 줄을 제거한다. 사용자가 직접 쓴 같은 내용의 줄은 제거하지 않는다. 저장소의 생성물은 건드리지 않으며 `status`가 남은 생성물을 보고한다.
 - 저장소 준비는 준비 hook이 세션 시작 시 그 checkout에 대해 수행한다. Git 저장소가 아니면 아무것도 하지 않는다. primary(bare 저장소는 bare 루트)에 `AGENTS.local.md`가 있으면 (1) 세션 시작 디렉터리부터 상위 디렉터리까지 `CLAUDE.md`/`.claude/CLAUDE.md`/`CLAUDE.local.md`가 없을 때는 checkout에 `.claude/AGENTS.md`를 `@../AGENTS.local.md` 한 줄로 생성·갱신하고, 있으면 checkout에 `.claude/CLAUDE.md`를 `@../AGENTS.local.md` 한 줄로 생성·갱신하며, (2) `AGENTS.override.md`를 checkout의 `AGENTS.md`(있으면)와 primary `AGENTS.local.md`의 결정적 병합으로 생성·갱신하고, (3) linked worktree에는 primary `AGENTS.local.md`와 등록된 로컬 파일의 관리 복사본을 갱신한다. 세션 시작 디렉터리부터 상위 디렉터리까지의 기존 `CLAUDE.md`/`.claude/CLAUDE.md`는 checkout `AGENTS.md`를 직접 import할 때만 Claude 호환으로 본다. 사용자 전역 `~/.claude/CLAUDE.md`는 이 판단에서 제외한다. `AGENTS.local.md`가 없으면 quota 소유의 변경 없는 생성물과 관리 복사본을 제거한다. 생성·갱신·제거의 모든 경로는 같은 보호 검사(상위 디렉터리, Git 추적, 소유권 해시·권한, 원본 오류)를 먼저 통과해야 하며 제거가 이 검사를 건너뛰지 않는다. 상태에 생성물로 기록됐지만 더 이상 준비 계획에 없는 파일(등록 해제된 생성물 등)도 같은 소유권 조건으로 제거한다. 이전 버전이 기록한 `AGENTS.md` 공용 복사본은 예외로 두어 생성·삭제 대상에서 제외한다. 이전 버전이 만든 `CLAUDE.md`와 `CLAUDE.local.md`는 상태에 기록된 quota 소유 생성물이면 제거하되, 대체 Claude bridge를 준비하지 못한 경우에는 보존한다. 원본 읽기 실패는 제거 사유가 아니며 해당 파일을 보존하고 이유를 출력한다. 제거·쓰기 경로의 상위 디렉터리는 checkout 안의 실제 디렉터리여야 하며 symlink를 따라가지 않는다. 준비 결과가 변경 없음이면 파일을 다시 쓰지 않는다.
 - 첫 세션 전달: 이벤트 source가 새 세션(startup)이고 준비 hook이 그 호출에서 native 로딩이 이미 끝난 파일을 바꿨을 때, 그 세션에 한해 additionalContext로 1회 전달한다. Claude는 `.claude/AGENTS.md`, `.claude/CLAUDE.md`, 또는 linked worktree의 `AGENTS.local.md` 복사본을 그 startup에서 생성·갱신했을 때 native가 아직 읽지 못한 본문만 전달한다. 이전 로컬 bridge 제거처럼 개인 본문을 이미 native가 읽은 migration에서는 개인 본문을 다시 보내지 않고, 공용 `AGENTS.md`가 누락되는 경우 공용 본문만 전달한다. Codex는 `AGENTS.override.md`가 생성됐을 때 개인 본문을, 갱신됐을 때는 병합본 전체를 전달한다(Codex는 `AGENTS.override.md`가 있으면 `AGENTS.md`를 읽지 않으므로). 로컬 지침 제거로 quota 소유 `AGENTS.override.md`가 삭제된 startup에서는 현재 `AGENTS.md` 본문을 전달한다. 같은 checkout에서 준비 파일이 없던 첫 startup 여러 개를 동시에 시작해 각 세션의 native 로딩 시점과 준비 hook 실행 순서가 엇갈리는 경우는 전달 보장 범위 밖이며, 다음 새 세션부터 native 파일 상태를 따른다. resume·compact·clear, 준비 결과 변경 없음, 생성 실패에는 전달하지 않는다. 그 외에는 hook이나 매 턴 입력에 본문을 붙이지 않으며 SubagentStart로 native 전달을 중복하지 않는다.
@@ -283,7 +283,7 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 - 사용자-facing `agent instructions` 검증은 `status`까지다. 모델 호출로 실제 지침 전달을 확인하는 live canary는 일반 사용자 명령으로 제공하지 않는다. 기본 기능 검증은 프로덕션 코드의 파일·설정 계약을 검사하는 로컬 테스트로 수행하고, 사용자 계정의 Claude/Codex quota를 소비하는 검증을 정상 사용 흐름에 넣지 않는다.
 - Claude WorktreeCreate는 primary 밖에 worktree를 만들고 준비 함수를 실행한 뒤 경로를 반환한다. WorktreeRemove는 관리한 worktree만 정리하며, 사용자 변경·추적되지 않은 사용자 파일·알 수 없는 ignored 파일·기록과 내용이나 권한이 달라진 생성물(이전 방식의 `CLAUDE.md` 포함)·변경 검사를 생략하는 index 플래그가 있으면 생성물을 지우기 전에 보존하고 실패한다. checkout 전체가 제거되므로 원본 오류 검사는 WorktreeRemove에 적용하지 않는다.
 - 계정 설정의 최신 읽기·수정·백업·원자적 저장은 대상 잠금 안에서 처리하고, 사전 검사는 모든 대상에 대해 쓰기 전에 수행한다. 여러 파일 중 일부만 적용되면 적용 경로와 실패 경로를 보고하고 non-zero로 끝낸다. 재적용은 중복 hook·불필요한 백업·동일 파일 재쓰기를 만들지 않는다.
-- 내부 진입점 `_prepare`는 고정된 공급자/이벤트 조합(`claude`: SessionStart·WorktreeCreate·WorktreeRemove, `codex`: SessionStart)만 받으며 임의 파일·명령 실행 입력은 받지 않는다.
+- 내부 진입점 `_prepare`는 고정된 공급자/이벤트 조합(`claude`: SessionStart·WorktreeCreate·WorktreeRemove, `codex`: SessionStart)과 설치 시 확정한 계정 경로(`--claude-config-dir` 또는 `--codex-home`)만 받으며 임의 파일·명령 실행 입력은 받지 않는다.
 
 **서브커맨드 (세션 로그 조회)**:
 | 명령 | 설명 |
@@ -294,8 +294,8 @@ home 미지정 시 codex CLI 기본 계정(`~/.codex` 또는 프로세스의 `CO
 
 - 세션 로그 조회는 읽기 전용이다. 로그 파일을 삭제, 이동, 수정, compact하지 않는다.
 - 기본 범위는 `agent=all`이며 `account`를 지정하면 해당 key만 본다. `claude-2`, `codex-2` 같은 추가 계정은 기존 `config.json` 계정 설정에서 로그 root를 계산한다.
-- Claude 기본 계정 로그 root는 `CLAUDE_PROJECTS_DIR`, `~/.claude/projects` 순서로 정한다. 호출자 환경의 `CLAUDE_CONFIG_DIR`는 기본 세션 로그 조회에 영향을 주지 않는다. 추가 Claude 계정은 등록된 `<configDir>/projects`를 본다.
-- Codex 기본 계정 로그 root는 `CODEX_SESSIONS_DIR`, `~/.codex/sessions` 순서로 정한다. 호출자 환경의 `CODEX_HOME`은 기본 세션 로그 조회에 영향을 주지 않는다. 추가 Codex 계정은 등록된 `<home>/sessions`를 본다.
+- Claude 기본 계정 로그 root는 quota 기본 계정의 `~/.claude/projects`다. 호출자 환경의 `CLAUDE_CONFIG_DIR`나 `CLAUDE_PROJECTS_DIR`는 기본 세션 로그 조회에 영향을 주지 않는다. 추가 Claude 계정은 등록된 `<configDir>/projects`를 본다.
+- Codex 기본 계정 로그 root는 quota 기본 계정의 `~/.codex/sessions`다. 호출자 환경의 `CODEX_HOME`이나 `CODEX_SESSIONS_DIR`은 기본 세션 로그 조회에 영향을 주지 않는다. 추가 Codex 계정은 등록된 `<home>/sessions`를 본다.
 - 기본 출력은 user/assistant 메시지 텍스트만 포함한다. tool call/result 원문은 `--include-tools`가 있을 때만 검색/출력한다.
 - 토큰 소모를 제한하기 위해 `search` 기본값은 `limit=20`, `max-chars=220`이고, `show` 기본값은 `tail=40`, `max-chars=880`이다. `max-chars=0`은 해당 truncation을 끈다.
 - `show`의 `session-ref`는 configured 로그 root 아래 파일의 정확한 path, basename, 또는 path 부분 문자열로 해석한다. 여러 파일이 맞으면 후보를 출력하고 실패한다.
@@ -516,7 +516,7 @@ Quit
 
 quota-cli·quota-bar·위임 실행이 공유하는, 계정별 **마지막 성공 조회의 파싱 전 raw 출력** 저장소. 각 소비자는 자기 신선도 기준에 맞는 값이 있으면 재사용한다.
 
-- **키 = 실제 조회된 경로**(계정 이름이 아님): Claude는 해석된 `CLAUDE_CONFIG_DIR`(기본 계정은 상속값 또는 `~/.claude`), Codex는 해석된 `CODEX_HOME`(기본 계정은 상속값 또는 `~/.codex`). 상속 환경이 다르면 다른 키가 되어, 한 환경의 기본 계정 값이 다른 환경 실행에 잘못 제공되지 않는다.
+- **키 = 실제 조회된 경로**(계정 이름이 아님): Claude는 해석된 config dir(기본 계정은 `~/.claude`), Codex는 해석된 home(기본 계정은 `~/.codex`). 호출자 환경의 `CLAUDE_CONFIG_DIR`/`CODEX_HOME`는 캐시 키에 쓰지 않는다.
 - **파싱 전 raw만 저장한다.** 파싱된 결과는 `time.Time`/`int`/`[]map[string]any` 등 Go 타입을 담고 있어 JSON 왕복으로 깨진다(→ string/float64/[]any). 읽을 때 재파싱해 타입 손상을 피한다. 상대 리셋만 있는 provider 출력은 절대 변경 시각을 알 수 없으므로 신선도 기준으로만 제한된다.
 - **성공만 저장한다.** 조회 실패는 캐시하지 않아 일시적 실패가 굳지 않고 매번 재시도된다.
 - **데이터 변경 경계에서 무효화한다.** 저장 시 가장 이른 창 리셋 또는 사용 가능한 초기화권 만료 시각을 함께 기록하고, 그 시각이 지나면 신선도 기준 이내라도 히트를 거부한다. 상대 리셋만 있는 창은 절대 시각이 없어 신선도 기준만 적용된다.
@@ -529,7 +529,7 @@ quota-cli·quota-bar·위임 실행이 공유하는, 계정별 **마지막 성�
 
 **함수**:
 - `GetQuota(timeout time.Duration) (map[string]any, error)` — 기본 계정 조회 (config-dir 미지정, 항상 실측 = maxAge 0)
-- `GetQuotaForConfigDir(timeout time.Duration, configDir string, maxAge time.Duration) (map[string]any, error)` — 지정한 `CLAUDE_CONFIG_DIR` 계정 조회. `configDir`가 빈 문자열이면 기본 계정. 공유 캐시(§공유 캐시)에 이 계정의 마지막 조회가 `maxAge` 이내로 있으면 그 raw를 재파싱해 반환하고, 실측 시 결과를 캐시에 기록한다. `maxAge`가 0 이하면 캐시 읽기를 건너뛰되 성공 시 갱신은 한다.
+- `GetQuotaForConfigDir(timeout time.Duration, configDir string, maxAge time.Duration) (map[string]any, error)` — 지정한 Claude config-dir 계정 조회. `configDir`가 빈 문자열이면 quota 기본 계정(`~/.claude`). 공유 캐시(§공유 캐시)에 이 계정의 마지막 조회가 `maxAge` 이내로 있으면 그 raw를 재파싱해 반환하고, 실측 시 결과를 캐시에 기록한다. `maxAge`가 0 이하면 캐시 읽기를 건너뛰되 성공 시 갱신은 한다.
 - `WindowKeys() []string` — 슬롯을 미리 만들어야 하는 소비자(quota-bar)가 열거하는 **소비자 힌트**(표시 순서). 데이터의 상한이 아니다 — 모델별 행이 더 많으면 `parseUsage`는 `extra_4` 이상도 반환하고, 슬롯이 없는 소비자만 그것을 무시한다.
 
 - Claude CLI를 **headless(`-p`)로 1회 실행**해 quota 조회. 두 함수는 동일한 조회 로직을 공유하며 config-dir 주입 여부만 다르다.
@@ -541,7 +541,7 @@ quota-cli·quota-bar·위임 실행이 공유하는, 계정별 **마지막 성�
 2. 프로세스 환경 (`fetchEnv`):
    - `CLAUDECODE` 제거: 중첩 세션 감지 회피
    - `ANTHROPIC_API_HOST` / `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` / `CLAUDE_API_KEY` / `CLAUDE_CODE_API_BASE_URL` / `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN` 제거: 사용자 로그인 계정 quota를 읽도록 강제 (커스텀 엔드포인트/대체 토큰이 quota를 가로채지 않게)
-   - `CLAUDE_CONFIG_DIR`: config-dir 지정 시 **상속값을 제거하고 지정값을 넣는다**(같은 이름의 할당을 두 번 두지 않는다 — 어느 쪽이 이길지는 OS가 정하므로, 지면 다른 계정 키 아래에 자기 계정 값이 실린다). config-dir 미지정 시에는 상속값을 그대로 둔다 — 그것이 호출자의 기본 계정을 고르는 방식이다.
+   - `CLAUDE_CONFIG_DIR`: 상속값을 제거하고 quota가 확정한 config-dir을 하나만 넣는다(같은 이름의 할당을 두 번 두지 않는다 — 어느 쪽이 이길지는 OS가 정하므로, 지면 다른 계정 키 아래에 자기 계정 값이 실린다).
 3. timeout 초과 시 context로 프로세스를 종료하고 timeout 에러를 반환한다. 실행 실패는 stderr(없으면 stdout) 앞부분을 붙여 에러로 반환한다.
 4. stdout의 JSON 엔벨로프를 파싱(`usageText`)해 `result`(사람이 읽는 /usage 리포트)를 꺼낸다. `is_error: true`면 CLI가 준 메시지를 담아 에러로 실패한다 — 에러 엔벨로프에는 사용량 행이 없으므로 그대로 파싱하면 원인 대신 파싱 실패로 보인다.
 5. `parseUsage()` 로 파싱.
@@ -565,11 +565,11 @@ quota-cli·quota-bar·위임 실행이 공유하는, 계정별 **마지막 성�
 ### internal/codex
 
 **함수**:
-- `GetQuota(timeout time.Duration) (map[string]any, error)` — 기본 계정 조회 (CODEX_HOME 미주입, 항상 실측 = maxAge 0)
-- `GetQuotaForHome(timeout time.Duration, codexHome string, maxAge time.Duration) (map[string]any, error)` — 지정한 `CODEX_HOME` 계정 조회. `codexHome`가 빈 문자열이면 기본 계정. `codexHome`는 이미 확장된 절대경로여야 하며, 호출자가 `config.ExpandTilde`로 확장해 넘긴다(Claude `GetQuotaForConfigDir`와 대칭). 공유 캐시 동작은 `GetQuotaForConfigDir`와 동일하다.
+- `GetQuota(timeout time.Duration) (map[string]any, error)` — quota 기본 계정(`~/.codex`) 조회 (항상 실측 = maxAge 0)
+- `GetQuotaForHome(timeout time.Duration, codexHome string, maxAge time.Duration) (map[string]any, error)` — 지정한 Codex home 계정 조회. `codexHome`가 빈 문자열이면 quota 기본 계정(`~/.codex`). 공유 캐시 동작은 `GetQuotaForConfigDir`와 동일하다.
 
 **동작**:
-1. `codex app-server` 프로세스를 시작 (stdin/stdout pipe). `codexHome`가 비어있지 않으면 상속된 `CODEX_HOME`을 제거하고 `CODEX_HOME=<codexHome>`을 하나만 주입한다. 빈 문자열이면 상속된 `CODEX_HOME`을 유지한다. 두 경우 모두 로그인한 home 계정 대신 환경 override가 사용되지 않도록 `CODEX_ACCESS_TOKEN`/`CODEX_API_KEY`/`CODEX_AUTH`/`CODEX_AUTHAPI_BASE_URL`/`CODEX_URL`과 `OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_ORGANIZATION`/`OPENAI_PROJECT`를 제거한다.
+1. `codex app-server` 프로세스를 시작 (stdin/stdout pipe). 상속된 `CODEX_HOME`을 제거하고 quota가 확정한 `CODEX_HOME=<codexHome>`을 하나만 주입한다. 로그인한 home 계정 대신 환경 override가 사용되지 않도록 `CODEX_ACCESS_TOKEN`/`CODEX_API_KEY`/`CODEX_AUTH`/`CODEX_AUTHAPI_BASE_URL`/`CODEX_URL`과 `OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_ORGANIZATION`/`OPENAI_PROJECT`를 제거한다.
 2. JSON-RPC 2.0 프로토콜:
    - Request #1: `initialize` (clientInfo 전달)
    - Request #2: `account/rateLimits/read`

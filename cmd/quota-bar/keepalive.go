@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -98,25 +97,20 @@ func changeKeepalive(service *keepalive.Service, current settings, next keepaliv
 }
 
 func newKeepaliveService(claudeAccounts []config.ResolvedAccount, codexAccounts []config.ResolvedCodexAccount) *keepalive.Service {
-	home, _ := os.UserHomeDir()
+	claudeDefault, _ := config.DefaultAccountDirectory("claude")
+	codexDefault, _ := config.DefaultAccountDirectory("codex")
 	var accounts []keepalive.Account
 	for _, a := range claudeAccounts {
 		dir := a.ConfigDir
 		if dir == "" {
-			dir = os.Getenv("CLAUDE_CONFIG_DIR")
-			if dir == "" {
-				dir = filepath.Join(home, ".claude")
-			}
+			dir = claudeDefault
 		}
 		accounts = append(accounts, keepalive.Account{Provider: "claude", Key: a.Key, Home: dir})
 	}
 	for _, a := range codexAccounts {
 		dir := a.Home
 		if dir == "" {
-			dir = os.Getenv("CODEX_HOME")
-			if dir == "" {
-				dir = filepath.Join(home, ".codex")
-			}
+			dir = codexDefault
 		}
 		accounts = append(accounts, keepalive.Account{Provider: "codex", Key: a.Key, Home: dir})
 	}

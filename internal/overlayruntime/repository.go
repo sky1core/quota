@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sky1core/quota/internal/childprocess"
+	"github.com/sky1core/quota/internal/config"
 	"golang.org/x/sys/unix"
 )
 
@@ -32,6 +33,8 @@ type repoContext struct {
 	Start, Top, Root, Common string
 	Worktrees                []string
 	Context                  context.Context
+	ClaudeConfigDir          string
+	CodexHome                string
 }
 
 func (r repoContext) Bare() bool          { return r.Root == r.Common }
@@ -88,8 +91,49 @@ func onePath(data []byte) (string, error) {
 	}
 	return resolvePath(string(data[:len(data)-1])), nil
 }
+
+type NativeAccountPaths struct {
+	ClaudeConfigDir string
+	CodexHome       string
+	NeedClaude      bool
+	NeedCodex       bool
+}
+
+func normalizeNativeAccountPaths(paths NativeAccountPaths) (NativeAccountPaths, error) {
+	var err error
+	if paths.NeedClaude {
+		if strings.TrimSpace(paths.ClaudeConfigDir) == "" {
+			paths.ClaudeConfigDir, err = config.DefaultAccountDirectory("claude")
+		} else {
+			paths.ClaudeConfigDir, err = config.CanonicalAccountDirectory(paths.ClaudeConfigDir)
+		}
+		if err != nil {
+			return NativeAccountPaths{}, err
+		}
+	}
+	if paths.NeedCodex {
+		if strings.TrimSpace(paths.CodexHome) == "" {
+			paths.CodexHome, err = config.DefaultAccountDirectory("codex")
+		} else {
+			paths.CodexHome, err = config.CanonicalAccountDirectory(paths.CodexHome)
+		}
+		if err != nil {
+			return NativeAccountPaths{}, err
+		}
+	}
+	return paths, nil
+}
+
 func resolveContext(ctx context.Context, dir string) (repoContext, error) {
-	r := repoContext{Context: ctx}
+	return resolveContextWithNativePaths(ctx, dir, NativeAccountPaths{})
+}
+
+func resolveContextWithNativePaths(ctx context.Context, dir string, paths NativeAccountPaths) (repoContext, error) {
+	paths, err := normalizeNativeAccountPaths(paths)
+	if err != nil {
+		return repoContext{}, err
+	}
+	r := repoContext{Context: ctx, ClaudeConfigDir: paths.ClaudeConfigDir, CodexHome: paths.CodexHome}
 	p, e := filepath.EvalSymlinks(dir)
 	if e != nil {
 		return r, fmt.Errorf("cannot enter project directory: %s: %w", dir, e)

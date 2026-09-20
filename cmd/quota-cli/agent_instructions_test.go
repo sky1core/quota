@@ -2,23 +2,33 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"github.com/sky1core/quota/internal/agentinstructions"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sky1core/quota/internal/agentinstructions"
+	"github.com/sky1core/quota/internal/config"
 )
 
 func instructionsHome(t *testing.T) string {
 	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
 		t.Skip("git not available")
 	}
 	home := t.TempDir()
+	binDir := filepath.Join(home, "bin")
+	instructionsWrite(t, filepath.Join(binDir, "git"), "#!/bin/sh\nexec "+gitPath+" \"$@\"\n")
+	if err := os.Chmod(filepath.Join(binDir, "git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("PATH", binDir)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "")
@@ -234,6 +244,32 @@ func TestInstructionsSetupNoGlobalIgnore(t *testing.T) {
 	}
 }
 
+func TestInstructionsStatusAndUninstallProceedPastInvalidExtraAccount(t *testing.T) {
+	home := instructionsHome(t)
+	repo := instructionsRepo(t)
+	code, out, stderr := runInstructions(t, "", "setup", "--agent=claude", "--json")
+	if code != 0 {
+		t.Fatalf("setup: %d %s %s", code, out, stderr)
+	}
+	if err := config.Save(config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "work", ConfigDir: "~/.claude-extra"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, stderr = runInstructions(t, "", "status", repo, "--agent=claude", "--json")
+	if code == 0 || stderr != "" || !strings.Contains(out, `account key \"work\" must match claude-`) || !strings.Contains(out, `"account": "claude"`) {
+		t.Fatalf("status did not inspect valid account and report invalid extra: %d %s %s", code, out, stderr)
+	}
+
+	code, out, stderr = runInstructions(t, "", "uninstall", "--agent=claude", "--json")
+	if code == 0 || stderr != "" || !strings.Contains(out, `account key \"work\" must match claude-`) {
+		t.Fatalf("uninstall did not report invalid extra: %d %s %s", code, out, stderr)
+	}
+	settings, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if strings.Contains(string(settings), "_prepare") {
+		t.Fatalf("uninstall did not remove valid default account hook: %s", settings)
+	}
+}
+
 func TestInstructionsLocalFileCommands(t *testing.T) {
 	instructionsHome(t)
 	repo := instructionsRepo(t)
@@ -306,6 +342,21 @@ func TestInstructionsPrepareEntryPreparesClaudeAndDeliversCodexOnStartup(t *test
 	}
 	if code == 0 {
 		t.Fatal("status reported success without the account connection")
+	}
+}
+
+func TestPrepareHookOptionsResolvesOnlyRequestedRuntime(t *testing.T) {
+	home := instructionsHome(t)
+	instructionsWrite(t, filepath.Join(home, ".claude"), "not a directory\n")
+	if _, err := prepareHookOptions(context.Background(), "codex", "SessionStart", "", "", []byte(`{}`)); err != nil {
+		t.Fatalf("codex prepare depended on Claude default directory: %v", err)
+	}
+	if err := os.Remove(filepath.Join(home, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	instructionsWrite(t, filepath.Join(home, ".codex"), "not a directory\n")
+	if _, err := prepareHookOptions(context.Background(), "claude", "SessionStart", "", "", []byte(`{}`)); err != nil {
+		t.Fatalf("claude prepare depended on Codex default directory: %v", err)
 	}
 }
 

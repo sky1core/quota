@@ -106,8 +106,8 @@ func TestSelectAgentRanksWeeklyOnlyAndSkipsIncompleteCandidate(t *testing.T) {
 			t.Setenv("CLAUDE_CONFIG_DIR", "")
 			t.Setenv("CODEX_HOME", "")
 			until := time.Now().Add(time.Hour)
-			quotacache.Put("claude:"+filepath.Join(home, ".claude"), "Current week (all models): 50% used", until)
-			quotacache.Put("codex:"+filepath.Join(home, ".codex"), fmt.Sprintf(`{"rateLimits":{"primary":{"windowDurationMins":10080,"usedPercent":10},"secondary":%s}}`, tc.short), until)
+			quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), "Current week (all models): 50% used", until)
+			quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), fmt.Sprintf(`{"rateLimits":{"primary":{"windowDurationMins":10080,"usedPercent":10},"secondary":%s}}`, tc.short), until)
 			result, err := buildSelectAgentResult(config.Config{}, selectAgentOptions{agent: selectAgentAll}, time.Now())
 			if err != nil || result.Selected == nil || result.Selected.Key != tc.selected {
 				t.Fatalf("result = %+v, error = %v, want %s", result, err, tc.selected)
@@ -123,7 +123,7 @@ func checkAdmissionThroughParser(t *testing.T, provider, raw string, floor float
 	t.Setenv("PATH", "")
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("CODEX_HOME", "")
-	quotacache.Put(provider+":"+filepath.Join(home, "."+provider), raw, time.Now().Add(time.Hour))
+	quotacache.Put(quotaTestCacheKey(t, provider, filepath.Join(home, "."+provider)), raw, time.Now().Add(time.Hour))
 	cfg := config.Config{ExecPrompt: &config.ExecPromptConfig{AccountSettings: map[string]config.ExecPromptAccountSettings{
 		provider: {MinLeftPct: &floor},
 	}}}

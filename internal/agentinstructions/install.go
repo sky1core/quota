@@ -10,14 +10,20 @@ import (
 	"strings"
 
 	"github.com/sky1core/quota/internal/agenthooks"
+	"github.com/sky1core/quota/internal/config"
 )
 
 type InstallTargets struct {
-	ClaudeSettings string `json:"claude_settings"`
-	CodexHooks     string `json:"codex_hooks"`
-	CodexConfig    string `json:"codex_config"`
+	ClaudeAccount   string `json:"claude_account,omitempty"`
+	ClaudeConfigDir string `json:"claude_config_dir,omitempty"`
+	ClaudeSettings  string `json:"claude_settings"`
+	CodexAccount    string `json:"codex_account,omitempty"`
+	CodexHome       string `json:"codex_home,omitempty"`
+	CodexHooks      string `json:"codex_hooks"`
+	CodexConfig     string `json:"codex_config"`
 }
 type InstallChange struct {
+	Account   string `json:"account,omitempty"`
 	Agent     string `json:"agent"`
 	Path      string `json:"path"`
 	Changed   bool   `json:"changed"`
@@ -34,6 +40,7 @@ type InstallResult struct {
 	FailedPath string   `json:"failed_path,omitempty"`
 }
 type InstallStatus struct {
+	Account    string   `json:"account,omitempty"`
 	Agent      string   `json:"agent"`
 	Paths      []string `json:"paths"`
 	Configured bool     `json:"configured"`
@@ -45,19 +52,39 @@ type Installation struct {
 }
 
 func CurrentInstallTargets() (InstallTargets, error) {
-	home, err := os.UserHomeDir()
+	claude, err := config.DefaultAccountDirectory("claude")
 	if err != nil {
 		return InstallTargets{}, err
 	}
-	claude := os.Getenv("CLAUDE_CONFIG_DIR")
-	if claude == "" {
-		claude = filepath.Join(home, ".claude")
+	codex, err := config.DefaultAccountDirectory("codex")
+	if err != nil {
+		return InstallTargets{}, err
 	}
-	codex := os.Getenv("CODEX_HOME")
-	if codex == "" {
-		codex = filepath.Join(home, ".codex")
+	return InstallTargetsForAccounts("claude", claude, "codex", codex)
+}
+
+func InstallTargetsForAccounts(claudeAccount, claudeConfigDir, codexAccount, codexHome string) (InstallTargets, error) {
+	var targets InstallTargets
+	if strings.TrimSpace(claudeConfigDir) != "" {
+		dir, err := config.CanonicalAccountDirectory(claudeConfigDir)
+		if err != nil {
+			return targets, err
+		}
+		targets.ClaudeAccount = claudeAccount
+		targets.ClaudeConfigDir = dir
+		targets.ClaudeSettings = filepath.Join(dir, "settings.json")
 	}
-	return InstallTargets{filepath.Join(claude, "settings.json"), filepath.Join(codex, "hooks.json"), filepath.Join(codex, "config.toml")}, nil
+	if strings.TrimSpace(codexHome) != "" {
+		dir, err := config.CanonicalAccountDirectory(codexHome)
+		if err != nil {
+			return targets, err
+		}
+		targets.CodexAccount = codexAccount
+		targets.CodexHome = dir
+		targets.CodexHooks = filepath.Join(dir, "hooks.json")
+		targets.CodexConfig = filepath.Join(dir, "config.toml")
+	}
+	return targets, nil
 }
 func NewInstallation(executable string, targets InstallTargets) (*Installation, error) {
 	if !filepath.IsAbs(executable) || strings.ContainsAny(executable, "\x00\r\n") {
@@ -122,7 +149,22 @@ func installEvents(agent string) []string {
 	return []string{"SessionStart"}
 }
 func (i *Installation) command(agent, event string) string {
-	return agenthooks.ShellQuote([]string{i.executable, "agent", "instructions", "_prepare", "--agent=" + agent, "--event=" + event})
+	args := []string{i.executable, "agent", "instructions", "_prepare", "--agent=" + agent, "--event=" + event}
+	switch agent {
+	case "claude":
+		dir := i.targets.ClaudeConfigDir
+		if dir == "" && i.targets.ClaudeSettings != "" {
+			dir = filepath.Dir(i.targets.ClaudeSettings)
+		}
+		args = append(args, "--claude-config-dir", dir)
+	case "codex":
+		home := i.targets.CodexHome
+		if home == "" && i.targets.CodexHooks != "" {
+			home = filepath.Dir(i.targets.CodexHooks)
+		}
+		args = append(args, "--codex-home", home)
+	}
+	return agenthooks.ShellQuote(args)
 }
 func (i *Installation) desired(agent, event string) map[string]any {
 	hook := map[string]any{"type": "command", "command": i.command(agent, event)}
@@ -333,9 +375,13 @@ func (i *Installation) Plan(agents []string, uninstall bool) (InstallPlan, error
 			if err != nil {
 				return plan, fmt.Errorf("%s: %w", path, err)
 			}
-			plan.Changes = append(plan.Changes, InstallChange{agent, path, string(before) != string(after), "remove legacy instruction hooks"})
+			plan.Changes = append(plan.Changes, InstallChange{Account: i.targets.CodexAccount, Agent: agent, Path: path, Changed: string(before) != string(after), Operation: "remove legacy instruction hooks"})
 		}
-		plan.Changes = append(plan.Changes, InstallChange{agent, path, string(before) != string(after), operation})
+		account := i.targets.ClaudeAccount
+		if agent == "codex" {
+			account = i.targets.CodexAccount
+		}
+		plan.Changes = append(plan.Changes, InstallChange{Account: account, Agent: agent, Path: path, Changed: string(before) != string(after), Operation: operation})
 	}
 	return plan, nil
 }
@@ -415,7 +461,11 @@ func (i *Installation) Inspect(agents []string) ([]InstallStatus, error) {
 	statuses := []InstallStatus{}
 	for _, agent := range selected {
 		path := i.jsonPath(agent)
-		s := InstallStatus{Agent: agent, Paths: []string{path}, Configured: true}
+		account := i.targets.ClaudeAccount
+		if agent == "codex" {
+			account = i.targets.CodexAccount
+		}
+		s := InstallStatus{Account: account, Agent: agent, Paths: []string{path}, Configured: true}
 		problem := func(msg string) { s.Configured = false; s.Problems = append(s.Problems, msg) }
 		root, err := readInstallJSON(path)
 		if err != nil {

@@ -13,6 +13,8 @@ import (
 const noticePrefix = "[quota instructions] "
 
 type PrepareHookOptions struct {
+	ClaudeConfigDir         string
+	CodexHome               string
 	CodexProjectDocMaxBytes *int64
 	CodexNativeIssues       []string
 }
@@ -63,9 +65,9 @@ func RunPrepareHookWithOptions(ctx context.Context, agent, event string, stdin i
 	var err error
 	switch event {
 	case "WorktreeCreate":
-		err = createWorktree(ctx, stdin, stdout, stderr)
+		err = createWorktree(ctx, stdin, stdout, stderr, options)
 	case "WorktreeRemove":
-		err = removeWorktree(ctx, stdin, stderr)
+		err = removeWorktree(ctx, stdin, stderr, options)
 	default:
 		err = sessionStart(ctx, agent, event, stdin, stdout, options)
 	}
@@ -150,7 +152,7 @@ func sessionStart(ctx context.Context, agent, event string, stdin io.Reader, std
 		return e
 	}
 	source, _ := h["source"].(string)
-	result, e := PrepareCheckout(ctx, dir)
+	result, e := PrepareCheckoutWithOptions(ctx, dir, PrepareOptions{ClaudeConfigDir: options.ClaudeConfigDir, CodexHome: options.CodexHome})
 	if errors.Is(e, ErrOutsideRepository) {
 		return nil
 	}
@@ -167,7 +169,13 @@ func sessionStart(ctx context.Context, agent, event string, stdin io.Reader, std
 			nativeBlocked = true
 		}
 	}
-	if r, e := resolveContext(ctx, dir); e == nil {
+	paths := NativeAccountPaths{
+		ClaudeConfigDir: options.ClaudeConfigDir,
+		CodexHome:       options.CodexHome,
+		NeedClaude:      agent == "claude",
+		NeedCodex:       agent == "codex",
+	}
+	if r, e := resolveContextWithNativePaths(ctx, dir, paths); e == nil {
 		if problem := sharedRuleProblem(r.Top); problem != "" {
 			notices = append(notices, problem)
 			nativeBlocked = true

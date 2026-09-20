@@ -38,10 +38,10 @@ func TestEnvForHomeSelectsAccountAndScrubsOverrides(t *testing.T) {
 	}
 }
 
-func TestEnvForHomeKeepsInheritedDefault(t *testing.T) {
+func TestEnvForHomeDropsInheritedDefault(t *testing.T) {
 	env := EnvForHome([]string{"CODEX_HOME=/inherited", "OPENAI_API_KEY=secret"}, "")
-	if countEnv(env, "CODEX_HOME", "/inherited") != 1 {
-		t.Fatal("empty home must preserve inherited CODEX_HOME")
+	if countEnv(env, "CODEX_HOME", "") != 0 {
+		t.Fatal("empty home must not preserve inherited CODEX_HOME")
 	}
 	if countEnv(env, "OPENAI_API_KEY", "") != 0 {
 		t.Fatal("auth overrides must still be removed for the default account")

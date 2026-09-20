@@ -86,6 +86,19 @@ func newRepoAt(t *testing.T, dir string) string {
 	return dir
 }
 
+func TestCheckRepositoryResolvesOnlyRequestedNativeAccount(t *testing.T) {
+	home := testHome(t)
+	repo := newRepo(t)
+	write(t, filepath.Join(home, ".claude"), "not a directory\n")
+
+	if _, err := CheckRepository(context.Background(), repo, "codex", CheckOptions{}); err != nil {
+		t.Fatalf("codex status depended on Claude account directory: %v", err)
+	}
+	if _, err := CheckRepository(context.Background(), repo, "claude", CheckOptions{}); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("claude status error = %v, want invalid Claude account directory", err)
+	}
+}
+
 func addWorktree(t *testing.T, repo, name string) string {
 	t.Helper()
 	dir := filepath.Join(filepath.Dir(repo), name)
@@ -1212,6 +1225,26 @@ func TestWorktreeCreateChecksStateBeforeCreating(t *testing.T) {
 	}
 	if branches := git(t, repo, "branch", "--list", "quota-instructions/broken-state"); strings.TrimSpace(branches) != "" {
 		t.Fatalf("branch created before state check: %q", branches)
+	}
+}
+
+func TestWorktreeRemoveUsesExplicitClaudeConfigDir(t *testing.T) {
+	home := testHome(t)
+	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md", "AGENTS.local.md")
+	repo := newRepo(t)
+	write(t, filepath.Join(repo, "AGENTS.local.md"), "private body\n")
+	code, stdout, stderr := hook(t, "claude", "WorktreeCreate", map[string]any{"cwd": repo, "name": "explicit-config"})
+	if code != 0 {
+		t.Fatalf("create: %d %q %q", code, stdout, stderr)
+	}
+	target := strings.TrimSpace(stdout)
+	badConfig := filepath.Join(home, "not-a-claude-dir")
+	write(t, badConfig, "not a directory\n")
+	payload, _ := json.Marshal(map[string]any{"worktree_path": target})
+	var out, errOut bytes.Buffer
+	code = RunPrepareHookWithOptions(context.Background(), "claude", "WorktreeRemove", bytes.NewReader(payload), &out, &errOut, PrepareHookOptions{ClaudeConfigDir: badConfig})
+	if code == 0 || !exists(target) || !strings.Contains(errOut.String(), "account path is not a directory") {
+		t.Fatalf("remove ignored explicit config dir: code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 }
 

@@ -210,7 +210,8 @@ func TestAutoPromptAccountMembershipAndEligibility(t *testing.T) {
 	if err != nil || len(accounts) != 3 || accounts[0].key != "claude" || accounts[1].key != "claude-2" || accounts[2].key != "codex-2" {
 		t.Fatalf("eligible accounts = %+v, %v", accounts, err)
 	}
-	if accounts[1].dir != filepath.Join(home, "extra-claude") || accounts[2].dir != filepath.Join(home, "extra-codex") {
+	if accounts[1].dir != quotaTestAccountDir(t, filepath.Join(home, "extra-claude")) ||
+		accounts[2].dir != quotaTestAccountDir(t, filepath.Join(home, "extra-codex")) {
 		t.Fatalf("account directories = %+v", accounts)
 	}
 	putAutoPromptQuota(t, "claude", filepath.Join(home, ".claude"), "Current week (all models): 70% used")
@@ -459,7 +460,7 @@ func autoPromptTestCatalog(key string, models ...modelcatalog.Model) accountMode
 
 func putAutoPromptQuota(t *testing.T, provider, dir, raw string) {
 	t.Helper()
-	key := provider + ":" + dir
+	key := quotaTestCacheKey(t, provider, dir)
 	quotacache.Put(key, raw, time.Now().Add(time.Hour))
 	if _, ok := quotacache.Get(key, cliCacheMaxAge); !ok {
 		t.Fatal("synthetic quota cache entry was not saved")

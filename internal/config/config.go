@@ -134,11 +134,7 @@ func (c Config) ResolveAccounts() ([]ResolvedAccount, []string) {
 	resolved, skipped := resolveAccountDirectories("claude", extras, ClaudeExtraKeyRe)
 	accounts := make([]ResolvedAccount, 0, len(resolved))
 	for _, a := range resolved {
-		account := ResolvedAccount{Key: a.key, Label: accountLabel(a.key)}
-		if a.key != "claude" {
-			account.ConfigDir = a.dir
-		}
-		accounts = append(accounts, account)
+		accounts = append(accounts, ResolvedAccount{Key: a.key, ConfigDir: a.dir, Label: accountLabel(a.key)})
 	}
 	return accounts, skipped
 }
@@ -175,11 +171,7 @@ func (c Config) ResolveCodexAccounts() ([]ResolvedCodexAccount, []string) {
 	resolved, skipped := resolveAccountDirectories("codex", extras, CodexExtraKeyRe)
 	accounts := make([]ResolvedCodexAccount, 0, len(resolved))
 	for _, a := range resolved {
-		account := ResolvedCodexAccount{Key: a.key, Label: codexAccountLabel(a.key)}
-		if a.key != "codex" {
-			account.Home = a.dir
-		}
-		accounts = append(accounts, account)
+		accounts = append(accounts, ResolvedCodexAccount{Key: a.key, Home: a.dir, Label: codexAccountLabel(a.key)})
 	}
 	return accounts, skipped
 }

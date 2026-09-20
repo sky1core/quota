@@ -117,7 +117,7 @@ func TestInstallationLifecycleInstallsPrepareEntries(t *testing.T) {
 		if count != 1 {
 			t.Fatalf("%s: managed entries = %d in %v", event, count, commands)
 		}
-		if !strings.Contains(want, "_prepare '--agent=claude' '--event="+event+"'") {
+		if !strings.Contains(want, "_prepare '--agent=claude' '--event="+event+"' --claude-config-dir ") {
 			t.Fatalf("unexpected command %q", want)
 		}
 	}

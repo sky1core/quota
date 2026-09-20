@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/sky1core/quota/internal/childprocess"
+	codexprovider "github.com/sky1core/quota/internal/codex"
+	"github.com/sky1core/quota/internal/config"
 )
 
 type NativeReport struct {
@@ -82,11 +84,27 @@ type nativeProjectTrust struct {
 }
 
 func InspectNativeCodex(ctx context.Context, cwd string, expected map[string]string) (NativeReport, error) {
-	return inspectNativeCodex(ctx, cwd, expected, true)
+	home, err := config.DefaultAccountDirectory("codex")
+	if err != nil {
+		return NativeReport{}, err
+	}
+	return InspectNativeCodexForHome(ctx, cwd, home, expected)
 }
 
 func InspectNativeCodexConfig(ctx context.Context, cwd string) (NativeReport, error) {
-	return inspectNativeCodex(ctx, cwd, nil, false)
+	home, err := config.DefaultAccountDirectory("codex")
+	if err != nil {
+		return NativeReport{}, err
+	}
+	return InspectNativeCodexConfigForHome(ctx, cwd, home)
+}
+
+func InspectNativeCodexForHome(ctx context.Context, cwd, home string, expected map[string]string) (NativeReport, error) {
+	return inspectNativeCodex(ctx, cwd, home, expected, true)
+}
+
+func InspectNativeCodexConfigForHome(ctx context.Context, cwd, home string) (NativeReport, error) {
+	return inspectNativeCodex(ctx, cwd, home, nil, false)
 }
 
 func (i *Installation) SyncCodexHookTrust(ctx context.Context, cwd string) (CodexTrustSyncResult, error) {
@@ -124,13 +142,13 @@ func (i *Installation) PlanCodexHookTrust(ctx context.Context, cwd string, insta
 		return nil, err
 	}
 	if installHookChanged {
-		if _, err := InspectNativeCodexConfig(ctx, cwd); err != nil {
+		if _, err := InspectNativeCodexConfigForHome(ctx, cwd, i.targets.CodexHome); err != nil {
 			return nil, err
 		}
-		if _, err := inspectNativeCodexHooks(ctx, cwd, nil); err != nil {
+		if _, err := inspectNativeCodexHooks(ctx, cwd, i.targets.CodexHome, nil); err != nil {
 			return nil, err
 		}
-		return &InstallChange{Agent: "codex", Path: i.targets.CodexConfig, Changed: true, Operation: "sync managed hook trust"}, nil
+		return &InstallChange{Account: i.targets.CodexAccount, Agent: "codex", Path: i.targets.CodexConfig, Changed: true, Operation: "sync managed hook trust"}, nil
 	}
 	key, hash, syncNeeded, skipped, err := i.codexHookTrustMetadata(ctx, cwd)
 	if err != nil {
@@ -147,14 +165,14 @@ func (i *Installation) PlanCodexHookTrust(ctx context.Context, cwd string, insta
 	if err != nil {
 		return nil, err
 	}
-	return &InstallChange{Agent: "codex", Path: i.targets.CodexConfig, Changed: string(before) != string(after), Operation: "sync managed hook trust"}, nil
+	return &InstallChange{Account: i.targets.CodexAccount, Agent: "codex", Path: i.targets.CodexConfig, Changed: string(before) != string(after), Operation: "sync managed hook trust"}, nil
 }
 
 func (i *Installation) codexHookTrustMetadata(ctx context.Context, cwd string) (key, hash string, syncNeeded, skipped bool, err error) {
 	if _, err := exec.LookPath("codex"); err != nil {
 		return "", "", false, true, nil
 	}
-	report, err := inspectNativeCodexHooks(ctx, cwd, i.ExpectedCodexHooks())
+	report, err := inspectNativeCodexHooks(ctx, cwd, i.targets.CodexHome, i.ExpectedCodexHooks())
 	if err != nil {
 		return "", "", false, false, err
 	}
@@ -195,9 +213,13 @@ func sameNativeCodexHookSource(actual, expected string) bool {
 	return false
 }
 
-func inspectNativeCodex(ctx context.Context, cwd string, expected map[string]string, inspectHooks bool) (NativeReport, error) {
+func inspectNativeCodex(ctx context.Context, cwd, home string, expected map[string]string, inspectHooks bool) (NativeReport, error) {
 	report := NativeReport{State: "unknown", Hooks: []NativeHook{}, ConfigLayers: []NativeConfigLayer{}}
 	cwd, err := filepath.Abs(cwd)
+	if err != nil {
+		return report, err
+	}
+	home, err = config.CanonicalAccountDirectory(home)
 	if err != nil {
 		return report, err
 	}
@@ -210,7 +232,7 @@ func inspectNativeCodex(ctx context.Context, cwd string, expected map[string]str
 	defer cancel()
 	cmd := childprocess.CommandContext(ctx, "codex", "app-server")
 	cmd.Dir = cwd
-	cmd.Env = os.Environ()
+	cmd.Env = codexprovider.EnvForHome(os.Environ(), home)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return report, err
@@ -328,9 +350,13 @@ func inspectNativeCodex(ctx context.Context, cwd string, expected map[string]str
 	return report, nil
 }
 
-func inspectNativeCodexHooks(ctx context.Context, cwd string, expected map[string]string) (NativeReport, error) {
+func inspectNativeCodexHooks(ctx context.Context, cwd, home string, expected map[string]string) (NativeReport, error) {
 	report := NativeReport{State: "unknown", Hooks: []NativeHook{}}
 	cwd, err := filepath.Abs(cwd)
+	if err != nil {
+		return report, err
+	}
+	home, err = config.CanonicalAccountDirectory(home)
 	if err != nil {
 		return report, err
 	}
@@ -338,7 +364,7 @@ func inspectNativeCodexHooks(ctx context.Context, cwd string, expected map[strin
 	defer cancel()
 	cmd := childprocess.CommandContext(ctx, "codex", "app-server")
 	cmd.Dir = cwd
-	cmd.Env = os.Environ()
+	cmd.Env = codexprovider.EnvForHome(os.Environ(), home)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return report, err

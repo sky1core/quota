@@ -263,7 +263,7 @@ func TestAgentHooksApplyInvalidAccountWritesNothing(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("apply code = %d want 1 stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "same directory") {
+	if !strings.Contains(stderr.String(), "duplicate key or directory") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 	if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); !os.IsNotExist(err) {

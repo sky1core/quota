@@ -245,18 +245,10 @@ func TestAccountConcurrentDuplicateDirectory(t *testing.T) {
 
 func TestAccountAddRejectsCanonicalDuplicatesAndPreservesSpelling(t *testing.T) {
 	for _, provider := range []string{"claude", "codex"} {
-		for _, kind := range []string{"default", "environment default", "registered"} {
+		for _, kind := range []string{"default", "registered"} {
 			t.Run(provider+"/"+kind, func(t *testing.T) {
 				home := autoPromptTestHome(t)
 				base := filepath.Join(home, "."+provider)
-				if kind == "environment default" {
-					base = filepath.Join(home, "inherited")
-					env := "CLAUDE_CONFIG_DIR"
-					if provider == "codex" {
-						env = "CODEX_HOME"
-					}
-					t.Setenv(env, base)
-				}
 				if kind == "registered" {
 					base = filepath.Join(home, "existing")
 				}
@@ -292,7 +284,11 @@ func TestAccountAddRejectsCanonicalDuplicatesAndPreservesSpelling(t *testing.T) 
 						t.Fatal("CLI spelling changed")
 					}
 					accounts, skipped := cfg.ResolveAccounts()
-					if len(skipped) != 0 || accounts[len(accounts)-1].ConfigDir != filepath.Join(home, "new-account") {
+					want, err := config.CanonicalAccountDirectory(filepath.Join(home, "new-account"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(skipped) != 0 || accounts[len(accounts)-1].ConfigDir != want {
 						t.Fatalf("resolution %v %v", accounts, skipped)
 					}
 				} else {
@@ -300,7 +296,11 @@ func TestAccountAddRejectsCanonicalDuplicatesAndPreservesSpelling(t *testing.T) 
 						t.Fatal("CLI spelling changed")
 					}
 					accounts, skipped := cfg.ResolveCodexAccounts()
-					if len(skipped) != 0 || accounts[len(accounts)-1].Home != filepath.Join(home, "new-account") {
+					want, err := config.CanonicalAccountDirectory(filepath.Join(home, "new-account"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(skipped) != 0 || accounts[len(accounts)-1].Home != want {
 						t.Fatalf("resolution %v %v", accounts, skipped)
 					}
 				}

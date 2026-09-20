@@ -608,81 +608,42 @@ func agentHookTargets(cfg config.Config, runtimes []string) ([]agentHookTarget, 
 }
 
 func agentHookProviderTargets(cfg config.Config, runtime string) ([]agentHookTarget, []error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, []error{err}
-	}
-	var raw []struct {
-		key string
-		dir string
-	}
 	switch runtime {
 	case "claude":
-		raw = append(raw, struct {
-			key string
-			dir string
-		}{"claude", filepath.Join(home, ".claude")})
-		for _, account := range cfg.ClaudeAccounts {
-			raw = append(raw, struct {
-				key string
-				dir string
-			}{account.Key, account.ConfigDir})
+		accounts, skipped := cfg.ResolveAccounts()
+		errs := messagesAsErrors(skipped)
+		targets := make([]agentHookTarget, 0, len(accounts))
+		for _, account := range accounts {
+			targets = append(targets, agentHookTarget{
+				runtime: runtime,
+				account: account.Key,
+				path:    agenthooks.ClaudeSettingsPathForConfigDir(account.ConfigDir),
+			})
 		}
+		return targets, errs
 	case "codex":
-		raw = append(raw, struct {
-			key string
-			dir string
-		}{"codex", filepath.Join(home, ".codex")})
-		for _, account := range cfg.CodexAccounts {
-			raw = append(raw, struct {
-				key string
-				dir string
-			}{account.Key, account.Home})
+		accounts, skipped := cfg.ResolveCodexAccounts()
+		errs := messagesAsErrors(skipped)
+		targets := make([]agentHookTarget, 0, len(accounts))
+		for _, account := range accounts {
+			targets = append(targets, agentHookTarget{
+				runtime: runtime,
+				account: account.Key,
+				path:    agenthooks.CodexHooksPathForHome(account.Home),
+			})
 		}
+		return targets, errs
 	default:
 		return nil, []error{fmt.Errorf("unsupported runtime %q", runtime)}
 	}
-	seenKeys := map[string]bool{}
-	seenDirs := map[string]string{}
-	var targets []agentHookTarget
-	var errs []error
-	for i, item := range raw {
-		if i > 0 {
-			switch runtime {
-			case "claude":
-				if !config.ClaudeExtraKeyRe.MatchString(item.key) {
-					errs = append(errs, fmt.Errorf("claude account key %q must match claude-<N>", item.key))
-					continue
-				}
-			case "codex":
-				if !config.CodexExtraKeyRe.MatchString(item.key) {
-					errs = append(errs, fmt.Errorf("codex account key %q must match codex-<N>", item.key))
-					continue
-				}
-			}
-		}
-		if seenKeys[item.key] {
-			errs = append(errs, fmt.Errorf("%s account key %q is duplicated", runtime, item.key))
-			continue
-		}
-		seenKeys[item.key] = true
-		dir, err := config.CanonicalAccountDirectory(item.dir)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s account %q directory is invalid: %v", runtime, item.key, err))
-			continue
-		}
-		if other := seenDirs[dir]; other != "" {
-			errs = append(errs, fmt.Errorf("%s accounts %q and %q use the same directory %s", runtime, other, item.key, dir))
-			continue
-		}
-		seenDirs[dir] = item.key
-		path := agenthooks.ClaudeSettingsPathForConfigDir(dir)
-		if runtime == "codex" {
-			path = agenthooks.CodexHooksPathForHome(dir)
-		}
-		targets = append(targets, agentHookTarget{runtime: runtime, account: item.key, path: path})
+}
+
+func messagesAsErrors(messages []string) []error {
+	errs := make([]error, 0, len(messages))
+	for _, msg := range messages {
+		errs = append(errs, fmt.Errorf("%s", msg))
 	}
-	return targets, errs
+	return errs
 }
 
 func writeJSON(output io.Writer, payload any, stderr io.Writer) int {

@@ -261,6 +261,7 @@ func TestApplyClaudeReportsBlockerPreservesUserSetting(t *testing.T) {
 }
 
 func TestDetectExaminesEveryManagedEntry(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	command := HookCommand("claude", "/bin/quota-cli", "")
 	root := map[string]any{"hooks": map[string]any{"PreToolUse": []any{
@@ -277,6 +278,7 @@ func TestDetectExaminesEveryManagedEntry(t *testing.T) {
 }
 
 func TestDetectIgnoresManagedOnlyKeyInClaudeUserSettings(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	writeJSONRoot(t, ClaudeSettingsPath(), map[string]any{"allowManagedHooksOnly": true})
 	plan, err := Apply("claude", "/bin/quota-cli", "")

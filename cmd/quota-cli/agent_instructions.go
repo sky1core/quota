@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,11 +15,13 @@ import (
 	"syscall"
 
 	"github.com/sky1core/quota/internal/agentinstructions"
+	"github.com/sky1core/quota/internal/config"
 	"github.com/sky1core/quota/internal/overlayruntime"
 )
 
 type instructionAgentReport struct {
 	Agent      string                           `json:"agent"`
+	Account    string                           `json:"account,omitempty"`
 	State      string                           `json:"state"`
 	Delivery   string                           `json:"delivery"`
 	Issues     []string                         `json:"issues,omitempty"`
@@ -116,15 +119,15 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 	var dryRun, noGlobalIgnore, removeGlobalIgnore bool
 	switch operation {
 	case "setup":
-		fs.StringVar(&agent, "agent", "all", "Current CLI account: all, claude or codex")
+		fs.StringVar(&agent, "agent", "all", "Agent runtime: all, claude or codex")
 		fs.BoolVar(&dryRun, "dry-run", false, "Print the plan without saving")
 		fs.BoolVar(&noGlobalIgnore, "no-global-ignore", false, "Do not add generated file names to the global git ignore file")
 	case "uninstall":
-		fs.StringVar(&agent, "agent", "all", "Current CLI account: all, claude or codex")
+		fs.StringVar(&agent, "agent", "all", "Agent runtime: all, claude or codex")
 		fs.BoolVar(&dryRun, "dry-run", false, "Print the plan without saving")
 		fs.BoolVar(&removeGlobalIgnore, "remove-global-ignore", false, "Also remove the quota-managed lines from the global git ignore file (requires --agent=all)")
 	case "status":
-		fs.StringVar(&agent, "agent", "all", "Current CLI account: all, claude or codex")
+		fs.StringVar(&agent, "agent", "all", "Agent runtime: all, claude or codex")
 	}
 	ordered, err := instructionFlagOrder(fs, args[1:])
 	if err == nil {
@@ -185,11 +188,7 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 	if err != nil {
 		return finish(err, true)
 	}
-	targets, err := agentinstructions.CurrentInstallTargets()
-	if err != nil {
-		return finish(err, true)
-	}
-	installation, err := agentinstructions.NewInstallation(executable, targets)
+	cfg, err := config.Load()
 	if err != nil {
 		return finish(err, true)
 	}
@@ -197,27 +196,42 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 	if agent == "all" {
 		agents = []string{"claude", "codex"}
 	}
+	installations, targetErrs := instructionInstallations(executable, cfg, agents)
+	targetErr := errors.Join(targetErrs...)
+	if targetErr != nil && (operation == "setup" || len(installations) == 0) {
+		return finish(fmt.Errorf("%s", strings.Join(errorsAsStrings(targetErrs), "; ")), true)
+	}
 	switch operation {
 	case "setup", "uninstall":
 		uninstall := operation == "uninstall"
-		plan, err := installation.Plan(agents, uninstall)
-		report.Plan = &plan
-		if err != nil {
-			return finish(err, true)
-		}
-		if !uninstall && instructionAgentsInclude(agents, "codex") {
-			cwd, err := os.Getwd()
+		plans := map[int]agentinstructions.InstallPlan{}
+		combined := agentinstructions.InstallPlan{Agents: agents, Uninstall: uninstall}
+		for n, target := range installations {
+			plan, err := target.installation.Plan([]string{target.agent}, uninstall)
 			if err != nil {
+				report.Plan = &combined
 				return finish(err, true)
 			}
-			trustChange, err := installation.PlanCodexHookTrust(ctx, cwd, codexHookInstallChanged(plan))
-			if err != nil {
-				return finish(err, true)
+			if !uninstall && target.agent == "codex" {
+				cwd, err := os.Getwd()
+				if err != nil {
+					report.Plan = &combined
+					return finish(err, true)
+				}
+				trustChange, err := target.installation.PlanCodexHookTrust(ctx, cwd, codexHookInstallChanged(plan))
+				if err != nil {
+					report.Plan = &combined
+					return finish(err, true)
+				}
+				if trustChange != nil {
+					trustChange.Account = target.account
+					plan.Changes = append(plan.Changes, *trustChange)
+				}
 			}
-			if trustChange != nil {
-				plan.Changes = append(plan.Changes, *trustChange)
-			}
+			plans[n] = plan
+			combined.Changes = append(combined.Changes, plan.Changes...)
 		}
+		report.Plan = &combined
 		if removeGlobalIgnore && agent != "all" {
 			return finish(fmt.Errorf("--remove-global-ignore requires --agent=all"), true)
 		}
@@ -237,28 +251,34 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 			}
 		}
 		if dryRun {
-			return finish(nil, false)
+			return finish(targetErr, targetErr != nil)
 		}
-		result, err := installation.Apply(plan)
+		result := agentinstructions.InstallResult{}
 		report.Applied = &result
-		if err != nil {
-			return finish(err, true)
-		}
-		if !uninstall && instructionAgentsInclude(agents, "codex") {
-			cwd, err := os.Getwd()
+		for n, target := range installations {
+			applied, err := target.installation.Apply(plans[n])
+			report.Applied.Applied = append(report.Applied.Applied, applied.Applied...)
+			report.Applied.Unchanged = append(report.Applied.Unchanged, applied.Unchanged...)
+			report.Applied.FailedPath = applied.FailedPath
 			if err != nil {
 				return finish(err, true)
 			}
-			trust, err := installation.SyncCodexHookTrust(ctx, cwd)
-			if err != nil {
-				report.Applied.FailedPath = trust.Path
-				return finish(err, true)
-			}
-			if trust.Changed {
-				report.Applied.Unchanged = removePath(report.Applied.Unchanged, trust.Path)
-				report.Applied.Applied = appendUniquePath(report.Applied.Applied, trust.Path)
-			} else if !trust.Skipped && !hasPath(report.Applied.Applied, trust.Path) {
-				report.Applied.Unchanged = appendUniquePath(report.Applied.Unchanged, trust.Path)
+			if !uninstall && target.agent == "codex" {
+				cwd, err := os.Getwd()
+				if err != nil {
+					return finish(err, true)
+				}
+				trust, err := target.installation.SyncCodexHookTrust(ctx, cwd)
+				if err != nil {
+					report.Applied.FailedPath = trust.Path
+					return finish(err, true)
+				}
+				if trust.Changed {
+					report.Applied.Unchanged = removePath(report.Applied.Unchanged, trust.Path)
+					report.Applied.Applied = appendUniquePath(report.Applied.Applied, trust.Path)
+				} else if !trust.Skipped && !hasPath(report.Applied.Applied, trust.Path) {
+					report.Applied.Unchanged = appendUniquePath(report.Applied.Unchanged, trust.Path)
+				}
 			}
 		}
 		if manageIgnore {
@@ -266,11 +286,64 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 				return finish(err, true)
 			}
 		}
-		return finish(nil, false)
+		return finish(targetErr, targetErr != nil)
 	}
-	statuses, failed := inspectInstructions(ctx, installation, dir, agents)
+	statuses, failed := inspectInstructions(ctx, installations, dir)
 	report.Agents = statuses
-	return finish(nil, failed)
+	return finish(targetErr, failed || targetErr != nil)
+}
+
+type instructionInstallation struct {
+	agent        string
+	account      string
+	configDir    string
+	home         string
+	installation *agentinstructions.Installation
+}
+
+func instructionInstallations(executable string, cfg config.Config, agents []string) ([]instructionInstallation, []error) {
+	var out []instructionInstallation
+	var errs []error
+	include := func(agent string) bool { return instructionAgentsInclude(agents, agent) }
+	if include("claude") {
+		accounts, skipped := cfg.ResolveAccounts()
+		for _, msg := range skipped {
+			errs = append(errs, fmt.Errorf("%s", msg))
+		}
+		for _, account := range accounts {
+			targets, err := agentinstructions.InstallTargetsForAccounts(account.Key, account.ConfigDir, "", "")
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			installation, err := agentinstructions.NewInstallation(executable, targets)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			out = append(out, instructionInstallation{agent: "claude", account: account.Key, configDir: account.ConfigDir, installation: installation})
+		}
+	}
+	if include("codex") {
+		accounts, skipped := cfg.ResolveCodexAccounts()
+		for _, msg := range skipped {
+			errs = append(errs, fmt.Errorf("%s", msg))
+		}
+		for _, account := range accounts {
+			targets, err := agentinstructions.InstallTargetsForAccounts("", "", account.Key, account.Home)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			installation, err := agentinstructions.NewInstallation(executable, targets)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			out = append(out, instructionInstallation{agent: "codex", account: account.Key, home: account.Home, installation: installation})
+		}
+	}
+	return out, errs
 }
 
 func instructionAgentsInclude(agents []string, target string) bool {
@@ -373,59 +446,63 @@ func runInstructionsLocalFile(ctx context.Context, operands []string, report *in
 	return finish(err, err != nil)
 }
 
-func inspectInstructions(ctx context.Context, installation *agentinstructions.Installation, dir string, agents []string) ([]instructionAgentReport, bool) {
+func inspectInstructions(ctx context.Context, installations []instructionInstallation, dir string) ([]instructionAgentReport, bool) {
 	var reports []instructionAgentReport
-	statuses, err := installation.Inspect(agents)
-	if err != nil {
-		return []instructionAgentReport{{State: "unknown", Delivery: "not-verified", Issues: []string{err.Error()}}}, true
-	}
 	failed := false
-	for _, status := range statuses {
-		r := instructionAgentReport{Agent: status.Agent, State: "configured", Delivery: "not-verified", Issues: append([]string(nil), status.Problems...)}
-		if !status.Configured {
-			r.State = "blocked"
-		}
-		var options overlayruntime.CheckOptions
-		if status.Agent == "codex" {
-			native, err := agentinstructions.InspectNativeCodex(ctx, dir, installation.ExpectedCodexHooks())
-			r.Native = &native
-			if err != nil {
-				r.Issues = append(r.Issues, err.Error())
-				if r.State == "configured" {
-					r.State = "unknown"
-				}
-			} else {
-				options.CodexProjectDocMaxBytes = native.ProjectDocMaxBytes
-				if r.State == "configured" && native.State != "configured" {
-					r.State = native.State
-				}
-			}
-		}
-		repository, err := overlayruntime.CheckRepository(ctx, dir, status.Agent, options)
+	for _, target := range installations {
+		statuses, err := target.installation.Inspect([]string{target.agent})
 		if err != nil {
-			r.State = "blocked"
-			r.Issues = append(r.Issues, err.Error())
-		} else {
-			r.Repository = &repository
-			if len(repository.Problems) > 0 {
-				r.State = "blocked"
-			}
-		}
-		if status.Agent == "claude" {
-			problems, err := installation.InspectClaudeRepositoryHooks(ctx, dir)
-			if err != nil {
-				problems = append(problems, err.Error())
-			}
-			if len(problems) > 0 {
-				r.State = "blocked"
-				r.Issues = append(r.Issues, problems...)
-			}
-		}
-		r.Issues = uniqueIssues(r.Issues)
-		if r.State != "configured" {
+			reports = append(reports, instructionAgentReport{Agent: target.agent, Account: target.account, State: "unknown", Delivery: "not-verified", Issues: []string{err.Error()}})
 			failed = true
+			continue
 		}
-		reports = append(reports, r)
+		for _, status := range statuses {
+			r := instructionAgentReport{Agent: status.Agent, Account: target.account, State: "configured", Delivery: "not-verified", Issues: append([]string(nil), status.Problems...)}
+			if !status.Configured {
+				r.State = "blocked"
+			}
+			options := overlayruntime.CheckOptions{ClaudeConfigDir: target.configDir, CodexHome: target.home}
+			if status.Agent == "codex" {
+				native, err := agentinstructions.InspectNativeCodexForHome(ctx, dir, target.home, target.installation.ExpectedCodexHooks())
+				r.Native = &native
+				if err != nil {
+					r.Issues = append(r.Issues, err.Error())
+					if r.State == "configured" {
+						r.State = "unknown"
+					}
+				} else {
+					options.CodexProjectDocMaxBytes = native.ProjectDocMaxBytes
+					if r.State == "configured" && native.State != "configured" {
+						r.State = native.State
+					}
+				}
+			}
+			repository, err := overlayruntime.CheckRepository(ctx, dir, status.Agent, options)
+			if err != nil {
+				r.State = "blocked"
+				r.Issues = append(r.Issues, err.Error())
+			} else {
+				r.Repository = &repository
+				if len(repository.Problems) > 0 {
+					r.State = "blocked"
+				}
+			}
+			if status.Agent == "claude" {
+				problems, err := target.installation.InspectClaudeRepositoryHooks(ctx, dir)
+				if err != nil {
+					problems = append(problems, err.Error())
+				}
+				if len(problems) > 0 {
+					r.State = "blocked"
+					r.Issues = append(r.Issues, problems...)
+				}
+			}
+			r.Issues = uniqueIssues(r.Issues)
+			if r.State != "configured" {
+				failed = true
+			}
+			reports = append(reports, r)
+		}
 	}
 	return reports, failed
 }
@@ -453,7 +530,11 @@ func printInstructionsReport(out io.Writer, r instructionsReport) {
 	}
 	if r.Plan != nil {
 		for _, change := range r.Plan.Changes {
-			fmt.Fprintf(out, "%s: %s: %s (change=%t)\n", change.Agent, change.Operation, change.Path, change.Changed)
+			account := change.Account
+			if account == "" {
+				account = change.Agent
+			}
+			fmt.Fprintf(out, "%s/%s: %s: %s (change=%t)\n", change.Agent, account, change.Operation, change.Path, change.Changed)
 		}
 	}
 	if r.GlobalIgnore != nil {
@@ -480,7 +561,11 @@ func printInstructionsReport(out io.Writer, r instructionsReport) {
 		}
 	}
 	for _, agent := range r.Agents {
-		fmt.Fprintf(out, "%s: %s; delivery=%s\n", agent.Agent, agent.State, agent.Delivery)
+		label := agent.Agent
+		if agent.Account != "" && agent.Account != agent.Agent {
+			label += "/" + agent.Account
+		}
+		fmt.Fprintf(out, "%s: %s; delivery=%s\n", label, agent.State, agent.Delivery)
 		for _, issue := range agent.Issues {
 			fmt.Fprintln(out, "  "+issue)
 		}
@@ -511,6 +596,8 @@ func runInstructionsPrepare(ctx context.Context, args []string, stdin io.Reader,
 	fs.SetOutput(stderr)
 	agent := fs.String("agent", "", "Agent")
 	event := fs.String("event", "", "Event")
+	claudeConfigDir := fs.String("claude-config-dir", "", "Claude config directory")
+	codexHome := fs.String("codex-home", "", "Codex home directory")
 	ordered, err := instructionFlagOrder(fs, args)
 	if err == nil {
 		err = fs.Parse(ordered)
@@ -531,23 +618,51 @@ func runInstructionsPrepare(ctx context.Context, args []string, stdin io.Reader,
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	options := prepareHookOptions(ctx, *agent, *event, input)
+	options, err := prepareHookOptions(ctx, *agent, *event, *claudeConfigDir, *codexHome, input)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
 	return overlayruntime.RunPrepareHookWithOptions(ctx, *agent, *event, bytes.NewReader(input), stdout, stderr, options)
 }
 
-func prepareHookOptions(ctx context.Context, agent, event string, input []byte) overlayruntime.PrepareHookOptions {
+func prepareHookOptions(ctx context.Context, agent, event, claudeConfigDir, codexHome string, input []byte) (overlayruntime.PrepareHookOptions, error) {
+	var err error
+	options := overlayruntime.PrepareHookOptions{}
+	switch agent {
+	case "claude":
+		if claudeConfigDir != "" {
+			options.ClaudeConfigDir, err = config.CanonicalAccountDirectory(claudeConfigDir)
+		} else {
+			options.ClaudeConfigDir, err = config.DefaultAccountDirectory("claude")
+		}
+	case "codex":
+		if codexHome != "" {
+			options.CodexHome, err = config.CanonicalAccountDirectory(codexHome)
+		} else {
+			options.CodexHome, err = config.DefaultAccountDirectory("codex")
+		}
+	default:
+		return options, nil
+	}
+	if err != nil {
+		return options, err
+	}
 	if agent != "codex" || event != "SessionStart" {
-		return overlayruntime.PrepareHookOptions{}
+		return options, nil
 	}
 	var h struct {
 		CWD string `json:"cwd"`
 	}
 	if err := json.Unmarshal(input, &h); err != nil || h.CWD == "" {
-		return overlayruntime.PrepareHookOptions{}
+		return options, nil
 	}
-	native, err := agentinstructions.InspectNativeCodexConfig(ctx, h.CWD)
+	native, err := agentinstructions.InspectNativeCodexConfigForHome(ctx, h.CWD, options.CodexHome)
 	if err != nil {
-		return overlayruntime.PrepareHookOptions{CodexNativeIssues: []string{"could not inspect effective Codex config: " + err.Error()}}
+		options.CodexNativeIssues = []string{"could not inspect effective Codex config: " + err.Error()}
+		return options, nil
 	}
-	return overlayruntime.PrepareHookOptions{CodexProjectDocMaxBytes: native.ProjectDocMaxBytes, CodexNativeIssues: native.Issues}
+	options.CodexProjectDocMaxBytes = native.ProjectDocMaxBytes
+	options.CodexNativeIssues = native.Issues
+	return options, nil
 }

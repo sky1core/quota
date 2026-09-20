@@ -93,8 +93,14 @@ func parseShellInvocations(command string, depth int, inheritedShellStartup stri
 			ghConfigDispatch, ghConfigReason = true, "gh configuration directory can change command dispatch"
 		}
 		if inv.Dynamic {
-			for i := 0; i <= wrappers.consumed && i < len(inv.dynamicArgs); i++ {
-				inv.DynamicCommand = inv.DynamicCommand || inv.dynamicArgs[i]
+			if wrappers.dynamicCommand {
+				inv.DynamicCommand = true
+				if inv.DynamicReason == "" {
+					inv.DynamicReason = wrappers.dynamicReason
+				}
+			}
+			if wrappers.consumed < len(inv.dynamicArgs) && inv.dynamicArgs[wrappers.consumed] {
+				inv.DynamicCommand = true
 			}
 			if wrappers.hasScript && wrappers.scriptDynamic {
 				inv.DynamicCommand = true
@@ -345,7 +351,7 @@ func commandWord(word *syntax.Word) (string, bool, bool) {
 		return "", true, false
 	}
 	if strings.HasPrefix(b.String(), "-") && firstDynamicOffset <= 1 {
-		return "", true, false
+		return "-?", true, true
 	}
 	return b.String(), true, true
 }
@@ -777,16 +783,18 @@ func shellSetCanExposeFutureStartupEnv(argv []string, dynamic bool) bool {
 // grammar for each family lives only in its parse function; protection checks
 // read these fields and never re-walk the arguments.
 type wrapperParse struct {
-	rest        []string
-	undecidable string
-	loginShell  bool // the wrapped program starts as a login shell
-	assigns     []assignment
-	preserveAll bool     // sudo keeps the whole caller environment
-	preserve    []string // sudo keeps these named variables
-	script      string   // eval / env -S script text
-	hasScript   bool
-	scriptStart int
-	scriptEnd   int
+	rest           []string
+	undecidable    string
+	dynamicCommand bool
+	dynamicReason  string
+	loginShell     bool // the wrapped program starts as a login shell
+	assigns        []assignment
+	preserveAll    bool     // sudo keeps the whole caller environment
+	preserve       []string // sudo keeps these named variables
+	script         string   // eval / env -S script text
+	hasScript      bool
+	scriptStart    int
+	scriptEnd      int
 }
 
 type assignment struct{ name, value string }
@@ -813,11 +821,11 @@ func parseWrapper(input commandInput) (wrapperParse, bool) {
 	case "builtin":
 		return parseBuiltinWrapper(argv), true
 	case "exec":
-		return parseExecWrapper(argv), true
+		return parseExecWrapper(input), true
 	case "sudo":
-		return parseSudoWrapper(argv), true
+		return parseSudoWrapper(input), true
 	case "nohup", "nice", "timeout":
-		return parseProcessWrapper(argv), true
+		return parseProcessWrapper(input), true
 	case "eval":
 		return parseEvalWrapper(argv), true
 	case "env":
@@ -836,6 +844,8 @@ type wrapperChain struct {
 	ghEnvironment    bool
 	shellEnvironment bool
 	sameShell        bool
+	dynamicCommand   bool
+	dynamicReason    string
 	script           string
 	hasScript        bool
 	scriptDynamic    bool
@@ -874,6 +884,12 @@ func parseWrapperChain(input commandInput) wrapperChain {
 			return chain
 		}
 		chain.loginShell = chain.loginShell || p.loginShell
+		if p.dynamicCommand {
+			chain.dynamicCommand = true
+			if chain.dynamicReason == "" {
+				chain.dynamicReason = p.dynamicReason
+			}
+		}
 		chain.gitEnvironment = chain.gitEnvironment || p.exposesEnv(gitConfigEnvNameCanChangeCommandDispatch, gitConfigEnvPairCanChangeCommandDispatch)
 		chain.ghEnvironment = chain.ghEnvironment || p.exposesEnv(assignmentNameCanChangeGhCommandDispatch, func(name, _ string) bool { return assignmentNameCanChangeGhCommandDispatch(name) })
 		chain.shellEnvironment = chain.shellEnvironment || p.exposesEnv(shellStartupEnvName, func(name, _ string) bool { return shellStartupEnvName(name) })
@@ -1001,7 +1017,8 @@ func parseBuiltinWrapper(argv []string) wrapperParse {
 // exec [-cl] [-a name] [--] command ...; short options combine and -a takes
 // the rest of its group or the next argument. A name starting with "-" makes
 // the program start as a login shell.
-func parseExecWrapper(argv []string) wrapperParse {
+func parseExecWrapper(input commandInput) wrapperParse {
+	argv := input.argv
 	var p wrapperParse
 	i := 1
 	for i < len(argv) {
@@ -1023,11 +1040,19 @@ func parseExecWrapper(argv []string) wrapperParse {
 			case 'l':
 				p.loginShell = true
 			case 'a':
+				if input.dynamicAt(i) {
+					p.dynamicCommand = true
+					p.dynamicReason = "exec options cannot be determined"
+				}
 				name := body[j+1:]
 				if name == "" {
 					i++
 					if i >= len(argv) {
 						return undecidableWrapper("exec", arg)
+					}
+					if input.dynamicAt(i) {
+						p.dynamicCommand = true
+						p.dynamicReason = "exec options cannot be determined"
 					}
 					name = argv[i]
 				}
@@ -1078,6 +1103,10 @@ func parseEnvWrapper(input commandInput) wrapperParse {
 			if i+1 >= len(argv) {
 				return undecidableWrapper("env", arg)
 			}
+			if input.dynamicAt(i) || input.dynamicAt(i+1) {
+				p.dynamicCommand = true
+				p.dynamicReason = "env execution options cannot be determined"
+			}
 			i += 2
 			continue
 		case "--split-string":
@@ -1087,6 +1116,10 @@ func parseEnvWrapper(input commandInput) wrapperParse {
 			return envSplitString(argv[i+1], input.from(i+2), i+1)
 		}
 		if strings.HasPrefix(arg, "--unset=") || strings.HasPrefix(arg, "--chdir=") || strings.HasPrefix(arg, "--path=") {
+			if input.dynamicAt(i) {
+				p.dynamicCommand = true
+				p.dynamicReason = "env execution options cannot be determined"
+			}
 			i++
 			continue
 		}
@@ -1098,7 +1131,15 @@ func parseEnvWrapper(input commandInput) wrapperParse {
 		for j := 0; j < len(body) && !consumed; j++ {
 			switch body[j] {
 			case 'i', 'v', '0':
+				if input.dynamicAt(i) {
+					p.dynamicCommand = true
+					p.dynamicReason = "env execution options cannot be determined"
+				}
 			case 'u', 'C', 'P':
+				if input.dynamicAt(i) {
+					p.dynamicCommand = true
+					p.dynamicReason = "env execution options cannot be determined"
+				}
 				if j+1 < len(body) {
 					consumed = true
 					break
@@ -1107,6 +1148,10 @@ func parseEnvWrapper(input commandInput) wrapperParse {
 					return undecidableWrapper("env", arg)
 				}
 				i++
+				if input.dynamicAt(i) {
+					p.dynamicCommand = true
+					p.dynamicReason = "env execution options cannot be determined"
+				}
 				consumed = true
 			case 'S':
 				if j+1 < len(body) {
@@ -1169,7 +1214,8 @@ var sudoLongValue = map[string]bool{
 
 // sudo [options] [NAME=VALUE ...] [--] [command ...]; short options combine
 // and a value option takes the rest of its group or the next argument.
-func parseSudoWrapper(argv []string) wrapperParse {
+func parseSudoWrapper(input commandInput) wrapperParse {
+	argv := input.argv
 	var p wrapperParse
 	i := 1
 	for i < len(argv) {
@@ -1188,6 +1234,10 @@ func parseSudoWrapper(argv []string) wrapperParse {
 			continue
 		}
 		if strings.HasPrefix(arg, "--") {
+			if input.dynamicAt(i) {
+				p.dynamicCommand = true
+				p.dynamicReason = "sudo options cannot be determined"
+			}
 			name, value, attached := strings.Cut(arg, "=")
 			switch {
 			case name == "--preserve-env" && attached:
@@ -1208,6 +1258,10 @@ func parseSudoWrapper(argv []string) wrapperParse {
 					return undecidableWrapper("sudo", arg)
 				}
 				i++
+				if input.dynamicAt(i) {
+					p.dynamicCommand = true
+					p.dynamicReason = "sudo options cannot be determined"
+				}
 			default:
 				return undecidableWrapper("sudo", arg)
 			}
@@ -1217,6 +1271,10 @@ func parseSudoWrapper(argv []string) wrapperParse {
 		body := arg[1:]
 		if body == "" {
 			return undecidableWrapper("sudo", arg)
+		}
+		if input.dynamicAt(i) {
+			p.dynamicCommand = true
+			p.dynamicReason = "sudo options cannot be determined"
 		}
 		for j := 0; j < len(body); j++ {
 			ch := body[j]
@@ -1234,6 +1292,10 @@ func parseSudoWrapper(argv []string) wrapperParse {
 						return undecidableWrapper("sudo", arg)
 					}
 					i++
+					if input.dynamicAt(i) {
+						p.dynamicCommand = true
+						p.dynamicReason = "sudo options cannot be determined"
+					}
 				}
 				j = len(body)
 			default:
@@ -1253,15 +1315,15 @@ func parseSudoWrapper(argv []string) wrapperParse {
 	return wrapperCommand(p, argv, i)
 }
 
-func parseProcessWrapper(argv []string) wrapperParse {
-	next, err := normalizeProcessWrapperArgv(argv)
+func parseProcessWrapper(input commandInput) wrapperParse {
+	next, err := parseProcessWrapperInput(input)
 	if err != nil {
 		return wrapperParse{undecidable: err.Error()}
 	}
-	if len(next) == len(argv) {
+	if len(next.argv) == len(input.argv) {
 		return wrapperParse{}
 	}
-	return wrapperParse{rest: next}
+	return wrapperParse{rest: next.argv}
 }
 
 func parseEvalWrapper(argv []string) wrapperParse {

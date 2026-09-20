@@ -80,6 +80,8 @@ func TestParseShellInvocationsEmptyArgsDoNotHideDynamicDispatch(t *testing.T) {
 		`sh -c "$script"`,
 		`sh -c $script`,
 		`command sh -c "$script"`,
+		`exec -a "$name" git status`,
+		`sudo --preserve-env=FOO,"$BAR" git status`,
 		`exec -a '' sh -c "$script"`,
 		`command exec -a '' env GIT_CONFIG_GLOBAL=fixture git status`,
 		`command exec -a '' env GH_CONFIG_DIR=fixture gh pr view 7`,

@@ -22,11 +22,6 @@ var processWrapperOptions = map[string]map[string]optionValue{
 	),
 }
 
-func normalizeProcessWrapperArgv(argv []string) ([]string, error) {
-	input, err := parseProcessWrapperInput(commandInput{argv: argv})
-	return input.argv, err
-}
-
 func parseProcessWrapperInput(input commandInput) (commandInput, error) {
 	argv := input.argv
 	command := commandName(argv[0])

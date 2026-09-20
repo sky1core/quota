@@ -198,6 +198,7 @@ var ghGraphQLRemoteMutations = strings.Fields(`
  createRef updateRef updateRefs deleteRef createCommitOnBranch mergeBranch mergePullRequest
  enablePullRequestAutoMerge enqueuePullRequest updatePullRequestBranch revertPullRequest
  createLinkedBranch cloneTemplateRepository deleteRepository forkRepository
+ updateRepository archiveRepository unarchiveRepository
 `)
 
 var ghGraphQLMetadataMutations = strings.Fields(`
@@ -214,7 +215,7 @@ var ghGraphQLMetadataMutations = strings.Fields(`
  addReaction removeReaction createProjectV2 updateProjectV2 deleteProjectV2
  addProjectV2ItemById addProjectV2DraftIssue updateProjectV2ItemFieldValue
  clearProjectV2ItemFieldValue deleteProjectV2Item archiveProjectV2Item unarchiveProjectV2Item
- updateRepository archiveRepository unarchiveRepository addStar removeStar updateSubscription
+ addStar removeStar updateSubscription
 `)
 
 func classifyGhGraphQL(query, operationName string) (string, string) {

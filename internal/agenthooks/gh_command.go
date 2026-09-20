@@ -295,7 +295,7 @@ func classifyGhCommand(parsed *parsedCommand, path string, positionals commandIn
 		parsed.risk = "remote-code-ref-mutation"
 		return
 	}
-	parsed.allowDynamicArgs = ghUnconditionalDataCommand(path) || !positionals.containsEmpty()
+	parsed.allowDynamicArgs = true
 }
 
 func ghUnconditionalDataCommand(path string) bool {

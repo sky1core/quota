@@ -189,6 +189,8 @@ var gitCommandOptions = map[string]map[string]optionValue{
 
 var gitDefaultSubcommandOptions = optionValues(optionGroup{optionNoValue, `-h --help --help-all`})
 
+var gitSubmoduleForeachOptions = optionValues(optionGroup{optionNoValue, `-h --help -q --quiet --recursive`})
+
 var ghCheckoutOptions = optionValues(
 	optionGroup{optionRequiredValue, `-b --branch -R --repo`},
 	optionGroup{optionBooleanValue, `--detach --recurse-submodules -h --help`},
@@ -376,6 +378,10 @@ func classifyGitCommand(parsed *parsedCommand, args parsedArguments) {
 	case "push", "send-pack", "http-push":
 		parsed.allowDynamicArgs = false
 		if commandHasFlag(parsed.flags, "--dry-run", "-n") && parsed.flagError == "" {
+			if gitPushHasCustomReceiveProgram(parsed.flags) {
+				parsed.undecidable = "git push receiver execution content is not visible to policy evaluator"
+				return
+			}
 			return
 		}
 		parsed.risk = PolicyGroupRemoteCodeRefMutation
@@ -401,31 +407,7 @@ func classifyGitCommand(parsed *parsedCommand, args parsedArguments) {
 			parsed.nestedArgv = []commandInput{args.operands.from(1)}
 		}
 	case "submodule":
-		if len(operands) > 0 && !args.operands.dynamicAt(0) {
-			switch operands[0] {
-			case "add", "status", "init", "deinit", "update", "set-branch", "set-url", "summary", "sync", "absorbgitdirs":
-				return
-			}
-		}
-		if parsed.flagError != "" {
-			parsed.undecidable = parsed.flagError
-			return
-		}
-		if len(operands) == 0 {
-			return
-		}
-		if operands[0] == "" || args.operands.dynamicAt(0) {
-			parsed.undecidable = "git submodule operation cannot be determined"
-		} else if operands[0] == "foreach" {
-			if len(operands) != 2 || operands[1] == "" || args.operands.dynamicAt(1) {
-				parsed.undecidable = "git submodule foreach script cannot be determined"
-				return
-			}
-			parsed.flagError = ""
-			parsed.nestedScripts = []string{operands[1]}
-		} else {
-			parsed.undecidable = "unsupported git submodule operation"
-		}
+		classifyGitSubmoduleCommand(parsed, args)
 	case "rebase", "filter-branch":
 		if args.dynamicOptions {
 			parsed.undecidable = "git execution options cannot be determined"
@@ -444,6 +426,61 @@ func classifyGitCommand(parsed *parsedCommand, args parsedArguments) {
 			parsed.undecidable = parsed.flagError
 		}
 	}
+}
+
+func gitPushHasCustomReceiveProgram(flags []commandFlag) bool {
+	for _, flag := range flags {
+		switch flag.name {
+		case "--receive-pack", "--exec":
+			return true
+		}
+	}
+	return false
+}
+
+func classifyGitSubmoduleCommand(parsed *parsedCommand, args parsedArguments) {
+	operands := args.operands.argv
+	if len(operands) > 0 && !args.operands.dynamicAt(0) {
+		switch operands[0] {
+		case "add", "status", "init", "deinit", "update", "set-branch", "set-url", "summary", "sync", "absorbgitdirs":
+			return
+		}
+	}
+	if parsed.flagError != "" {
+		parsed.undecidable = parsed.flagError
+		return
+	}
+	if len(operands) == 0 {
+		return
+	}
+	if operands[0] == "" || args.operands.dynamicAt(0) {
+		parsed.undecidable = "git submodule operation cannot be determined"
+		return
+	}
+	if operands[0] != "foreach" {
+		parsed.undecidable = "unsupported git submodule operation"
+		return
+	}
+	input := args.operands.from(1)
+	foreach, err := parseCommandArgumentInput("git submodule foreach", input, gitSubmoduleForeachOptions, true, true)
+	if err != nil {
+		parsed.undecidable = err.Error()
+		return
+	}
+	if commandHasFlag(foreach.flags, "--help", "-h") {
+		return
+	}
+	if foreach.dynamicOptions {
+		parsed.undecidable = "git submodule foreach options cannot be determined"
+		return
+	}
+	scripts := foreach.operands.argv
+	if len(scripts) == 0 || scripts[0] == "" || foreach.operands.dynamicAt(0) {
+		parsed.undecidable = "git submodule foreach script cannot be determined"
+		return
+	}
+	parsed.flagError = ""
+	parsed.nestedScripts = []string{scripts[0]}
 }
 
 func commandHasFlag(flags []commandFlag, names ...string) bool {

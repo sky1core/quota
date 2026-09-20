@@ -968,9 +968,8 @@ func TestResolvedDefaultAccountsUseQuotaDefaultEnvironment(t *testing.T) {
 						t.Fatalf("resolution %v %v", accounts, errs)
 					}
 					got = claude.EnvForConfigDir(base, accounts[0].ConfigDir)
-					defaultDir := quotaTestAccountDir(t, filepath.Join(home, ".claude"))
-					if set := selectAgentClaudeSetEnv(accounts[0].ConfigDir); set["CLAUDE_CONFIG_DIR"] != defaultDir {
-						t.Fatalf("default recommendation = %v", set)
+					if set := selectAgentClaudeSetEnv(accounts[0].ConfigDir); len(set) != 0 {
+						t.Fatalf("default Claude recommendation must not set CLAUDE_CONFIG_DIR: %v", set)
 					}
 				} else {
 					accounts, errs := (config.Config{}).ResolveCodexAccounts()
@@ -985,8 +984,15 @@ func TestResolvedDefaultAccountsUseQuotaDefaultEnvironment(t *testing.T) {
 				}
 				gotMap := envMap(got)
 				defaultDir := quotaTestAccountDir(t, filepath.Join(home, "."+provider))
-				if gotMap["PATH"] != "/usr/bin" || gotMap[envKey] != defaultDir {
-					t.Fatalf("default account environment = %v", got)
+				if gotMap["PATH"] != "/usr/bin" {
+					t.Fatalf("default account environment lost PATH: %v", got)
+				}
+				if provider == "claude" {
+					if _, ok := gotMap[envKey]; ok {
+						t.Fatalf("default Claude environment must not set %s: %v", envKey, got)
+					}
+				} else if gotMap[envKey] != defaultDir {
+					t.Fatalf("default Codex environment = %v", got)
 				}
 			})
 		}

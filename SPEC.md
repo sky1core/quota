@@ -165,7 +165,7 @@ home 미지정 시 quota 기본 계정(`~/.codex`)을 조회한다. 호출자 �
 - `quota-cli`의 계정 선택, 경로 결정, 조회 범위, 적용 대상, 변경 계획은 명시 인자·표준입력·작업 디렉터리·파일 상태·quota 설정·quota 기본값으로만 결정한다. 일반 터미널, Claude, Codex 중 어디에서 실행됐는지는 입력이 아니다.
 - 대상 결정 순서는 명시 인자 → quota 설정 → quota 기본값이다. 호출자가 자기 실행을 위해 둔 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `CLAUDE_PROJECTS_DIR`, `CODEX_SESSIONS_DIR` 같은 환경변수는 이 순위에 끼워 넣지 않는다.
 - 기본 계정도 실제 디렉터리가 확정된 대상으로 처리한다. Claude 기본은 `~/.claude`, Codex 기본은 `~/.codex`이며, 환경변수로만 제공된 경로를 추가 계정이나 기본 계정으로 채택하지 않는다. 그 경로가 quota 설정에 등록돼 있으면 등록된 계정으로만 처리한다.
-- 외부 Claude/Codex CLI를 실행할 때는 quota가 확정한 계정 경로를 자식 프로세스 환경에 명시하고, 충돌하는 호출자 계정·세션 환경을 상속하지 않는다. 프로세스 전역 환경을 임시 변경해 대상 선택을 전달하지 않는다.
+- 외부 Claude/Codex CLI를 실행할 때는 충돌하는 호출자 계정·세션 환경을 상속하지 않는다. 추가 Claude 계정과 Codex 계정은 quota가 확정한 계정 경로를 자식 프로세스 환경에 명시하고, 기본 Claude는 상속된 `CLAUDE_CONFIG_DIR`를 제거한 뒤 Claude의 builtin default 계정을 사용한다. 프로세스 전역 환경을 임시 변경해 대상 선택을 전달하지 않는다.
 - 사용자 명령과 내부 hook은 같은 대상 해석 계약을 따른다. hook에 계정 경로가 필요하면 설치 시 확정한 인자나 hook payload로 전달하며, hook 실행 시점의 호출자 환경에서 다시 추론하지 않는다.
 
 **플래그** (조회 모드):
@@ -217,7 +217,7 @@ home 미지정 시 quota 기본 계정(`~/.codex`)을 조회한다. 호출자 �
 - 장기 창을 최우선, 짧은 창을 다음 순서로 비교한다. 비교값은 `남은 % - minLeftPct`이며, 양쪽 모두 리셋 시각을 알면 `비교값 / 리셋까지 남은 분`이 큰 쪽을 우선해, 같은 비교값이면 먼저 리셋되는 계정을 먼저 소비한다. 리셋 시각을 모르는 쪽이 있으면 비교값으로 비교한다. 모든 비교값이 같으면 config 순서가 빠른 계정을 선택한다.
 - Codex는 실제 `windowMins`가 가장 큰 창을 장기 기준, 가장 작은 창을 짧은 기준으로 사용한다.
 - Claude는 기본적으로 `weekly_all` 다음 `session` 순서로 비교한다. `--model`/`-m`이 지정돼도 요청 모델값과 실제 추가 quota row label이 맞을 때만 그 row를 본다. Opus처럼 전용 row가 없는 모델은 별도 quota를 가정하지 않고 `weekly_all`, `session`으로 비교한다. Fable처럼 해당 모델 창의 남은 비율을 읽을 수 있으면 그 계정에는 해당 모델 창의 계정별 `minLeftPct` 하한선을 적용한다. 살아남은 모든 후보가 남은 비율을 읽을 수 있는 해당 모델 창을 갖고 있을 때만 해당 모델 창을 우선 비교하고, 일부 후보에만 있으면 `weekly_all`, `session`으로 비교한다.
-- 선택된 Claude 계정은 `CLAUDE_CONFIG_DIR`, 선택된 Codex 계정은 `CODEX_HOME`으로 실행한다. 기본 계정도 quota가 확정한 기본 디렉터리를 명시하며 호출자 환경의 해당 변수를 상속하지 않는다. 조회한 로그인 계정과 실행 계정이 달라지지 않도록 Claude는 `ANTHROPIC_*`/`CLAUDE_*`의 인증·엔드포인트 override와 `CLAUDECODE`를 제거한다. 호출자 세션의 실행 모드가 자식 실행을 바꾸지 않도록 `CLAUDE_CODE_SIMPLE`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_DISABLE_CLAUDE_MDS`, `CLAUDE_CODE_EFFORT_LEVEL`도 제거한다. Codex는 `CODEX_*`/`OPENAI_*`의 인증·엔드포인트 override와 호출자 상태 경로 `CODEX_SQLITE_HOME`을 제거한다.
+- 선택된 추가 Claude 계정은 `CLAUDE_CONFIG_DIR`, 선택된 Codex 계정은 `CODEX_HOME`으로 실행한다. 기본 Claude 계정은 quota 내부에서 `~/.claude`로 확정하되, 자식 Claude 실행에는 `CLAUDE_CONFIG_DIR` 상속값을 제거하고 새 값을 넣지 않아 Claude의 builtin default 계정 동작을 사용한다. 조회한 로그인 계정과 실행 계정이 달라지지 않도록 Claude는 `ANTHROPIC_*`/`CLAUDE_*`의 인증·엔드포인트 override와 `CLAUDECODE`를 제거한다. 호출자 세션의 실행 모드가 자식 실행을 바꾸지 않도록 `CLAUDE_CODE_SIMPLE`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_DISABLE_CLAUDE_MDS`, `CLAUDE_CODE_EFFORT_LEVEL`도 제거한다. Codex는 `CODEX_*`/`OPENAI_*`의 인증·엔드포인트 override와 호출자 상태 경로 `CODEX_SQLITE_HOME`을 제거한다.
 - 대화형 Claude/Codex 실행은 지원하지 않는다.
 
 **`select-agent` 동작**:
@@ -550,7 +550,7 @@ quota-cli·quota-bar·위임 실행이 공유하는, 계정별 **마지막 성�
    - `CLAUDECODE` 제거: 중첩 세션 감지 회피
    - `ANTHROPIC_API_HOST` / `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` / `CLAUDE_API_KEY` / `CLAUDE_CODE_API_BASE_URL` / `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN` 제거: 사용자 로그인 계정 quota를 읽도록 강제 (커스텀 엔드포인트/대체 토큰이 quota를 가로채지 않게)
    - `CLAUDE_CODE_SIMPLE` / `CLAUDE_CODE_USE_VERTEX` / `CLAUDE_CODE_DISABLE_CLAUDE_MDS` / `CLAUDE_CODE_EFFORT_LEVEL` 제거: 호출자가 실행 중인 Claude 세션의 모드·provider·지침 상태·effort가 quota가 선택한 자식 Claude 실행을 바꾸지 않게 한다.
-   - `CLAUDE_CONFIG_DIR`: 상속값을 제거하고 quota가 확정한 config-dir을 하나만 넣는다(같은 이름의 할당을 두 번 두지 않는다 — 어느 쪽이 이길지는 OS가 정하므로, 지면 다른 계정 키 아래에 자기 계정 값이 실린다).
+   - `CLAUDE_CONFIG_DIR`: 상속값을 제거한다. 추가 계정이면 quota가 확정한 config-dir을 하나만 넣고, 기본 계정이면 새 값을 넣지 않아 Claude의 builtin default 계정을 쓴다.
 3. timeout 초과 시 context로 프로세스를 종료하고 timeout 에러를 반환한다. 실행 실패는 stderr(없으면 stdout) 앞부분을 붙여 에러로 반환한다.
 4. stdout의 JSON 엔벨로프를 파싱(`usageText`)해 `result`(사람이 읽는 /usage 리포트)를 꺼낸다. `is_error: true`면 CLI가 준 메시지를 담아 에러로 실패한다 — 에러 엔벨로프에는 사용량 행이 없으므로 그대로 파싱하면 원인 대신 파싱 실패로 보인다.
 5. `parseUsage()` 로 파싱.

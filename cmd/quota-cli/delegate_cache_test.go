@@ -51,7 +51,10 @@ func TestExecPromptPreservesSharedCache(t *testing.T) {
 						if p == "codex" {
 							envKey = "CODEX_HOME"
 						}
-						override := envMap(target.Env)[envKey]
+						var override *string
+						if value, ok := envMap(target.Env)[envKey]; ok {
+							override = &value
+						}
 						identity, _ := json.Marshal([]any{p, bin, dir, override})
 						sum := sha256.Sum256(identity)
 						data, err := json.Marshal(snapshot)

@@ -152,7 +152,11 @@ func TestModelTargetUsesQuotaDefaultAccount(t *testing.T) {
 					if _, ok := got[p.secretKey]; ok {
 						t.Fatalf("auth credential %s leaked into run env", p.secretKey)
 					}
-					if v, ok := got[p.envKey]; !ok || v != wantDir {
+					if p.name == "claude" {
+						if v, ok := got[p.envKey]; ok {
+							t.Fatalf("%s = %q (present=%v), want Claude builtin default", p.envKey, v, ok)
+						}
+					} else if v, ok := got[p.envKey]; !ok || v != wantDir {
 						t.Fatalf("%s = %q (present=%v), want quota default %q", p.envKey, v, ok, wantDir)
 					}
 
@@ -160,13 +164,28 @@ func TestModelTargetUsesQuotaDefaultAccount(t *testing.T) {
 						t.Fatalf("cache identity not absolute: %q", target.ConfigDir)
 					}
 
-					if slices.Contains(p.unsetEnv(dir), p.envKey) {
+					removed := slices.Contains(p.unsetEnv(dir), p.envKey)
+					if p.name == "claude" {
+						if tc.setEnv && !removed {
+							t.Fatal("default Claude recommendation must remove inherited CLAUDE_CONFIG_DIR")
+						}
+					} else if removed {
 						t.Fatal("recommendation removes selected account environment")
 					}
-					if set := p.setEnv(dir); len(set) != 1 || set[p.envKey] != wantDir {
+					set := p.setEnv(dir)
+					if p.name == "claude" {
+						if len(set) != 0 {
+							t.Fatalf("default Claude account recommended override: %v", set)
+						}
+					} else if len(set) != 1 || set[p.envKey] != wantDir {
 						t.Fatalf("default account recommended override: %v", set)
 					}
-					if v := envMap(autoPromptEnv(autoPromptAccount{provider: p.name, dir: dir}, os.Environ()))[p.envKey]; v != wantDir {
+					autoEnv := envMap(autoPromptEnv(autoPromptAccount{provider: p.name, dir: dir}, os.Environ()))
+					if p.name == "claude" {
+						if v, ok := autoEnv[p.envKey]; ok {
+							t.Fatalf("autoPromptEnv %s = %q, want Claude builtin default", p.envKey, v)
+						}
+					} else if v := autoEnv[p.envKey]; v != wantDir {
 						t.Fatalf("autoPromptEnv %s = %q, want quota default %q", p.envKey, v, wantDir)
 					}
 				})
@@ -227,7 +246,12 @@ func TestModelTargetIgnoresRelativeInheritedAccountEnvironment(t *testing.T) {
 			if err != nil {
 				t.Fatalf("relative inherited account should not affect default: %v", err)
 			}
-			if got, want := envMap(target.Env)[p.envKey], quotaTestAccountDir(t, filepath.Join(home, "."+p.name)); got != want {
+			want := quotaTestAccountDir(t, filepath.Join(home, "."+p.name))
+			if p.name == "claude" {
+				if got, ok := envMap(target.Env)[p.envKey]; ok {
+					t.Fatalf("%s = %q, want Claude builtin default", p.envKey, got)
+				}
+			} else if got := envMap(target.Env)[p.envKey]; got != want {
 				t.Fatalf("%s = %q, want default %q", p.envKey, got, want)
 			}
 			_, err = modelTarget(p.name, "relative-account")

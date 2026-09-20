@@ -775,11 +775,7 @@ func TestGetQuotaForConfigDirDefaultIgnoresCallerEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defaultConfigDir, err := config.DefaultAccountDirectory("claude")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := defaultConfigDir + "\n"; string(got) != want {
+	if want := "\n"; string(got) != want {
 		t.Fatalf("child CLAUDE_CONFIG_DIR = %q, want %q", got, want)
 	}
 }
@@ -831,6 +827,22 @@ func TestFetchEnv_NoConfigDirDropsInherited(t *testing.T) {
 	for _, kv := range env {
 		if strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR=") {
 			t.Fatalf("empty configDir must not preserve inherited CLAUDE_CONFIG_DIR: %v", env)
+		}
+	}
+}
+
+func TestFetchEnv_DefaultConfigDirDropsInherited(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "/inherited")
+	defaultDir, err := config.DefaultAccountDirectory("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env := fetchEnv(defaultDir)
+
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR=") {
+			t.Fatalf("default configDir must use Claude's built-in default, not CLAUDE_CONFIG_DIR: %v", env)
 		}
 	}
 }

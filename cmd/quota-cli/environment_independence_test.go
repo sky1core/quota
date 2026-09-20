@@ -154,7 +154,11 @@ func writeFakeQuotaCLIs(t *testing.T, binDir string) {
 		t.Fatal(err)
 	}
 	claudeScript := `#!/bin/sh
-printf '%s\n' "$CLAUDE_CONFIG_DIR" >> "$QUOTA_TEST_RECORD_DIR/claude-env"
+if [ -n "${CLAUDE_CONFIG_DIR+x}" ] && [ -n "$CLAUDE_CONFIG_DIR" ]; then
+	printf '%s\n' "$CLAUDE_CONFIG_DIR" >> "$QUOTA_TEST_RECORD_DIR/claude-env"
+else
+	(cd "$HOME/.claude" 2>/dev/null && pwd -P || printf '%s\n' "$HOME/.claude") >> "$QUOTA_TEST_RECORD_DIR/claude-env"
+fi
 [ -n "${CLAUDE_CODE_DISABLE_CLAUDE_MDS+x}" ] && printf '%s\n' CLAUDE_CODE_DISABLE_CLAUDE_MDS >> "$QUOTA_TEST_RECORD_DIR/claude-control-env"
 [ -n "${CLAUDE_CODE_EFFORT_LEVEL+x}" ] && printf '%s\n' CLAUDE_CODE_EFFORT_LEVEL >> "$QUOTA_TEST_RECORD_DIR/claude-control-env"
 [ -n "${CLAUDE_CODE_SIMPLE+x}" ] && printf '%s\n' CLAUDE_CODE_SIMPLE >> "$QUOTA_TEST_RECORD_DIR/claude-control-env"

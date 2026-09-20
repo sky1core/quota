@@ -442,10 +442,12 @@ func selectAgentErrorSummary(err error) string {
 }
 
 func selectAgentClaudeSetEnv(configDir string) map[string]string {
-	if configDir == "" {
-		return nil
+	for _, kv := range claude.EnvForConfigDir(nil, configDir) {
+		if key, value, ok := strings.Cut(kv, "="); ok && key == "CLAUDE_CONFIG_DIR" {
+			return map[string]string{key: value}
+		}
 	}
-	return map[string]string{"CLAUDE_CONFIG_DIR": configDir}
+	return nil
 }
 
 func selectAgentCodexSetEnv(home string) map[string]string {

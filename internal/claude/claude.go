@@ -185,10 +185,15 @@ func EnvForConfigDir(base []string, configDir string) []string {
 		}
 		env = append(env, kv)
 	}
-	if configDir != "" {
+	if configDir != "" && !isDefaultConfigDir(configDir) {
 		env = append(env, "CLAUDE_CONFIG_DIR="+configDir)
 	}
 	return env
+}
+
+func isDefaultConfigDir(configDir string) bool {
+	defaultDir, err := config.DefaultAccountDirectory("claude")
+	return err == nil && filepath.Clean(configDir) == filepath.Clean(defaultDir)
 }
 
 // usageResponse is the subset of `claude -p --output-format json` this package

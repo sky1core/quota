@@ -220,9 +220,10 @@ type parsedCommand struct {
 }
 
 type commandInput struct {
-	argv        []string
-	dynamicArgs []bool
-	splitArgs   []bool
+	argv          []string
+	dynamicArgs   []bool
+	splitArgs     []bool
+	literalPrefix []bool
 }
 
 func (input commandInput) dynamicAt(i int) bool {
@@ -231,6 +232,10 @@ func (input commandInput) dynamicAt(i int) bool {
 
 func (input commandInput) maySplitAt(i int) bool {
 	return i >= 0 && i < len(input.splitArgs) && input.splitArgs[i]
+}
+
+func (input commandInput) literalPrefixAt(i int) bool {
+	return !input.dynamicAt(i) || i >= 0 && i < len(input.literalPrefix) && input.literalPrefix[i]
 }
 
 func (input commandInput) anyDynamic() bool {
@@ -259,6 +264,9 @@ func (input commandInput) from(i int) commandInput {
 	if i < len(input.splitArgs) {
 		out.splitArgs = input.splitArgs[i:]
 	}
+	if i < len(input.literalPrefix) {
+		out.literalPrefix = input.literalPrefix[i:]
+	}
 	return out
 }
 
@@ -267,12 +275,16 @@ func (input commandInput) withArgvPrefixAndTail(prefix []string, tail int) comma
 	for i := range prefix {
 		out.dynamicArgs = append(out.dynamicArgs, input.dynamicAt(i))
 		out.splitArgs = append(out.splitArgs, input.maySplitAt(i))
+		out.literalPrefix = append(out.literalPrefix, input.literalPrefixAt(i))
 	}
 	if tail < len(input.dynamicArgs) {
 		out.dynamicArgs = append(out.dynamicArgs, input.dynamicArgs[tail:]...)
 	}
 	if tail < len(input.splitArgs) {
 		out.splitArgs = append(out.splitArgs, input.splitArgs[tail:]...)
+	}
+	if tail < len(input.literalPrefix) {
+		out.literalPrefix = append(out.literalPrefix, input.literalPrefix[tail:]...)
 	}
 	return out
 }
@@ -281,7 +293,15 @@ func (input commandInput) shellQuote() string {
 	parts := make([]string, len(input.argv))
 	for i, arg := range input.argv {
 		if input.dynamicAt(i) {
-			parts[i] = `"${__quota_dynamic_argument}"`
+			marker := `"${__quota_dynamic_argument}"`
+			if input.maySplitAt(i) {
+				marker = "${__quota_dynamic_argument}"
+			}
+			if input.literalPrefixAt(i) && arg != "" {
+				parts[i] = ShellQuote([]string{arg}) + marker
+			} else {
+				parts[i] = marker
+			}
 		} else {
 			parts[i] = ShellQuote([]string{arg})
 		}
@@ -308,6 +328,9 @@ func parseCommandInput(input commandInput) parsedCommand {
 		}
 		if len(input.splitArgs) > 0 {
 			input.splitArgs = append([]bool{input.maySplitAt(0), false}, input.splitArgs[1:]...)
+		}
+		if len(input.literalPrefix) > 0 {
+			input.literalPrefix = append([]bool{input.literalPrefixAt(0), true}, input.literalPrefix[1:]...)
 		}
 		name = "git"
 	}
@@ -422,9 +445,10 @@ func classifyGitCommand(parsed *parsedCommand, args parsedArguments) {
 			return
 		}
 		parsed.nestedArgv = []commandInput{{
-			argv:        append([]string{"git"}, operands...),
-			dynamicArgs: append([]bool{false}, args.operands.dynamicArgs...),
-			splitArgs:   append([]bool{false}, args.operands.splitArgs...),
+			argv:          append([]string{"git"}, operands...),
+			dynamicArgs:   append([]bool{false}, args.operands.dynamicArgs...),
+			splitArgs:     append([]bool{false}, args.operands.splitArgs...),
+			literalPrefix: append([]bool{true}, args.operands.literalPrefix...),
 		}}
 	case "bisect":
 		if parsed.flagError != "" {
@@ -509,7 +533,7 @@ func classifyGitSubmoduleCommand(parsed *parsedCommand, args parsedArguments) {
 	}
 	scriptInput := foreach.operands
 	scripts := scriptInput.argv
-	if len(scripts) == 0 || scripts[0] == "" || scriptInput.anyDynamic() {
+	if len(scripts) == 0 || scripts[0] == "" || scriptInput.dynamicAt(0) || scriptInput.maySplitAt(0) {
 		parsed.undecidable = "git submodule foreach script cannot be determined"
 		return
 	}
@@ -574,10 +598,11 @@ func parseCommandArgumentInput(command string, input commandInput, options map[s
 	var operands []string
 	var operandDynamic []bool
 	var operandSplit []bool
+	var operandLiteralPrefix []bool
 	dynamicOptions := false
 	dynamicOptionSyntax := false
 	result := func() parsedArguments {
-		return parsedArguments{flags: flags, operands: commandInput{argv: operands, dynamicArgs: operandDynamic, splitArgs: operandSplit}, dynamicOptions: dynamicOptions, dynamicOptionSyntax: dynamicOptionSyntax}
+		return parsedArguments{flags: flags, operands: commandInput{argv: operands, dynamicArgs: operandDynamic, splitArgs: operandSplit, literalPrefix: operandLiteralPrefix}, dynamicOptions: dynamicOptions, dynamicOptionSyntax: dynamicOptionSyntax}
 	}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -590,6 +615,7 @@ func parseCommandArgumentInput(command string, input commandInput, options map[s
 			for j := i + 1; j < len(args); j++ {
 				operandDynamic = append(operandDynamic, input.dynamicAt(j))
 				operandSplit = append(operandSplit, input.maySplitAt(j))
+				operandLiteralPrefix = append(operandLiteralPrefix, input.literalPrefixAt(j))
 			}
 			break
 		}
@@ -599,13 +625,15 @@ func parseCommandArgumentInput(command string, input commandInput, options map[s
 				for j := i; j < len(args); j++ {
 					operandDynamic = append(operandDynamic, input.dynamicAt(j))
 					operandSplit = append(operandSplit, input.maySplitAt(j))
+					operandLiteralPrefix = append(operandLiteralPrefix, input.literalPrefixAt(j))
 				}
 				break
 			}
-			dynamicOptions = dynamicOptions || input.maySplitAt(i) || arg == "" && input.dynamicAt(i)
+			dynamicOptions = dynamicOptions || input.maySplitAt(i) || input.dynamicAt(i) && !input.literalPrefixAt(i)
 			operands = append(operands, arg)
 			operandDynamic = append(operandDynamic, input.dynamicAt(i))
 			operandSplit = append(operandSplit, input.maySplitAt(i))
+			operandLiteralPrefix = append(operandLiteralPrefix, input.literalPrefixAt(i))
 			continue
 		}
 		if strings.HasPrefix(arg, "--") {
@@ -613,6 +641,10 @@ func parseCommandArgumentInput(command string, input commandInput, options map[s
 			name, value, err := resolveLongOption(name, options, gitOptions)
 			if err != nil {
 				return result(), fmt.Errorf("%s: %w", command, err)
+			}
+			if input.dynamicAt(i) && !input.literalPrefixAt(i) {
+				dynamicOptionSyntax = true
+				dynamicOptions = true
 			}
 			if input.dynamicAt(i) && !attached {
 				dynamicOptionSyntax = true
@@ -661,6 +693,10 @@ func parseCommandArgumentInput(command string, input commandInput, options map[s
 				return result(), fmt.Errorf("unsupported %s option %s", command, name)
 			}
 			tokenDynamic := input.dynamicAt(i)
+			if tokenDynamic && !input.literalPrefixAt(i) {
+				dynamicOptions = true
+				dynamicOptionSyntax = true
+			}
 			if input.maySplitAt(i) {
 				dynamicOptions = true
 			}
@@ -688,6 +724,7 @@ func parseCommandArgumentInput(command string, input commandInput, options map[s
 				if j == len(arg)-1 {
 					if tokenDynamic {
 						text = ""
+						dynamicOptions = true
 					} else {
 						i++
 					}

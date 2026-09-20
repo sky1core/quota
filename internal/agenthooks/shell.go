@@ -18,6 +18,7 @@ type Invocation struct {
 	literalArgv    []string
 	dynamicArgs    []bool
 	splitArgs      []bool
+	literalPrefix  []bool
 	auditArgv      [][]string
 }
 
@@ -87,7 +88,7 @@ func parseShellInvocations(command string, depth int, inheritedShellStartup stri
 }
 
 func expandInvocation(inv Invocation, assigns []*syntax.Assign, depth int, inheritedShellStartup string, literalArgv func(wrapperChain) []string) []Invocation {
-	wrappers := parseWrapperChain(commandInput{argv: inv.Argv, dynamicArgs: inv.dynamicArgs, splitArgs: inv.splitArgs})
+	wrappers := parseWrapperChain(commandInput{argv: inv.Argv, dynamicArgs: inv.dynamicArgs, splitArgs: inv.splitArgs, literalPrefix: inv.literalPrefix})
 	if wrappers.undecidable != "" {
 		blocked := undecidableInvocation(wrappers.argv, wrappers.undecidable)
 		blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
@@ -132,6 +133,9 @@ func expandInvocation(inv Invocation, assigns []*syntax.Assign, depth int, inher
 	if wrappers.consumed < len(inv.splitArgs) {
 		input.splitArgs = inv.splitArgs[wrappers.consumed:]
 	}
+	if wrappers.consumed < len(inv.literalPrefix) {
+		input.literalPrefix = inv.literalPrefix[wrappers.consumed:]
+	}
 	parsed := parseCommandInput(input)
 	norm := parsed.argv
 	if inv.Dynamic && len(norm) > 1 && commandName(norm[0]) == "trap" && norm[1] == "" {
@@ -160,7 +164,7 @@ func expandInvocation(inv Invocation, assigns []*syntax.Assign, depth int, inher
 	}
 	script, hasScript := wrappers.script, wrappers.hasScript
 	if len(norm) > 0 && isShellCommand(norm[0]) {
-		shell := parseShellInterpreter(norm)
+		shell := parseShellInterpreter(input)
 		if shell.hasCommand && wrappers.consumed+shell.scriptIndex < len(inv.dynamicArgs) && inv.dynamicArgs[wrappers.consumed+shell.scriptIndex] {
 			dynamicCommand, dynamicReason = true, "shell script cannot be determined"
 		}
@@ -253,9 +257,10 @@ func expandArgvInvocation(input commandInput, depth int, inheritedShellStartup s
 
 func commandInputInvocation(input commandInput) Invocation {
 	inv := Invocation{
-		Argv:        append([]string(nil), input.argv...),
-		dynamicArgs: append([]bool(nil), input.dynamicArgs...),
-		splitArgs:   append([]bool(nil), input.splitArgs...),
+		Argv:          append([]string(nil), input.argv...),
+		dynamicArgs:   append([]bool(nil), input.dynamicArgs...),
+		splitArgs:     append([]bool(nil), input.splitArgs...),
+		literalPrefix: append([]bool(nil), input.literalPrefix...),
 	}
 	for i := range inv.Argv {
 		if !input.dynamicAt(i) {
@@ -341,9 +346,10 @@ func quotedScalarWord(word *syntax.Word) bool {
 func callInvocation(call *syntax.CallExpr) Invocation {
 	var inv Invocation
 	for i, word := range call.Args {
-		value, dynamic, maySplit, ok := commandWord(word)
+		value, dynamic, maySplit, literalPrefix, ok := commandWord(word)
 		inv.dynamicArgs = append(inv.dynamicArgs, dynamic)
 		inv.splitArgs = append(inv.splitArgs, maySplit)
+		inv.literalPrefix = append(inv.literalPrefix, literalPrefix)
 		if dynamic {
 			inv.Dynamic = true
 			inv.DynamicReason = "command contains shell expansion"
@@ -367,10 +373,10 @@ func callInvocation(call *syntax.CallExpr) Invocation {
 	return inv
 }
 
-func commandWord(word *syntax.Word) (string, bool, bool, bool) {
+func commandWord(word *syntax.Word) (string, bool, bool, bool, bool) {
 	value, ok := staticWord(word)
 	if ok {
-		return value, false, false, true
+		return value, false, false, true, true
 	}
 	var b strings.Builder
 	dynamic := false
@@ -388,22 +394,26 @@ func commandWord(word *syntax.Word) (string, bool, bool, bool) {
 		}
 		b.WriteString(value)
 	}
+	maySplit = maySplit || wordHasExpansionMeta(word)
 	if !dynamic || b.Len() == 0 {
-		return "", true, maySplit, false
+		return "", true, maySplit, false, false
 	}
 	text := b.String()
+	literalPrefix := firstDynamicOffset > 0
 	if eq := strings.IndexByte(text, '='); eq >= 0 && firstDynamicOffset <= eq {
-		return text[eq:], true, maySplit, true
+		return text[eq:], true, maySplit, false, true
 	}
 	if strings.HasPrefix(text, "-") && firstDynamicOffset <= 1 {
-		return "-?", true, maySplit, true
+		return "-?", true, maySplit, literalPrefix, true
 	}
-	return text, true, maySplit, true
+	return text, true, maySplit, literalPrefix, true
 }
 
 func wordPartMaySplit(part syntax.WordPart, quoted bool) bool {
 	switch p := part.(type) {
-	case *syntax.Lit, *syntax.SglQuoted:
+	case *syntax.Lit:
+		return !quoted && litHasExpansionMeta(p.Value)
+	case *syntax.SglQuoted:
 		return false
 	case *syntax.DblQuoted:
 		for _, nested := range p.Parts {
@@ -417,6 +427,23 @@ func wordPartMaySplit(part syntax.WordPart, quoted bool) bool {
 	default:
 		return !quoted
 	}
+}
+
+func wordHasExpansionMeta(word *syntax.Word) bool {
+	var metaScan strings.Builder
+	for _, part := range word.Parts {
+		if lit, ok := part.(*syntax.Lit); ok {
+			metaScan.WriteString(lit.Value)
+			continue
+		}
+		value, ok := staticWordPart(part, false)
+		if !ok {
+			metaScan.WriteByte('A')
+			continue
+		}
+		metaScan.WriteString(strings.Repeat("A", len(value)))
+	}
+	return litHasExpansionMeta(metaScan.String())
 }
 
 func arithmIndexIsAt(expr syntax.ArithmExpr) bool {
@@ -934,6 +961,9 @@ func parseWrapperChain(input commandInput) wrapperChain {
 		if chain.consumed < len(input.splitArgs) {
 			remaining.splitArgs = input.splitArgs[chain.consumed:]
 		}
+		if chain.consumed < len(input.literalPrefix) {
+			remaining.literalPrefix = input.literalPrefix[chain.consumed:]
+		}
 		p, ok := parseWrapper(remaining)
 		if !ok {
 			return chain
@@ -1267,11 +1297,6 @@ func parseEnvWrapper(input commandInput) wrapperParse {
 }
 
 func envSplitString(value string, rest commandInput, scriptIndex int) wrapperParse {
-	for i := range rest.argv {
-		if rest.maySplitAt(i) {
-			return wrapperParse{undecidable: "env split-string trailing arguments cannot be determined"}
-		}
-	}
 	script := "env " + value
 	if len(rest.argv) > 0 {
 		script += " " + rest.shellQuote()
@@ -1495,7 +1520,8 @@ var shellLongNoValue = map[string]bool{
 
 // sh|bash|zsh|dash|ksh [options] [-c string | file] ...; short options combine
 // with either "-" or "+", -o/+o/-O/+O take the next argument.
-func parseShellInterpreter(argv []string) shellParse {
+func parseShellInterpreter(input commandInput) shellParse {
+	argv := input.argv
 	var s shellParse
 	i := 1
 	for i < len(argv) {
@@ -1507,6 +1533,10 @@ func parseShellInterpreter(argv []string) shellParse {
 		if !strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "+") {
 			break
 		}
+		if input.maySplitAt(i) {
+			s.undecidable = "shell option can change command position"
+			return s
+		}
 		if strings.HasPrefix(arg, "--") {
 			name, _, attached := strings.Cut(arg, "=")
 			switch {
@@ -1515,6 +1545,10 @@ func parseShellInterpreter(argv []string) shellParse {
 			case name == "--rcfile" || name == "--init-file":
 				if i+1 >= len(argv) {
 					s.undecidable = "unsupported or incomplete shell option " + arg
+					return s
+				}
+				if input.maySplitAt(i + 1) {
+					s.undecidable = "shell option value can change command position"
 					return s
 				}
 				s.startupFile = true
@@ -1548,6 +1582,10 @@ func parseShellInterpreter(argv []string) shellParse {
 			case ch == 'o' || ch == 'O':
 				if j+1 != len(body) || i+1 >= len(argv) {
 					s.undecidable = "unsupported or incomplete shell option " + arg
+					return s
+				}
+				if input.maySplitAt(i + 1) {
+					s.undecidable = "shell option value can change command position"
 					return s
 				}
 				i++
@@ -1605,6 +1643,9 @@ func normalizeGitGlobalOptions(input commandInput) (commandInput, bool, string) 
 		}
 		if !strings.HasPrefix(arg, "-") {
 			break
+		}
+		if input.dynamicAt(i) && !input.literalPrefixAt(i) {
+			return input, true, "git global option cannot be determined"
 		}
 		switch {
 		case gitGlobalFlagNoValue(arg):

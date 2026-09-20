@@ -113,16 +113,23 @@ func parseProcessWrapperInput(input commandInput) (commandInput, error) {
 	if i < len(input.splitArgs) {
 		rest.splitArgs = append([]bool(nil), input.splitArgs[i:]...)
 	}
+	if i < len(input.literalPrefix) {
+		rest.literalPrefix = append([]bool(nil), input.literalPrefix[i:]...)
+	}
 	if replacement != "" {
 		for i, arg := range rest.argv {
 			if strings.Contains(arg, replacement) {
 				rest.argv[i] = ""
 				rest.dynamicArgs[i] = true
+				if i < len(rest.literalPrefix) {
+					rest.literalPrefix[i] = false
+				}
 			}
 		}
 	} else if command == "xargs" {
 		rest.argv = append(rest.argv, "")
 		rest.dynamicArgs = append(rest.dynamicArgs, true)
+		rest.literalPrefix = append(rest.literalPrefix, false)
 	}
 	return rest, nil
 }

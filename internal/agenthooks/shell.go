@@ -350,10 +350,14 @@ func commandWord(word *syntax.Word) (string, bool, bool) {
 	if !dynamic || b.Len() == 0 {
 		return "", true, false
 	}
-	if strings.HasPrefix(b.String(), "-") && firstDynamicOffset <= 1 {
+	text := b.String()
+	if eq := strings.IndexByte(text, '='); eq >= 0 && firstDynamicOffset <= eq {
+		return text[eq:], true, true
+	}
+	if strings.HasPrefix(text, "-") && firstDynamicOffset <= 1 {
 		return "-?", true, true
 	}
-	return b.String(), true, true
+	return text, true, true
 }
 
 func staticWord(word *syntax.Word) (string, bool) {
@@ -1033,6 +1037,10 @@ func parseExecWrapper(input commandInput) wrapperParse {
 		if len(arg) < 2 || strings.HasPrefix(arg, "--") {
 			return undecidableWrapper("exec", arg)
 		}
+		if input.dynamicAt(i) {
+			p.dynamicCommand = true
+			p.dynamicReason = "exec options cannot be determined"
+		}
 		body := arg[1:]
 		for j := 0; j < len(body); j++ {
 			switch body[j] {
@@ -1170,6 +1178,15 @@ func parseEnvWrapper(input commandInput) wrapperParse {
 	for i < len(argv) {
 		name, value, ok := strings.Cut(argv[i], "=")
 		if !ok {
+			break
+		}
+		if name == "" {
+			if input.dynamicAt(i) {
+				p.dynamicCommand = true
+				p.dynamicReason = "env assignment name cannot be determined"
+				i++
+				continue
+			}
 			break
 		}
 		p.assigns = append(p.assigns, assignment{name, value})

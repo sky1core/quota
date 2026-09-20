@@ -475,12 +475,12 @@ func classifyGitSubmoduleCommand(parsed *parsedCommand, args parsedArguments) {
 		return
 	}
 	scripts := foreach.operands.argv
-	if len(scripts) == 0 || scripts[0] == "" || foreach.operands.dynamicAt(0) {
+	if len(scripts) == 0 || scripts[0] == "" || foreach.operands.anyDynamic() {
 		parsed.undecidable = "git submodule foreach script cannot be determined"
 		return
 	}
 	parsed.flagError = ""
-	parsed.nestedScripts = []string{scripts[0]}
+	parsed.nestedScripts = []string{strings.Join(scripts, " ")}
 }
 
 func commandHasFlag(flags []commandFlag, names ...string) bool {

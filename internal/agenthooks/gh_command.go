@@ -106,6 +106,11 @@ func parseGhCommandInput(input commandInput) (parsedCommand, error) {
 		parsed.undecidable = "gh options cannot be determined"
 		return parsed, nil
 	}
+	if parsedArgs.dynamicOptions && !ghUnconditionalDataCommand(path) {
+		parsed.flags = parsedArgs.flags
+		parsed.undecidable = "gh arguments cannot be determined"
+		return parsed, nil
+	}
 	if len(command) == 0 || ghCommandHasChildren(command) {
 		for i := 0; i < len(args); {
 			if args[i] == "--" && i+1 == len(args) {

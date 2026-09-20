@@ -221,10 +221,15 @@ type parsedCommand struct {
 type commandInput struct {
 	argv        []string
 	dynamicArgs []bool
+	splitArgs   []bool
 }
 
 func (input commandInput) dynamicAt(i int) bool {
 	return i >= 0 && i < len(input.dynamicArgs) && input.dynamicArgs[i]
+}
+
+func (input commandInput) maySplitAt(i int) bool {
+	return i >= 0 && i < len(input.splitArgs) && input.splitArgs[i]
 }
 
 func (input commandInput) anyDynamic() bool {
@@ -249,6 +254,9 @@ func (input commandInput) from(i int) commandInput {
 	out := commandInput{argv: input.argv[i:]}
 	if i < len(input.dynamicArgs) {
 		out.dynamicArgs = input.dynamicArgs[i:]
+	}
+	if i < len(input.splitArgs) {
+		out.splitArgs = input.splitArgs[i:]
 	}
 	return out
 }
@@ -281,6 +289,9 @@ func parseCommandInput(input commandInput) parsedCommand {
 		input.argv = parsed.argv
 		if len(input.dynamicArgs) > 0 {
 			input.dynamicArgs = append([]bool{input.dynamicAt(0), false}, input.dynamicArgs[1:]...)
+		}
+		if len(input.splitArgs) > 0 {
+			input.splitArgs = append([]bool{input.maySplitAt(0), false}, input.splitArgs[1:]...)
 		}
 		name = "git"
 	}
@@ -392,7 +403,11 @@ func classifyGitCommand(parsed *parsedCommand, args parsedArguments) {
 			parsed.undecidable = "git for-each-repo command cannot be determined"
 			return
 		}
-		parsed.nestedArgv = []commandInput{{argv: append([]string{"git"}, operands...), dynamicArgs: append([]bool{false}, args.operands.dynamicArgs...)}}
+		parsed.nestedArgv = []commandInput{{
+			argv:        append([]string{"git"}, operands...),
+			dynamicArgs: append([]bool{false}, args.operands.dynamicArgs...),
+			splitArgs:   append([]bool{false}, args.operands.splitArgs...),
+		}}
 	case "bisect":
 		if parsed.flagError != "" {
 			parsed.undecidable = parsed.flagError
@@ -535,10 +550,11 @@ func parseCommandArgumentInput(command string, input commandInput, options map[s
 	var flags []commandFlag
 	var operands []string
 	var operandDynamic []bool
+	var operandSplit []bool
 	dynamicOptions := false
 	dynamicOptionSyntax := false
 	result := func() parsedArguments {
-		return parsedArguments{flags: flags, operands: commandInput{argv: operands, dynamicArgs: operandDynamic}, dynamicOptions: dynamicOptions, dynamicOptionSyntax: dynamicOptionSyntax}
+		return parsedArguments{flags: flags, operands: commandInput{argv: operands, dynamicArgs: operandDynamic, splitArgs: operandSplit}, dynamicOptions: dynamicOptions, dynamicOptionSyntax: dynamicOptionSyntax}
 	}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -550,6 +566,7 @@ func parseCommandArgumentInput(command string, input commandInput, options map[s
 			operands = append(operands, args[i+1:]...)
 			for j := i + 1; j < len(args); j++ {
 				operandDynamic = append(operandDynamic, input.dynamicAt(j))
+				operandSplit = append(operandSplit, input.maySplitAt(j))
 			}
 			break
 		}
@@ -558,12 +575,14 @@ func parseCommandArgumentInput(command string, input commandInput, options map[s
 				operands = append(operands, args[i:]...)
 				for j := i; j < len(args); j++ {
 					operandDynamic = append(operandDynamic, input.dynamicAt(j))
+					operandSplit = append(operandSplit, input.maySplitAt(j))
 				}
 				break
 			}
-			dynamicOptions = dynamicOptions || input.dynamicAt(i)
+			dynamicOptions = dynamicOptions || input.dynamicAt(i) || input.maySplitAt(i)
 			operands = append(operands, arg)
 			operandDynamic = append(operandDynamic, input.dynamicAt(i))
+			operandSplit = append(operandSplit, input.maySplitAt(i))
 			continue
 		}
 		if strings.HasPrefix(arg, "--") {
@@ -574,6 +593,9 @@ func parseCommandArgumentInput(command string, input commandInput, options map[s
 			}
 			if input.dynamicAt(i) && !attached {
 				dynamicOptionSyntax = true
+				dynamicOptions = true
+			}
+			if input.maySplitAt(i) {
 				dynamicOptions = true
 			}
 			if attached && (value == optionNoValue || value == optionRequiredSeparateValue || value == optionToggle) {
@@ -599,6 +621,7 @@ func parseCommandArgumentInput(command string, input commandInput, options map[s
 				}
 				flags[len(flags)-1].value = args[i]
 				flags[len(flags)-1].valueDynamic = input.dynamicAt(i)
+				dynamicOptions = dynamicOptions || input.maySplitAt(i)
 				if value == optionRequiredNonEmptyValue && args[i] == "" && !input.dynamicAt(i) {
 					return result(), fmt.Errorf("%s option %s requires a non-empty value", command, name)
 				}
@@ -615,6 +638,9 @@ func parseCommandArgumentInput(command string, input commandInput, options map[s
 				return result(), fmt.Errorf("unsupported %s option %s", command, name)
 			}
 			tokenDynamic := input.dynamicAt(i)
+			if input.maySplitAt(i) {
+				dynamicOptions = true
+			}
 			if tokenDynamic && value != optionRequiredValue && value != optionRequiredNonEmptyValue && value != optionAttachedValue {
 				dynamicOptions = true
 				dynamicOptionSyntax = true
@@ -654,6 +680,7 @@ func parseCommandArgumentInput(command string, input commandInput, options map[s
 				}
 				flags[len(flags)-1].value = text
 				flags[len(flags)-1].valueDynamic = input.dynamicAt(i) || tokenDynamic
+				dynamicOptions = dynamicOptions || input.maySplitAt(i)
 				if value == optionRequiredNonEmptyValue && text == "" && !flags[len(flags)-1].valueDynamic {
 					return result(), fmt.Errorf("%s option %s requires a non-empty value", command, name)
 				}

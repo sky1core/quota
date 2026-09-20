@@ -51,9 +51,10 @@ func parseGhCommandInput(input commandInput) (parsedCommand, error) {
 		args = append(args[:index], args[index+1:]...)
 		indices = append(indices[:index], indices[index+1:]...)
 	}
-	parseInput := commandInput{argv: append([]string(nil), args...), dynamicArgs: make([]bool, len(args))}
+	parseInput := commandInput{argv: append([]string(nil), args...), dynamicArgs: make([]bool, len(args)), splitArgs: make([]bool, len(args))}
 	for i, index := range indices {
 		parseInput.dynamicArgs[i] = input.dynamicAt(index)
+		parseInput.splitArgs[i] = input.maySplitAt(index)
 	}
 	leadingEnd := 1
 	for leadingEnd < firstCommand {

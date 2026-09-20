@@ -110,6 +110,9 @@ func parseProcessWrapperInput(input commandInput) (commandInput, error) {
 	for j := range rest.argv {
 		rest.dynamicArgs[j] = input.dynamicAt(i + j)
 	}
+	if i < len(input.splitArgs) {
+		rest.splitArgs = append([]bool(nil), input.splitArgs[i:]...)
+	}
 	if replacement != "" {
 		for i, arg := range rest.argv {
 			if strings.Contains(arg, replacement) {

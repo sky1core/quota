@@ -17,6 +17,7 @@ type Invocation struct {
 	command        parsedCommand
 	literalArgv    []string
 	dynamicArgs    []bool
+	splitArgs      []bool
 	auditArgv      [][]string
 }
 
@@ -77,159 +78,196 @@ func parseShellInvocations(command string, depth int, inheritedShellStartup stri
 		if len(inv.Argv) == 0 && !inv.Dynamic {
 			return true
 		}
-		wrappers := parseWrapperChain(commandInput{argv: inv.Argv, dynamicArgs: inv.dynamicArgs})
-		if wrappers.undecidable != "" {
-			blocked := undecidableInvocation(wrappers.argv, wrappers.undecidable)
-			blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
-			invocations = append(invocations, blocked)
-			return true
-		}
-		gitConfigDispatch, gitConfigReason := gitConfigAssignmentCanChangeCommandDispatch(call.Assigns)
-		if wrappers.gitEnvironment {
-			gitConfigDispatch, gitConfigReason = true, "git environment can change command dispatch"
-		}
-		ghConfigDispatch, ghConfigReason := ghConfigAssignmentCanChangeCommandDispatch(call.Assigns)
-		if wrappers.ghEnvironment {
-			ghConfigDispatch, ghConfigReason = true, "gh configuration directory can change command dispatch"
-		}
-		if inv.Dynamic {
-			if wrappers.dynamicCommand {
-				inv.DynamicCommand = true
-				if inv.DynamicReason == "" {
-					inv.DynamicReason = wrappers.dynamicReason
-				}
-			}
-			if wrappers.consumed < len(inv.dynamicArgs) && inv.dynamicArgs[wrappers.consumed] {
-				inv.DynamicCommand = true
-			}
-			if wrappers.hasScript && wrappers.scriptDynamic {
-				inv.DynamicCommand = true
-				if inv.DynamicReason == "" {
-					inv.DynamicReason = "wrapper script cannot be determined"
-				}
-			}
-		}
-		shellStartupDispatch, shellStartupReason := shellStartupAssignmentCanExecuteHiddenScript(call.Assigns)
-		if wrappers.shellEnvironment {
-			shellStartupDispatch, shellStartupReason = true, "shell startup environment can execute hidden script content"
-		}
-		if inheritedShellStartup != "" {
-			shellStartupDispatch, shellStartupReason = true, inheritedShellStartup
-		}
-		input := commandInput{argv: wrappers.argv}
-		if wrappers.consumed < len(inv.dynamicArgs) {
-			input.dynamicArgs = inv.dynamicArgs[wrappers.consumed:]
-		}
-		parsed := parseCommandInput(input)
-		norm := parsed.argv
-		if inv.Dynamic && len(norm) > 1 && commandName(norm[0]) == "trap" && norm[1] == "" {
-			parsed.undecidable = "trap script cannot be determined"
-		}
-		dynamicCommand, dynamicReason := parsed.dynamic, parsed.undecidable
-		inv.command = parsed
-		inv.literalArgv = literalCommandArgv(call, wrappers)
-		if shellSetCanExposeFutureStartupEnv(norm, inv.Dynamic) {
-			blocked := undecidableInvocation(norm, shellStartupEnvReason)
-			blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
-			invocations = append(invocations, blocked)
-			return true
-		}
-		if wrappers.sameShell && shellStartupBuiltinCallCanExecuteHiddenScript(norm, inv.Dynamic) {
-			blocked := undecidableInvocation(norm, shellStartupEnvReason)
-			blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
-			invocations = append(invocations, blocked)
-			return true
-		}
-		if gitConfigDispatch && len(norm) > 0 && commandName(norm[0]) == "git" {
-			dynamicCommand, dynamicReason = true, gitConfigReason
-		}
-		if ghConfigDispatch && len(norm) > 0 && commandName(norm[0]) == "gh" {
-			dynamicCommand, dynamicReason = true, ghConfigReason
-		}
-		script, hasScript := wrappers.script, wrappers.hasScript
-		if len(norm) > 0 && isShellCommand(norm[0]) {
-			shell := parseShellInterpreter(norm)
-			if shell.hasCommand && wrappers.consumed+shell.scriptIndex < len(inv.dynamicArgs) && inv.dynamicArgs[wrappers.consumed+shell.scriptIndex] {
-				dynamicCommand, dynamicReason = true, "shell script cannot be determined"
-			}
-			canExecute := shell.canExecute()
-			hidden := ""
-			switch {
-			case shell.undecidable != "":
-				hidden = shell.undecidable
-			case !canExecute:
-			case shellStartupDispatch:
-				hidden = shellStartupReason
-			case shell.interactive:
-				hidden = "interactive shell startup files can execute hidden script content"
-			case shell.login:
-				hidden = "login shell startup files can execute hidden script content"
-			case wrappers.loginShell:
-				hidden = "wrapper login shell startup files can execute hidden script content"
-			case shell.startupFile:
-				hidden = "shell startup file can execute hidden script content"
-			case shell.hiddenScript():
-				hidden = "shell interpreter script is not visible to policy evaluator"
-			}
-			if hidden != "" {
-				blocked := undecidableInvocation(norm, hidden)
-				blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
-				invocations = append(invocations, blocked)
-				return true
-			}
-			if canExecute {
-				script, hasScript = shell.command, shell.hasCommand
-			} else {
-				script, hasScript = "", false
-			}
-		}
-		if hasScript && !inv.DynamicCommand && !dynamicCommand {
-			nested, err := parseShellInvocations(script, depth+1, shellStartupReason)
-			if err != nil {
-				blocked := undecidableInvocation(norm, "nested command: "+err.Error())
-				blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
-				invocations = append(invocations, blocked)
-				return true
-			}
-			nested = markInvocationsDynamicForCommand(nested, "git", gitConfigDispatch, gitConfigReason)
-			nested = markInvocationsDynamicForCommand(nested, "gh", ghConfigDispatch, ghConfigReason)
-			nested = attachAuditArgv(nested, wrappers.auditArgv)
-			invocations = append(invocations, nested...)
-			return true
-		}
-		inv.Argv = norm
-		inv.auditArgv = cloneArgvList(wrappers.auditArgv)
-		if dynamicCommand {
-			inv.Dynamic = true
-			inv.DynamicCommand = true
-			if inv.DynamicReason == "" {
-				inv.DynamicReason = dynamicReason
-			}
-		}
-		invocations = append(invocations, inv)
-		for _, input := range parsed.nestedArgv {
-			if len(input.argv) == 0 || input.argv[0] == "" || input.dynamicAt(0) {
-				invocations = append(invocations, undecidableInvocation(norm, "nested command cannot be determined"))
-				continue
-			}
-			parsed.nestedScripts = append(parsed.nestedScripts, input.shellQuote())
-		}
-		for _, nestedScript := range parsed.nestedScripts {
-			nested, err := parseShellInvocations(nestedScript, depth+1, shellStartupReason)
-			if err != nil {
-				invocations = append(invocations, undecidableInvocation(norm, "nested command: "+err.Error()))
-				continue
-			}
-			for i := range nested {
-				if len(nested[i].Argv) > 0 && !knownIndirectProgram(nested[i].Argv[0]) {
-					nested[i] = undecidableInvocation(nested[i].Argv, "indirect executable content is not visible to policy evaluator")
-				}
-			}
-			invocations = append(invocations, nested...)
-		}
+		invocations = append(invocations, expandInvocation(inv, call.Assigns, depth, inheritedShellStartup, func(wrappers wrapperChain) []string {
+			return literalCommandArgv(call, wrappers)
+		})...)
 		return true
 	})
 	return invocations, nil
+}
+
+func expandInvocation(inv Invocation, assigns []*syntax.Assign, depth int, inheritedShellStartup string, literalArgv func(wrapperChain) []string) []Invocation {
+	wrappers := parseWrapperChain(commandInput{argv: inv.Argv, dynamicArgs: inv.dynamicArgs, splitArgs: inv.splitArgs})
+	if wrappers.undecidable != "" {
+		blocked := undecidableInvocation(wrappers.argv, wrappers.undecidable)
+		blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
+		return []Invocation{blocked}
+	}
+	gitConfigDispatch, gitConfigReason := gitConfigAssignmentCanChangeCommandDispatch(assigns)
+	if wrappers.gitEnvironment {
+		gitConfigDispatch, gitConfigReason = true, "git environment can change command dispatch"
+	}
+	ghConfigDispatch, ghConfigReason := ghConfigAssignmentCanChangeCommandDispatch(assigns)
+	if wrappers.ghEnvironment {
+		ghConfigDispatch, ghConfigReason = true, "gh configuration directory can change command dispatch"
+	}
+	if inv.Dynamic {
+		if wrappers.dynamicCommand {
+			inv.DynamicCommand = true
+			if inv.DynamicReason == "" {
+				inv.DynamicReason = wrappers.dynamicReason
+			}
+		}
+		if wrappers.consumed < len(inv.dynamicArgs) && inv.dynamicArgs[wrappers.consumed] {
+			inv.DynamicCommand = true
+		}
+		if wrappers.hasScript && wrappers.scriptDynamic {
+			inv.DynamicCommand = true
+			if inv.DynamicReason == "" {
+				inv.DynamicReason = "wrapper script cannot be determined"
+			}
+		}
+	}
+	shellStartupDispatch, shellStartupReason := shellStartupAssignmentCanExecuteHiddenScript(assigns)
+	if wrappers.shellEnvironment {
+		shellStartupDispatch, shellStartupReason = true, "shell startup environment can execute hidden script content"
+	}
+	if inheritedShellStartup != "" {
+		shellStartupDispatch, shellStartupReason = true, inheritedShellStartup
+	}
+	input := commandInput{argv: wrappers.argv}
+	if wrappers.consumed < len(inv.dynamicArgs) {
+		input.dynamicArgs = inv.dynamicArgs[wrappers.consumed:]
+	}
+	if wrappers.consumed < len(inv.splitArgs) {
+		input.splitArgs = inv.splitArgs[wrappers.consumed:]
+	}
+	parsed := parseCommandInput(input)
+	norm := parsed.argv
+	if inv.Dynamic && len(norm) > 1 && commandName(norm[0]) == "trap" && norm[1] == "" {
+		parsed.undecidable = "trap script cannot be determined"
+	}
+	dynamicCommand, dynamicReason := parsed.dynamic, parsed.undecidable
+	inv.command = parsed
+	if literalArgv != nil {
+		inv.literalArgv = literalArgv(wrappers)
+	}
+	if shellSetCanExposeFutureStartupEnv(norm, inv.Dynamic) {
+		blocked := undecidableInvocation(norm, shellStartupEnvReason)
+		blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
+		return []Invocation{blocked}
+	}
+	if wrappers.sameShell && shellStartupBuiltinCallCanExecuteHiddenScript(norm, inv.Dynamic) {
+		blocked := undecidableInvocation(norm, shellStartupEnvReason)
+		blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
+		return []Invocation{blocked}
+	}
+	if gitConfigDispatch && len(norm) > 0 && commandName(norm[0]) == "git" {
+		dynamicCommand, dynamicReason = true, gitConfigReason
+	}
+	if ghConfigDispatch && len(norm) > 0 && commandName(norm[0]) == "gh" {
+		dynamicCommand, dynamicReason = true, ghConfigReason
+	}
+	script, hasScript := wrappers.script, wrappers.hasScript
+	if len(norm) > 0 && isShellCommand(norm[0]) {
+		shell := parseShellInterpreter(norm)
+		if shell.hasCommand && wrappers.consumed+shell.scriptIndex < len(inv.dynamicArgs) && inv.dynamicArgs[wrappers.consumed+shell.scriptIndex] {
+			dynamicCommand, dynamicReason = true, "shell script cannot be determined"
+		}
+		canExecute := shell.canExecute()
+		hidden := ""
+		switch {
+		case shell.undecidable != "":
+			hidden = shell.undecidable
+		case !canExecute:
+		case shellStartupDispatch:
+			hidden = shellStartupReason
+		case shell.interactive:
+			hidden = "interactive shell startup files can execute hidden script content"
+		case shell.login:
+			hidden = "login shell startup files can execute hidden script content"
+		case wrappers.loginShell:
+			hidden = "wrapper login shell startup files can execute hidden script content"
+		case shell.startupFile:
+			hidden = "shell startup file can execute hidden script content"
+		case shell.hiddenScript():
+			hidden = "shell interpreter script is not visible to policy evaluator"
+		}
+		if hidden != "" {
+			blocked := undecidableInvocation(norm, hidden)
+			blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
+			return []Invocation{blocked}
+		}
+		if canExecute {
+			script, hasScript = shell.command, shell.hasCommand
+		} else {
+			script, hasScript = "", false
+		}
+	}
+	if hasScript && !inv.DynamicCommand && !dynamicCommand {
+		nested, err := parseShellInvocations(script, depth+1, shellStartupReason)
+		if err != nil {
+			blocked := undecidableInvocation(norm, "nested command: "+err.Error())
+			blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
+			return []Invocation{blocked}
+		}
+		nested = markInvocationsDynamicForCommand(nested, "git", gitConfigDispatch, gitConfigReason)
+		nested = markInvocationsDynamicForCommand(nested, "gh", ghConfigDispatch, ghConfigReason)
+		return attachAuditArgv(nested, wrappers.auditArgv)
+	}
+	inv.Argv = norm
+	inv.auditArgv = cloneArgvList(wrappers.auditArgv)
+	if dynamicCommand {
+		inv.Dynamic = true
+		inv.DynamicCommand = true
+		if inv.DynamicReason == "" {
+			inv.DynamicReason = dynamicReason
+		}
+	}
+	invocations := []Invocation{inv}
+	for _, input := range parsed.nestedArgv {
+		if len(input.argv) == 0 || input.argv[0] == "" || input.dynamicAt(0) {
+			invocations = append(invocations, undecidableInvocation(norm, "nested command cannot be determined"))
+			continue
+		}
+		nested := expandArgvInvocation(input, depth+1, shellStartupReason)
+		for i := range nested {
+			if len(nested[i].Argv) > 0 && !knownIndirectProgram(nested[i].Argv[0]) {
+				nested[i] = undecidableInvocation(nested[i].Argv, "indirect executable content is not visible to policy evaluator")
+			}
+		}
+		invocations = append(invocations, nested...)
+	}
+	for _, nestedScript := range parsed.nestedScripts {
+		nested, err := parseShellInvocations(nestedScript, depth+1, shellStartupReason)
+		if err != nil {
+			invocations = append(invocations, undecidableInvocation(norm, "nested command: "+err.Error()))
+			continue
+		}
+		for i := range nested {
+			if len(nested[i].Argv) > 0 && !knownIndirectProgram(nested[i].Argv[0]) {
+				nested[i] = undecidableInvocation(nested[i].Argv, "indirect executable content is not visible to policy evaluator")
+			}
+		}
+		invocations = append(invocations, nested...)
+	}
+	return invocations
+}
+
+func expandArgvInvocation(input commandInput, depth int, inheritedShellStartup string) []Invocation {
+	if depth > 8 {
+		return []Invocation{undecidableInvocation(input.argv, "nested command depth exceeded")}
+	}
+	return expandInvocation(commandInputInvocation(input), nil, depth, inheritedShellStartup, nil)
+}
+
+func commandInputInvocation(input commandInput) Invocation {
+	inv := Invocation{
+		Argv:        append([]string(nil), input.argv...),
+		dynamicArgs: append([]bool(nil), input.dynamicArgs...),
+		splitArgs:   append([]bool(nil), input.splitArgs...),
+	}
+	for i := range inv.Argv {
+		if !input.dynamicAt(i) {
+			continue
+		}
+		inv.Dynamic = true
+		inv.DynamicReason = "command contains shell expansion"
+		if i == 0 {
+			inv.DynamicCommand = true
+		}
+	}
+	return inv
 }
 
 func attachAuditArgv(invocations []Invocation, argv [][]string) []Invocation {
@@ -303,8 +341,9 @@ func quotedScalarWord(word *syntax.Word) bool {
 func callInvocation(call *syntax.CallExpr) Invocation {
 	var inv Invocation
 	for i, word := range call.Args {
-		value, dynamic, ok := commandWord(word)
+		value, dynamic, maySplit, ok := commandWord(word)
 		inv.dynamicArgs = append(inv.dynamicArgs, dynamic)
+		inv.splitArgs = append(inv.splitArgs, maySplit)
 		if dynamic {
 			inv.Dynamic = true
 			inv.DynamicReason = "command contains shell expansion"
@@ -328,13 +367,14 @@ func callInvocation(call *syntax.CallExpr) Invocation {
 	return inv
 }
 
-func commandWord(word *syntax.Word) (string, bool, bool) {
+func commandWord(word *syntax.Word) (string, bool, bool, bool) {
 	value, ok := staticWord(word)
 	if ok {
-		return value, false, true
+		return value, false, false, true
 	}
 	var b strings.Builder
 	dynamic := false
+	maySplit := false
 	firstDynamicOffset := -1
 	for _, part := range word.Parts {
 		value, ok := staticWordPart(part, false)
@@ -343,21 +383,45 @@ func commandWord(word *syntax.Word) (string, bool, bool) {
 				firstDynamicOffset = b.Len()
 			}
 			dynamic = true
+			maySplit = maySplit || wordPartMaySplit(part, false)
 			continue
 		}
 		b.WriteString(value)
 	}
 	if !dynamic || b.Len() == 0 {
-		return "", true, false
+		return "", true, maySplit, false
 	}
 	text := b.String()
 	if eq := strings.IndexByte(text, '='); eq >= 0 && firstDynamicOffset <= eq {
-		return text[eq:], true, true
+		return text[eq:], true, maySplit, true
 	}
 	if strings.HasPrefix(text, "-") && firstDynamicOffset <= 1 {
-		return "-?", true, true
+		return "-?", true, maySplit, true
 	}
-	return text, true, true
+	return text, true, maySplit, true
+}
+
+func wordPartMaySplit(part syntax.WordPart, quoted bool) bool {
+	switch p := part.(type) {
+	case *syntax.Lit, *syntax.SglQuoted:
+		return false
+	case *syntax.DblQuoted:
+		for _, nested := range p.Parts {
+			if wordPartMaySplit(nested, true) {
+				return true
+			}
+		}
+		return false
+	case *syntax.ParamExp:
+		return !quoted || p.Param != nil && p.Param.Value == "@" || arithmIndexIsAt(p.Index)
+	default:
+		return !quoted
+	}
+}
+
+func arithmIndexIsAt(expr syntax.ArithmExpr) bool {
+	word, ok := expr.(*syntax.Word)
+	return ok && word.Lit() == "@"
 }
 
 func staticWord(word *syntax.Word) (string, bool) {
@@ -867,6 +931,9 @@ func parseWrapperChain(input commandInput) wrapperChain {
 		if chain.consumed < len(input.dynamicArgs) {
 			remaining.dynamicArgs = input.dynamicArgs[chain.consumed:]
 		}
+		if chain.consumed < len(input.splitArgs) {
+			remaining.splitArgs = input.splitArgs[chain.consumed:]
+		}
 		p, ok := parseWrapper(remaining)
 		if !ok {
 			return chain
@@ -1188,6 +1255,10 @@ func parseEnvWrapper(input commandInput) wrapperParse {
 				continue
 			}
 			break
+		}
+		if input.maySplitAt(i) {
+			p.dynamicCommand = true
+			p.dynamicReason = "env assignment value can change command position"
 		}
 		p.assigns = append(p.assigns, assignment{name, value})
 		i++

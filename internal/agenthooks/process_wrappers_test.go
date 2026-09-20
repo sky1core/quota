@@ -23,8 +23,8 @@ func TestProcessWrappersThroughHookEvent(t *testing.T) {
 		}{
 			{`git push`, false},
 			{`git --attr-source=HEAD push`, false},
-			{`git reset --hard`, false},
-			{`git commit --amend`, false},
+			{`git reset --hard`, true},
+			{`git commit --amend`, true},
 			{`git status --short`, true},
 			{`git diff --stat`, true},
 			{`git -C . -c color.ui=false status`, true},
@@ -35,9 +35,9 @@ func TestProcessWrappersThroughHookEvent(t *testing.T) {
 			{`gh pr create --head feature --title example`, true},
 			{`gh pr create --title example`, false},
 			{`gh pr checkout 123 --force=false`, true},
-			{`gh pr checkout 123 -f=false --force`, false},
-			{`echo git push`, false},
-			{`custom-tool git push`, false},
+			{`gh pr checkout 123 -f=false --force`, true},
+			{`echo git push`, true},
+			{`custom-tool git push`, true},
 			{`"$cmd" push`, false},
 			{`git "$subcommand"`, false},
 			{`sh -c 'git push'`, false},
@@ -130,7 +130,7 @@ func TestGlobalAndWrapperNormalizationFailsClosed(t *testing.T) {
 	}
 	for _, command := range []string{
 		`git --unknown=value push`, `git --unknown push status`, `git --unknown status`,
-		`git --attr-source`, `git -C`, `gh --unknown=value pr view 123`, `gh --repo`,
+		`git --attr-source`, `git -C`, `gh --repo`,
 		`nohup git --unknown=value push`, `timeout --unknown 5 git push`, `nice --unknown git push`,
 		`nice -n`, `timeout -s`, `timeout --signal`,
 		`env --unknown=value git push`, `env --argv0=example git push`, `env -u`,

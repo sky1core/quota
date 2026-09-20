@@ -26,10 +26,12 @@ type optionGroup struct {
 }
 
 type commandFlag struct {
-	name     string
-	token    string
-	disabled bool
-	literal  bool
+	name         string
+	token        string
+	value        string
+	valueDynamic bool
+	disabled     bool
+	literal      bool
 }
 
 func optionValues(groups ...optionGroup) map[string]optionValue {
@@ -43,6 +45,25 @@ func optionValues(groups ...optionGroup) map[string]optionValue {
 }
 
 var gitCommandOptions = map[string]map[string]optionValue{
+	"push": optionValues(
+		optionGroup{optionNoValue, `-h --help -n --dry-run -f --force --all --mirror --delete -d --tags --follow-tags --prune --atomic --porcelain --verify --no-verify --set-upstream -u --quiet -q --verbose -v --progress --force-if-includes`},
+		optionGroup{optionRequiredValue, `--repo --receive-pack --exec --push-option -o`},
+		optionGroup{optionAttachedValue, `--force-with-lease --signed --recurse-submodules`},
+	),
+	"send-pack": optionValues(
+		optionGroup{optionNoValue, `-h --help -n --dry-run -f --force --all --mirror --atomic --verbose -v --quiet -q --stdin --stateless-rpc --thin --progress`},
+		optionGroup{optionRequiredValue, `--receive-pack --exec --push-option`},
+		optionGroup{optionAttachedValue, `--signed`},
+	),
+	"rebase": optionValues(
+		optionGroup{optionNoValue, `-h --help --abort --continue --skip --quit -i --interactive --autosquash --autostash --no-autostash --no-autosquash --root --update-refs --no-update-refs --keep-empty --no-verify --verify --edit-todo --keep-base --no-keep-base -q --quiet --no-quiet -v --verbose --no-verbose -n --no-stat --stat --signoff --no-signoff --committer-date-is-author-date --reset-author-date --ignore-whitespace -f --force-rebase --no-force-rebase --no-ff --ff --show-current-patch --apply -m --merge --rerere-autoupdate --no-rerere-autoupdate --no-gpg-sign --no-rebase-merges --fork-point --no-fork-point --no-root --reschedule-failed-exec --no-reschedule-failed-exec --reapply-cherry-picks --no-reapply-cherry-picks --no-exec`},
+		optionGroup{optionRequiredValue, `-x --exec --onto --strategy -s --strategy-option -X -C --whitespace --empty`},
+		optionGroup{optionAttachedValue, `-r --rebase-merges --gpg-sign -S`},
+	),
+	"filter-branch": optionValues(
+		optionGroup{optionNoValue, `-h --help -f --force --prune-empty --remap-to-ancestor`},
+		optionGroup{optionRequiredValue, `--setup --env-filter --tree-filter --index-filter --parent-filter --msg-filter --commit-filter --tag-name-filter --state-branch -d`},
+	),
 	"commit": commitOptionsWithNegations(),
 	"tag": optionValues(
 		optionGroup{optionNoValue, `-h --help --help-all -l --list -d --delete -v --verify
@@ -104,8 +125,12 @@ var gitCommandOptions = map[string]map[string]optionValue{
 		optionGroup{optionNoValue, `-h --help --help-all`},
 		optionGroup{optionRequiredValue, `--config`},
 	),
+	"submodule": optionValues(
+		optionGroup{optionNoValue, `-h --help -q --quiet --cached --recursive --init --remote -N --no-fetch -f --force --checkout --merge --rebase --recommend-shallow --no-recommend-shallow --single-branch --no-single-branch --all --default --files --progress`},
+		optionGroup{optionRequiredValue, `-b --branch --name --reference --filter --summary-limit --depth -j --jobs`},
+	),
 	"http-push": optionValues(
-		optionGroup{optionNoValue, `-h --help --help-all`},
+		optionGroup{optionNoValue, `-h --help --help-all --dry-run --all --force --verbose -d -D`},
 	),
 	"update-ref": optionValues(
 		optionGroup{optionNoValue, `-h --help --help-all -d --delete --stdin --no-deref --create-reflog`},
@@ -180,13 +205,70 @@ var ghRepoEditOptions = optionValues(
 )
 
 type parsedCommand struct {
+	argv             []string
+	flags            []commandFlag
+	undecidable      string
+	risk             string
+	flagError        string
+	nestedScripts    []string
+	nestedArgv       []commandInput
+	allowDynamicArgs bool
+	dynamic          bool
+}
+
+type commandInput struct {
 	argv        []string
-	flags       []commandFlag
-	undecidable string
-	dynamic     bool
+	dynamicArgs []bool
+}
+
+func (input commandInput) dynamicAt(i int) bool {
+	return i >= 0 && i < len(input.dynamicArgs) && input.dynamicArgs[i]
+}
+
+func (input commandInput) anyDynamic() bool {
+	for i := range input.argv {
+		if input.dynamicAt(i) {
+			return true
+		}
+	}
+	return false
+}
+
+func (input commandInput) containsEmpty() bool {
+	for _, arg := range input.argv {
+		if arg == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (input commandInput) from(i int) commandInput {
+	out := commandInput{argv: input.argv[i:]}
+	if i < len(input.dynamicArgs) {
+		out.dynamicArgs = input.dynamicArgs[i:]
+	}
+	return out
+}
+
+func (input commandInput) shellQuote() string {
+	parts := make([]string, len(input.argv))
+	for i, arg := range input.argv {
+		if input.dynamicAt(i) {
+			parts[i] = `"${__quota_dynamic_argument}"`
+		} else {
+			parts[i] = ShellQuote([]string{arg})
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 func parseCommand(argv []string) parsedCommand {
+	return parseCommandInput(commandInput{argv: argv})
+}
+
+func parseCommandInput(input commandInput) parsedCommand {
+	argv := input.argv
 	parsed := parsedCommand{argv: append([]string(nil), argv...)}
 	if len(argv) == 0 {
 		return parsed
@@ -194,6 +276,10 @@ func parseCommand(argv []string) parsedCommand {
 	name := commandName(argv[0])
 	if subcommand, ok := gitDashedSubcommand(name); ok {
 		parsed.argv = append([]string{"git", subcommand}, argv[1:]...)
+		input.argv = parsed.argv
+		if len(input.dynamicArgs) > 0 {
+			input.dynamicArgs = append([]bool{input.dynamicAt(0), false}, input.dynamicArgs[1:]...)
+		}
 		name = "git"
 	}
 	switch name {
@@ -205,36 +291,57 @@ func parseCommand(argv []string) parsedCommand {
 		if unknown || len(parsed.argv) < 2 {
 			return parsed
 		}
+		subcommandIndex := len(input.argv) - len(parsed.argv) + 1
+		if input.dynamicAt(subcommandIndex) {
+			parsed.undecidable = "git subcommand cannot be determined"
+			return parsed
+		}
 		if subcommand := parsed.argv[1]; subcommand != "" && !strings.HasPrefix(subcommand, "-") && !knownGitSubcommand(subcommand) {
 			parsed.undecidable = "unknown git subcommand can resolve to a git alias or external helper"
 			return parsed
 		}
-		options, ok := gitCommandOptions[parsed.argv[1]]
-		if !ok {
+		options := gitCommandOptions[parsed.argv[1]]
+		if options == nil {
 			options = gitDefaultSubcommandOptions
-			if !argvHasOption(parsed.argv[2:]) {
-				return parsed
-			}
-			flags, err := parseCommandFlags("git "+parsed.argv[1], parsed.argv[2:], options, true)
-			parsed.flags = flags
-			if err != nil {
-				parsed.undecidable = err.Error()
-			}
-			return parsed
 		}
-		flags, err := parseCommandFlags("git "+parsed.argv[1], parsed.argv[2:], options, true)
-		parsed.flags = flags
+		input = input.from(len(input.argv) - len(parsed.argv) + 2)
+		stopAtOperand := parsed.argv[1] == "for-each-repo" || parsed.argv[1] == "bisect" || parsed.argv[1] == "submodule"
+		args, err := parseCommandArgumentInput("git "+parsed.argv[1], input, options, true, stopAtOperand)
+		parsed.flags = args.flags
 		if err != nil {
-			parsed.undecidable = err.Error()
+			parsed.flagError = err.Error()
 		}
+		classifyGitCommand(&parsed, args)
+
 	case "gh":
 		parsed.argv[0] = name
-		normalized, err := parseGhCommand(parsed.argv)
+		normalized, err := parseGhCommandInput(input)
 		if err != nil {
 			parsed.dynamic = true
 			parsed.undecidable = err.Error()
 		} else {
 			parsed = normalized
+		}
+	case "source", ".":
+		parsed.undecidable = "sourced script content is not visible to policy evaluator"
+	case "xargs":
+		nested, err := parseProcessWrapperInput(input)
+		if err != nil {
+			parsed.undecidable = err.Error()
+		} else if len(nested.argv) > 0 && commandName(nested.argv[0]) != "xargs" {
+			if nested.argv[0] == "" || nested.dynamicAt(0) {
+				parsed.undecidable = "xargs command cannot be determined"
+			} else {
+				parsed.nestedArgv = []commandInput{nested}
+			}
+		}
+	case "trap":
+		if len(argv) > 1 && argv[1] != "-p" && argv[1] != "-l" && argv[1] != "" && argv[1] != "-" {
+			if input.dynamicAt(1) {
+				parsed.undecidable = "trap script cannot be determined"
+				return parsed
+			}
+			parsed.nestedScripts = []string{argv[1]}
 		}
 	default:
 		parsed.flags = literalCommandFlags(parsed.argv[1:])
@@ -249,6 +356,102 @@ func argvHasOption(args []string) bool {
 		}
 		if arg != "-" && strings.HasPrefix(arg, "-") {
 			return true
+		}
+	}
+	return false
+}
+
+func classifyGitCommand(parsed *parsedCommand, args parsedArguments) {
+	argv := parsed.argv
+	operands := args.operands.argv
+	if len(argv) < 2 || argv[1] == "" {
+		parsed.undecidable = "git subcommand cannot be determined"
+		return
+	}
+	parsed.allowDynamicArgs = true
+	if commandHasFlag(parsed.flags, "--help", "-h") {
+		return
+	}
+	switch argv[1] {
+	case "push", "send-pack", "http-push":
+		parsed.allowDynamicArgs = false
+		if commandHasFlag(parsed.flags, "--dry-run", "-n") && parsed.flagError == "" {
+			return
+		}
+		parsed.risk = PolicyGroupRemoteCodeRefMutation
+	case "hook":
+		parsed.undecidable = "git hook execution content is not visible to policy evaluator"
+	case "for-each-repo":
+		if parsed.flagError != "" || len(operands) == 0 {
+			parsed.undecidable = "git for-each-repo command cannot be determined"
+			return
+		}
+		parsed.nestedArgv = []commandInput{{argv: append([]string{"git"}, operands...), dynamicArgs: append([]bool{false}, args.operands.dynamicArgs...)}}
+	case "bisect":
+		if parsed.flagError != "" {
+			parsed.undecidable = parsed.flagError
+		} else if len(operands) > 0 && (operands[0] == "" || args.operands.dynamicAt(0)) {
+			parsed.undecidable = "git bisect operation cannot be determined"
+		} else if len(operands) > 0 && operands[0] == "run" {
+			if len(operands) < 2 || operands[1] == "" {
+				parsed.undecidable = "git bisect run command cannot be determined"
+				return
+			}
+			parsed.flagError = ""
+			parsed.nestedArgv = []commandInput{args.operands.from(1)}
+		}
+	case "submodule":
+		if len(operands) > 0 && !args.operands.dynamicAt(0) {
+			switch operands[0] {
+			case "add", "status", "init", "deinit", "update", "set-branch", "set-url", "summary", "sync", "absorbgitdirs":
+				return
+			}
+		}
+		if parsed.flagError != "" {
+			parsed.undecidable = parsed.flagError
+			return
+		}
+		if len(operands) == 0 {
+			return
+		}
+		if operands[0] == "" || args.operands.dynamicAt(0) {
+			parsed.undecidable = "git submodule operation cannot be determined"
+		} else if operands[0] == "foreach" {
+			if len(operands) != 2 || operands[1] == "" || args.operands.dynamicAt(1) {
+				parsed.undecidable = "git submodule foreach script cannot be determined"
+				return
+			}
+			parsed.flagError = ""
+			parsed.nestedScripts = []string{operands[1]}
+		} else {
+			parsed.undecidable = "unsupported git submodule operation"
+		}
+	case "rebase", "filter-branch":
+		if args.dynamicOptions {
+			parsed.undecidable = "git execution options cannot be determined"
+			return
+		}
+		for _, flag := range parsed.flags {
+			if flag.name == "--exec" || flag.name == "-x" || strings.HasSuffix(flag.name, "-filter") || flag.name == "--setup" {
+				if flag.value == "" || flag.valueDynamic {
+					parsed.undecidable = "git execution option script cannot be determined"
+					return
+				}
+				parsed.nestedScripts = append(parsed.nestedScripts, flag.value)
+			}
+		}
+		if parsed.flagError != "" {
+			parsed.undecidable = parsed.flagError
+		}
+	}
+}
+
+func commandHasFlag(flags []commandFlag, names ...string) bool {
+	for _, flag := range flags {
+		for _, name := range names {
+			if flag.name == name && !flag.disabled {
+				return true
+			}
 		}
 	}
 	return false
@@ -271,44 +474,100 @@ func literalCommandFlags(args []string) []commandFlag {
 }
 
 func parseCommandFlags(command string, args []string, options map[string]optionValue, gitOptions bool) ([]commandFlag, error) {
+	flags, _, err := parseCommandArguments(command, args, options, gitOptions)
+	return flags, err
+}
+
+func parseCommandArguments(command string, args []string, options map[string]optionValue, gitOptions bool) ([]commandFlag, []string, error) {
+	parsed, err := parseCommandArgumentInput(command, commandInput{argv: args}, options, gitOptions, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	return parsed.flags, parsed.operands.argv, err
+}
+
+type parsedArguments struct {
+	flags               []commandFlag
+	operands            commandInput
+	dynamicOptions      bool
+	dynamicOptionSyntax bool
+}
+
+func parseCommandArgumentInput(command string, input commandInput, options map[string]optionValue, gitOptions, stopAtOperand bool) (parsedArguments, error) {
+	args := input.argv
 	var flags []commandFlag
+	var operands []string
+	var operandDynamic []bool
+	dynamicOptions := false
+	dynamicOptionSyntax := false
+	result := func() parsedArguments {
+		return parsedArguments{flags: flags, operands: commandInput{argv: operands, dynamicArgs: operandDynamic}, dynamicOptions: dynamicOptions, dynamicOptionSyntax: dynamicOptionSyntax}
+	}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" || gitOptions && arg == "--end-of-options" {
+			if input.dynamicAt(i) {
+				dynamicOptionSyntax = true
+				return result(), fmt.Errorf("%s option boundary cannot be determined", command)
+			}
+			operands = append(operands, args[i+1:]...)
+			for j := i + 1; j < len(args); j++ {
+				operandDynamic = append(operandDynamic, input.dynamicAt(j))
+			}
 			break
 		}
 		if arg == "-" || !strings.HasPrefix(arg, "-") {
+			if stopAtOperand {
+				operands = append(operands, args[i:]...)
+				for j := i; j < len(args); j++ {
+					operandDynamic = append(operandDynamic, input.dynamicAt(j))
+				}
+				break
+			}
+			dynamicOptions = dynamicOptions || input.dynamicAt(i)
+			operands = append(operands, arg)
+			operandDynamic = append(operandDynamic, input.dynamicAt(i))
 			continue
 		}
 		if strings.HasPrefix(arg, "--") {
 			name, text, attached := strings.Cut(arg, "=")
 			name, value, err := resolveLongOption(name, options, gitOptions)
 			if err != nil {
-				return nil, fmt.Errorf("%s: %w", command, err)
+				return result(), fmt.Errorf("%s: %w", command, err)
+			}
+			if input.dynamicAt(i) && !attached {
+				dynamicOptionSyntax = true
+				dynamicOptions = true
 			}
 			if attached && (value == optionNoValue || value == optionRequiredSeparateValue || value == optionToggle) {
-				return nil, fmt.Errorf("%s option %s does not accept a value", command, name)
+				return result(), fmt.Errorf("%s option %s does not accept a value", command, name)
 			}
 			disabled := false
+			if !attached && (value == optionBooleanValue || value == optionBooleanForce) {
+				text = "true"
+			}
 			if attached && (value == optionBooleanValue || value == optionBooleanForce) {
 				enabled, err := strconv.ParseBool(text)
 				if err != nil {
-					return nil, fmt.Errorf("%s option %s requires a boolean value", command, name)
+					return result(), fmt.Errorf("%s option %s requires a boolean value", command, name)
 				}
 				disabled = !enabled && value == optionBooleanForce
+				text = strconv.FormatBool(enabled)
 			}
-			flags = appendCommandFlag(flags, commandFlag{name: name, token: arg, disabled: disabled}, value)
+			flags = appendCommandFlag(flags, commandFlag{name: name, token: arg, value: text, valueDynamic: input.dynamicAt(i), disabled: disabled}, value)
 			if !attached && (value == optionRequiredValue || value == optionRequiredSeparateValue || value == optionRequiredNonEmptyValue || value == optionLastArgDefault && i+1 < len(args)) {
 				i++
 				if i == len(args) {
-					return nil, fmt.Errorf("%s option %s requires a value", command, name)
+					return result(), fmt.Errorf("%s option %s requires a value", command, name)
 				}
-				if value == optionRequiredNonEmptyValue && args[i] == "" {
-					return nil, fmt.Errorf("%s option %s requires a non-empty value", command, name)
+				flags[len(flags)-1].value = args[i]
+				flags[len(flags)-1].valueDynamic = input.dynamicAt(i)
+				if value == optionRequiredNonEmptyValue && args[i] == "" && !input.dynamicAt(i) {
+					return result(), fmt.Errorf("%s option %s requires a non-empty value", command, name)
 				}
 			}
-			if attached && value == optionRequiredNonEmptyValue && text == "" {
-				return nil, fmt.Errorf("%s option %s requires a non-empty value", command, name)
+			if attached && value == optionRequiredNonEmptyValue && text == "" && !input.dynamicAt(i) {
+				return result(), fmt.Errorf("%s option %s requires a non-empty value", command, name)
 			}
 			continue
 		}
@@ -316,32 +575,50 @@ func parseCommandFlags(command string, args []string, options map[string]optionV
 			name := "-" + string(arg[j])
 			value, ok := options[name]
 			if !ok {
-				return nil, fmt.Errorf("unsupported %s option %s", command, name)
+				return result(), fmt.Errorf("unsupported %s option %s", command, name)
+			}
+			tokenDynamic := input.dynamicAt(i)
+			if tokenDynamic && value != optionRequiredValue && value != optionRequiredNonEmptyValue && value != optionAttachedValue {
+				dynamicOptions = true
+				dynamicOptionSyntax = true
 			}
 			disabled := false
+			text := ""
+			if value == optionBooleanValue || value == optionBooleanForce {
+				text = "true"
+			}
 			booleanAttached := (value == optionBooleanValue || value == optionBooleanForce) && j+1 < len(arg) && arg[j+1] == '='
 			if booleanAttached {
 				enabled, err := strconv.ParseBool(arg[j+2:])
 				if err != nil {
-					return nil, fmt.Errorf("%s option %s requires a boolean value", command, name)
+					return result(), fmt.Errorf("%s option %s requires a boolean value", command, name)
 				}
 				disabled = !enabled && value == optionBooleanForce
+				text = strconv.FormatBool(enabled)
 			}
-			flags = appendCommandFlag(flags, commandFlag{name: name, token: arg, disabled: disabled}, value)
+			flags = appendCommandFlag(flags, commandFlag{name: name, token: arg, value: text, valueDynamic: input.dynamicAt(i), disabled: disabled}, value)
 			if value == optionRequiredValue || value == optionRequiredNonEmptyValue {
 				var text string
 				if j == len(arg)-1 {
-					i++
-					if i == len(args) {
-						return nil, fmt.Errorf("%s option %s requires a value", command, name)
+					if tokenDynamic {
+						text = ""
+					} else {
+						i++
 					}
-					text = args[i]
+					if i == len(args) {
+						return result(), fmt.Errorf("%s option %s requires a value", command, name)
+					}
+					if !tokenDynamic {
+						text = args[i]
+					}
 				} else {
 					text = arg[j+1:]
 					text = strings.TrimPrefix(text, "=")
 				}
-				if value == optionRequiredNonEmptyValue && text == "" {
-					return nil, fmt.Errorf("%s option %s requires a non-empty value", command, name)
+				flags[len(flags)-1].value = text
+				flags[len(flags)-1].valueDynamic = input.dynamicAt(i) || tokenDynamic
+				if value == optionRequiredNonEmptyValue && text == "" && !flags[len(flags)-1].valueDynamic {
+					return result(), fmt.Errorf("%s option %s requires a non-empty value", command, name)
 				}
 				break
 			}
@@ -353,7 +630,7 @@ func parseCommandFlags(command string, args []string, options map[string]optionV
 			}
 		}
 	}
-	return flags, nil
+	return result(), nil
 }
 
 func resolveLongOption(name string, options map[string]optionValue, abbreviate bool) (string, optionValue, error) {

@@ -60,249 +60,7 @@ func EvaluateCommand(policies []Policy, command string) (Decision, error) {
 			source:   decisionSourceUndecidable,
 		}, nil
 	}
-	decision := evaluateInvocations(policies, invocations)
-	if !decision.Allowed {
-		return decision, nil
-	}
-	if decision, ok := literalDenyDecision(policies, command, invocations); ok {
-		return decision, nil
-	}
-	return decision, nil
-}
-
-func literalDenyDecision(policies []Policy, command string, invocations []Invocation) (Decision, bool) {
-	candidates := literalDenyCandidates(command, invocations)
-	for _, policy := range policies {
-		if !policy.Enabled {
-			continue
-		}
-		for _, rule := range policy.Rules {
-			if rule.Effect != EffectDeny {
-				continue
-			}
-			for _, candidate := range candidates {
-				seq, ok := literalDenyMatch(rule, candidate)
-				if !ok {
-					continue
-				}
-				reason := rule.Message
-				if reason == "" {
-					reason = fmt.Sprintf("matched policy %s rule %s", policy.ID, rule.ID)
-				}
-				return Decision{
-					Decision: rule.Effect,
-					Allowed:  false,
-					RuleID:   rule.ID,
-					PolicyID: policy.ID,
-					Reason:   reason,
-					Command:  seq,
-					source:   decisionSourceLiteralRule,
-				}, true
-			}
-		}
-	}
-	return Decision{}, false
-}
-
-func literalDenyCandidates(command string, invocations []Invocation) []string {
-	if len(invocations) == 0 {
-		return []string{command}
-	}
-	protectedSpans := protectedInvocationSourceSpans(invocations)
-	seen := map[string]bool{}
-	var candidates []string
-	for _, inv := range invocations {
-		if protectedInvocation(inv) {
-			continue
-		}
-		for _, candidate := range []string{literalSourceCandidate(inv, protectedSpans), strings.Join(inv.literalArgv, " ")} {
-			if candidate == "" || seen[candidate] {
-				continue
-			}
-			seen[candidate] = true
-			candidates = append(candidates, candidate)
-		}
-	}
-	return candidates
-}
-
-type invocationSourceSpan struct {
-	sourceID int
-	start    int
-	end      int
-}
-
-func protectedInvocationSourceSpans(invocations []Invocation) []invocationSourceSpan {
-	spans := make([]invocationSourceSpan, 0, len(invocations))
-	for _, inv := range invocations {
-		if protectedInvocation(inv) && inv.sourceEnd > inv.sourceStart {
-			spans = append(spans, invocationSourceSpan{sourceID: inv.sourceID, start: inv.sourceStart, end: inv.sourceEnd})
-		}
-	}
-	return spans
-}
-
-func literalSourceCandidate(inv Invocation, spans []invocationSourceSpan) string {
-	if inv.source == "" || inv.sourceEnd <= inv.sourceStart {
-		return inv.source
-	}
-	b := []byte(inv.source)
-	for _, span := range spans {
-		if span.sourceID != inv.sourceID || span.start < inv.sourceStart || span.end > inv.sourceEnd {
-			continue
-		}
-		if span.start == inv.sourceStart && span.end == inv.sourceEnd {
-			continue
-		}
-		for i := span.start - inv.sourceStart; i < span.end-inv.sourceStart; i++ {
-			b[i] = ' '
-		}
-	}
-	return string(b)
-}
-
-func literalDenyMatch(rule Rule, command string) ([]string, bool) {
-	if len(rule.Match.Argv) == 0 || len(rule.Match.Contains) > 0 || rule.Match.Risk != "" {
-		return nil, false
-	}
-	seq, ok := exactArgSequence(rule.Match.Argv)
-	if !ok {
-		return nil, false
-	}
-	first := seq[0]
-	if first != "git" && first != "gh" {
-		return nil, false
-	}
-	spans := literalMatchSpans(command, rule.Match, false)
-	for i, span := range spans {
-		scopeEnd := literalSpanScopeEnd(command, spans, i)
-		if len(rule.Match.HasFlag) > 0 && !literalAnyFlagInCommand(command[span.end:scopeEnd], rule.Match.HasFlag) {
-			continue
-		}
-		if literalAnyMatchAtStart(command[span.start:scopeEnd], rule.Except) {
-			continue
-		}
-		return seq, true
-	}
-	return nil, false
-}
-
-func exactArgSequence(patterns []ArgPattern) ([]string, bool) {
-	seq := make([]string, len(patterns))
-	for i, arg := range patterns {
-		if arg.Exact == "" {
-			return nil, false
-		}
-		seq[i] = arg.Exact
-	}
-	return seq, true
-}
-
-type literalSpan struct {
-	start int
-	end   int
-}
-
-func literalAnyMatchAtStart(command string, matches []Match) bool {
-	for _, match := range matches {
-		if len(match.HasFlag) > 0 {
-			continue
-		}
-		for _, span := range literalMatchSpans(command, match, match.Exact) {
-			if span.start == 0 {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func literalMatchSpans(command string, match Match, exact bool) []literalSpan {
-	if len(match.Argv) == 0 || len(match.Contains) > 0 || match.Risk != "" {
-		return nil
-	}
-	pattern, ok := literalMatchPattern(match.Argv, exact)
-	if !ok {
-		return nil
-	}
-	locs := regexp.MustCompile(pattern).FindAllStringIndex(command, -1)
-	spans := make([]literalSpan, 0, len(locs))
-	for _, loc := range locs {
-		spans = append(spans, literalSpan{start: loc[0], end: loc[1]})
-	}
-	return spans
-}
-
-func literalSpanScopeEnd(command string, spans []literalSpan, index int) int {
-	if index+1 < len(spans) {
-		return spans[index+1].start
-	}
-	return len(command)
-}
-
-func literalMatchPattern(args []ArgPattern, exact bool) (string, bool) {
-	var b strings.Builder
-	b.WriteString(literalPrefixBoundary())
-	for i, arg := range args {
-		if i > 0 {
-			b.WriteString(`[[:space:]]+`)
-		}
-		token, ok := literalArgPattern(arg)
-		if !ok {
-			return "", false
-		}
-		b.WriteString(token)
-	}
-	if exact {
-		b.WriteString(literalExactSuffixBoundary())
-	} else {
-		b.WriteString(literalSuffixBoundary())
-	}
-	return b.String(), true
-}
-
-func literalArgPattern(arg ArgPattern) (string, bool) {
-	switch {
-	case arg.Exact != "":
-		return regexp.QuoteMeta(arg.Exact), true
-	case arg.Type == "int":
-		return `[0-9]+`, true
-	case arg.Type == "nonempty":
-		return `[^[:space:];|&()'"` + "`" + `]+`, true
-	default:
-		return "", false
-	}
-}
-
-func literalAnyFlagInCommand(command string, flags []string) bool {
-	for _, flag := range flags {
-		if literalFlagInCommand(command, flag) {
-			return true
-		}
-	}
-	return false
-}
-
-func literalFlagInCommand(command, flag string) bool {
-	pattern := literalPrefixBoundary() + regexp.QuoteMeta(flag)
-	if strings.HasPrefix(flag, "--") {
-		pattern += `($|[=[:space:];|&()'"` + "`" + `])`
-	} else {
-		pattern += literalSuffixBoundary()
-	}
-	return regexp.MustCompile(pattern).MatchString(command)
-}
-
-func literalPrefixBoundary() string {
-	return `(^|[[:space:];|&()'"` + "`" + `])`
-}
-
-func literalSuffixBoundary() string {
-	return `($|[[:space:];|&()'"` + "`" + `])`
-}
-
-func literalExactSuffixBoundary() string {
-	return `([[:space:]]*($|[;|&()'"` + "`" + `]))`
+	return evaluateInvocations(policies, invocations), nil
 }
 
 func evaluateInvocations(policies []Policy, invocations []Invocation) Decision {
@@ -347,7 +105,7 @@ func evaluateInvocationWithoutAudit(policies []Policy, inv Invocation) Decision 
 			source:   decisionSourceUndecidable,
 		}
 	}
-	if inv.Dynamic && protectedInvocation(inv) {
+	if inv.Dynamic && protectedInvocation(inv) && !inv.command.allowDynamicArgs {
 		return Decision{
 			Decision: DecisionDeny,
 			Allowed:  false,
@@ -362,6 +120,17 @@ func evaluateInvocationWithoutAudit(policies []Policy, inv Invocation) Decision 
 			continue
 		}
 		for _, rule := range policy.Rules {
+			if (inv.command.flagError != "" || inv.Dynamic) && ruleNeedsFlags(rule) {
+				prefix := rule.Match
+				prefix.HasFlag = nil
+				if matchCommand(prefix, inv) {
+					reason := inv.command.flagError
+					if reason == "" {
+						reason = "dynamic arguments cannot be checked against configured flag restrictions"
+					}
+					return Decision{Decision: DecisionDeny, Allowed: false, Reason: reason, Command: visibleArgv(inv.Argv, inv.Dynamic), source: decisionSourceUndecidable}
+				}
+			}
 			if !matchCommand(rule.Match, inv) {
 				continue
 			}
@@ -385,6 +154,18 @@ func evaluateInvocationWithoutAudit(policies []Policy, inv Invocation) Decision 
 	}
 
 	return Decision{Decision: DecisionAllow, Allowed: true, source: decisionSourceAllow}
+}
+
+func ruleNeedsFlags(rule Rule) bool {
+	if len(rule.Match.HasFlag) > 0 {
+		return true
+	}
+	for _, except := range rule.Except {
+		if len(except.HasFlag) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func killRisk(argv []string) string {
@@ -563,6 +344,9 @@ func matchCommand(match Match, inv Invocation) bool {
 }
 
 func matchRisk(risk string, inv Invocation) bool {
+	if risk == PolicyGroupRemoteCodeRefMutation {
+		return inv.command.risk == risk
+	}
 	if len(inv.Argv) == 0 || commandName(inv.Argv[0]) != "kill" {
 		return false
 	}

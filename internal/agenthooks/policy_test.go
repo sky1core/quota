@@ -13,6 +13,7 @@ func TestSaveLoadPolicyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	policy.Rules = append(policy.Rules, Rule{ID: "custom-alias", Effect: EffectDeny, Match: Match{Argv: exactArgs("git", "config"), Contains: []ArgPattern{{Glob: "alias.*", Fold: true}}}})
 	path, err := SavePolicy(dir, policy, false)
 	if err != nil {
 		t.Fatal(err)
@@ -30,7 +31,7 @@ func TestSaveLoadPolicyRoundTrip(t *testing.T) {
 	if len(res.Policies) != 1 || res.Policies[0].ID != PresetGitHubHistoryGuard {
 		t.Fatalf("policies = %+v", res.Policies)
 	}
-	rule := findRule(res.Policies[0], "deny-git-config-alias")
+	rule := findRule(res.Policies[0], "custom-alias")
 	if rule == nil || len(rule.Match.Contains) != 1 || !rule.Match.Contains[0].Fold {
 		t.Fatalf("round-tripped alias rule = %+v, want folded glob", rule)
 	}

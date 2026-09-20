@@ -707,9 +707,9 @@ func TestAgentHooksEvalUndecidableWrappersWithAllowOnlyPolicy(t *testing.T) {
 	}{
 		{`env --unknown git status`, 2},
 		{`git --unknown status`, 2},
-		{`git commit --unknown`, 2},
-		{`git tag -m`, 2},
-		{`git branch --format`, 2},
+		{`git commit --unknown`, 0},
+		{`git tag -m`, 0},
+		{`git branch --format`, 0},
 		{`git unknown-helper`, 2},
 		{`git "$subcommand"`, 2},
 		{`sudo --unknown git status`, 2},

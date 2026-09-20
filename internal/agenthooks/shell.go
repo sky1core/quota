@@ -16,16 +16,12 @@ type Invocation struct {
 	DynamicReason  string   `json:"dynamicReason,omitempty"`
 	command        parsedCommand
 	literalArgv    []string
+	dynamicArgs    []bool
 	auditArgv      [][]string
-	source         string
-	sourceID       int
-	sourceStart    int
-	sourceEnd      int
 }
 
 func ParseShellInvocations(command string) ([]Invocation, error) {
-	state := shellParseState{}
-	return state.parseShellInvocations(command, 0, "")
+	return parseShellInvocations(command, 0, "")
 }
 
 func parseDirectShellInvocation(command string) (Invocation, bool) {
@@ -52,16 +48,10 @@ func parseDirectShellInvocation(command string) (Invocation, bool) {
 	return inv, true
 }
 
-type shellParseState struct {
-	nextSourceID int
-}
-
-func (state *shellParseState) parseShellInvocations(command string, depth int, inheritedShellStartup string) ([]Invocation, error) {
+func parseShellInvocations(command string, depth int, inheritedShellStartup string) ([]Invocation, error) {
 	if depth > 8 {
 		return nil, fmt.Errorf("nested shell command depth exceeded")
 	}
-	sourceID := state.nextSourceID
-	state.nextSourceID++
 	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
 	file, err := parser.Parse(strings.NewReader(command), "")
 	if err != nil {
@@ -78,25 +68,16 @@ func (state *shellParseState) parseShellInvocations(command string, depth int, i
 			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok {
 				if shellStartupDeclCanExecuteHiddenScript(decl) {
 					invocations = append(invocations, undecidableInvocation([]string{decl.Variant.Value}, shellStartupEnvReason))
-				} else {
-					invocations = append(invocations, sourceInvocation(command, sourceID, stmt))
 				}
 				return true
-			}
-			if stmt.Cmd == nil || sourceOnlyStatementCommand(stmt.Cmd) {
-				invocations = append(invocations, sourceInvocation(command, sourceID, stmt))
 			}
 			return true
 		}
 		inv := callInvocation(call)
 		if len(inv.Argv) == 0 && !inv.Dynamic {
-			if len(call.Assigns) > 0 {
-				setInvocationSource(&inv, command, sourceID, stmt)
-				invocations = append(invocations, inv)
-			}
 			return true
 		}
-		wrappers := parseWrapperChain(inv.Argv)
+		wrappers := parseWrapperChain(commandInput{argv: inv.Argv, dynamicArgs: inv.dynamicArgs})
 		if wrappers.undecidable != "" {
 			blocked := undecidableInvocation(wrappers.argv, wrappers.undecidable)
 			blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
@@ -111,8 +92,16 @@ func (state *shellParseState) parseShellInvocations(command string, depth int, i
 		if wrappers.ghEnvironment {
 			ghConfigDispatch, ghConfigReason = true, "gh configuration directory can change command dispatch"
 		}
-		if inv.Dynamic && len(inv.Argv) > 0 && isCommandWrapper(inv.Argv[0]) {
-			inv.DynamicCommand = true
+		if inv.Dynamic {
+			for i := 0; i <= wrappers.consumed && i < len(inv.dynamicArgs); i++ {
+				inv.DynamicCommand = inv.DynamicCommand || inv.dynamicArgs[i]
+			}
+			if wrappers.hasScript && wrappers.scriptDynamic {
+				inv.DynamicCommand = true
+				if inv.DynamicReason == "" {
+					inv.DynamicReason = "wrapper script cannot be determined"
+				}
+			}
 		}
 		shellStartupDispatch, shellStartupReason := shellStartupAssignmentCanExecuteHiddenScript(call.Assigns)
 		if wrappers.shellEnvironment {
@@ -121,12 +110,18 @@ func (state *shellParseState) parseShellInvocations(command string, depth int, i
 		if inheritedShellStartup != "" {
 			shellStartupDispatch, shellStartupReason = true, inheritedShellStartup
 		}
-		parsed := parseCommand(wrappers.argv)
+		input := commandInput{argv: wrappers.argv}
+		if wrappers.consumed < len(inv.dynamicArgs) {
+			input.dynamicArgs = inv.dynamicArgs[wrappers.consumed:]
+		}
+		parsed := parseCommandInput(input)
 		norm := parsed.argv
+		if inv.Dynamic && len(norm) > 1 && commandName(norm[0]) == "trap" && norm[1] == "" {
+			parsed.undecidable = "trap script cannot be determined"
+		}
 		dynamicCommand, dynamicReason := parsed.dynamic, parsed.undecidable
 		inv.command = parsed
 		inv.literalArgv = literalCommandArgv(call, wrappers)
-		setInvocationSource(&inv, command, sourceID, stmt)
 		if shellSetCanExposeFutureStartupEnv(norm, inv.Dynamic) {
 			blocked := undecidableInvocation(norm, shellStartupEnvReason)
 			blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
@@ -148,6 +143,9 @@ func (state *shellParseState) parseShellInvocations(command string, depth int, i
 		script, hasScript := wrappers.script, wrappers.hasScript
 		if len(norm) > 0 && isShellCommand(norm[0]) {
 			shell := parseShellInterpreter(norm)
+			if shell.hasCommand && wrappers.consumed+shell.scriptIndex < len(inv.dynamicArgs) && inv.dynamicArgs[wrappers.consumed+shell.scriptIndex] {
+				dynamicCommand, dynamicReason = true, "shell script cannot be determined"
+			}
 			canExecute := shell.canExecute()
 			hidden := ""
 			switch {
@@ -179,8 +177,8 @@ func (state *shellParseState) parseShellInvocations(command string, depth int, i
 				script, hasScript = "", false
 			}
 		}
-		if hasScript && !inv.Dynamic {
-			nested, err := state.parseShellInvocations(script, depth+1, shellStartupReason)
+		if hasScript && !inv.DynamicCommand && !dynamicCommand {
+			nested, err := parseShellInvocations(script, depth+1, shellStartupReason)
 			if err != nil {
 				blocked := undecidableInvocation(norm, "nested command: "+err.Error())
 				blocked.auditArgv = cloneArgvList(wrappers.auditArgv)
@@ -203,6 +201,26 @@ func (state *shellParseState) parseShellInvocations(command string, depth int, i
 			}
 		}
 		invocations = append(invocations, inv)
+		for _, input := range parsed.nestedArgv {
+			if len(input.argv) == 0 || input.argv[0] == "" || input.dynamicAt(0) {
+				invocations = append(invocations, undecidableInvocation(norm, "nested command cannot be determined"))
+				continue
+			}
+			parsed.nestedScripts = append(parsed.nestedScripts, input.shellQuote())
+		}
+		for _, nestedScript := range parsed.nestedScripts {
+			nested, err := parseShellInvocations(nestedScript, depth+1, shellStartupReason)
+			if err != nil {
+				invocations = append(invocations, undecidableInvocation(norm, "nested command: "+err.Error()))
+				continue
+			}
+			for i := range nested {
+				if len(nested[i].Argv) > 0 && !knownIndirectProgram(nested[i].Argv[0]) {
+					nested[i] = undecidableInvocation(nested[i].Argv, "indirect executable content is not visible to policy evaluator")
+				}
+			}
+			invocations = append(invocations, nested...)
+		}
 		return true
 	})
 	return invocations, nil
@@ -228,37 +246,6 @@ func cloneArgvList(values [][]string) [][]string {
 		out = append(out, append([]string(nil), value...))
 	}
 	return out
-}
-
-func sourceInvocation(source string, sourceID int, node syntax.Node) Invocation {
-	inv := Invocation{}
-	setInvocationSource(&inv, source, sourceID, node)
-	return inv
-}
-
-func setInvocationSource(inv *Invocation, source string, sourceID int, node syntax.Node) {
-	text, start, end := nodeSource(source, node)
-	inv.source = text
-	inv.sourceID = sourceID
-	inv.sourceStart = start
-	inv.sourceEnd = end
-}
-
-func sourceOnlyStatementCommand(cmd syntax.Command) bool {
-	switch cmd.(type) {
-	case *syntax.ArithmCmd, *syntax.CaseClause, *syntax.ForClause, *syntax.TestClause, *syntax.LetClause:
-		return true
-	default:
-		return false
-	}
-}
-
-func nodeSource(source string, node syntax.Node) (string, int, int) {
-	start, end := int(node.Pos().Offset()), int(node.End().Offset())
-	if start < 0 || end < start || end > len(source) {
-		return "", 0, 0
-	}
-	return source[start:end], start, end
 }
 
 func undecidableInvocation(argv []string, reason string) Invocation {
@@ -310,7 +297,17 @@ func quotedScalarWord(word *syntax.Word) bool {
 func callInvocation(call *syntax.CallExpr) Invocation {
 	var inv Invocation
 	for i, word := range call.Args {
-		value, ok := staticWord(word)
+		value, dynamic, ok := commandWord(word)
+		inv.dynamicArgs = append(inv.dynamicArgs, dynamic)
+		if dynamic {
+			inv.Dynamic = true
+			inv.DynamicReason = "command contains shell expansion"
+			if i == 0 {
+				inv.DynamicCommand = true
+				inv.Argv = append(inv.Argv, "")
+				continue
+			}
+		}
 		if !ok {
 			inv.Dynamic = true
 			inv.DynamicReason = "command contains shell expansion"
@@ -323,6 +320,34 @@ func callInvocation(call *syntax.CallExpr) Invocation {
 		inv.Argv = append(inv.Argv, value)
 	}
 	return inv
+}
+
+func commandWord(word *syntax.Word) (string, bool, bool) {
+	value, ok := staticWord(word)
+	if ok {
+		return value, false, true
+	}
+	var b strings.Builder
+	dynamic := false
+	firstDynamicOffset := -1
+	for _, part := range word.Parts {
+		value, ok := staticWordPart(part, false)
+		if !ok {
+			if firstDynamicOffset < 0 {
+				firstDynamicOffset = b.Len()
+			}
+			dynamic = true
+			continue
+		}
+		b.WriteString(value)
+	}
+	if !dynamic || b.Len() == 0 {
+		return "", true, false
+	}
+	if strings.HasPrefix(b.String(), "-") && firstDynamicOffset <= 1 {
+		return "", true, false
+	}
+	return b.String(), true, true
 }
 
 func staticWord(word *syntax.Word) (string, bool) {
@@ -760,6 +785,8 @@ type wrapperParse struct {
 	preserve    []string // sudo keeps these named variables
 	script      string   // eval / env -S script text
 	hasScript   bool
+	scriptStart int
+	scriptEnd   int
 }
 
 type assignment struct{ name, value string }
@@ -775,7 +802,8 @@ func wrapperCommand(p wrapperParse, argv []string, i int) wrapperParse {
 	return p
 }
 
-func parseWrapper(argv []string) (wrapperParse, bool) {
+func parseWrapper(input commandInput) (wrapperParse, bool) {
+	argv := input.argv
 	if len(argv) == 0 {
 		return wrapperParse{}, false
 	}
@@ -786,20 +814,21 @@ func parseWrapper(argv []string) (wrapperParse, bool) {
 		return parseBuiltinWrapper(argv), true
 	case "exec":
 		return parseExecWrapper(argv), true
-	case "env":
-		return parseEnvWrapper(argv), true
 	case "sudo":
 		return parseSudoWrapper(argv), true
 	case "nohup", "nice", "timeout":
 		return parseProcessWrapper(argv), true
 	case "eval":
 		return parseEvalWrapper(argv), true
+	case "env":
+		return parseEnvWrapper(input), true
 	}
 	return wrapperParse{}, false
 }
 
 type wrapperChain struct {
 	argv             []string
+	consumed         int
 	auditArgv        [][]string
 	undecidable      string
 	loginShell       bool
@@ -809,16 +838,22 @@ type wrapperChain struct {
 	sameShell        bool
 	script           string
 	hasScript        bool
+	scriptDynamic    bool
 }
 
-func parseWrapperChain(argv []string) wrapperChain {
+func parseWrapperChain(input commandInput) wrapperChain {
+	argv := input.argv
 	chain := wrapperChain{argv: argv, sameShell: true}
 	for {
 		wrapperName := ""
 		if len(chain.argv) > 0 {
 			wrapperName = commandName(chain.argv[0])
 		}
-		p, ok := parseWrapper(chain.argv)
+		remaining := commandInput{argv: chain.argv}
+		if chain.consumed < len(input.dynamicArgs) {
+			remaining.dynamicArgs = input.dynamicArgs[chain.consumed:]
+		}
+		p, ok := parseWrapper(remaining)
 		if !ok {
 			return chain
 		}
@@ -844,11 +879,18 @@ func parseWrapperChain(argv []string) wrapperChain {
 		chain.shellEnvironment = chain.shellEnvironment || p.exposesEnv(shellStartupEnvName, func(name, _ string) bool { return shellStartupEnvName(name) })
 		if p.hasScript {
 			chain.script, chain.hasScript = p.script, true
+			for j := p.scriptStart; j < p.scriptEnd; j++ {
+				if input.dynamicAt(chain.consumed + j) {
+					chain.scriptDynamic = true
+					break
+				}
+			}
 			return chain
 		}
 		if p.rest == nil {
 			return chain
 		}
+		chain.consumed += len(chain.argv) - len(p.rest)
 		chain.argv = p.rest
 	}
 }
@@ -1005,7 +1047,8 @@ func parseExecWrapper(argv []string) wrapperParse {
 // env [-iv0] [-u NAME] [-C DIR] [-P PATH] [-S STRING] [--] [NAME=VALUE ...]
 // [command ...]. Option parsing stops at the first NAME=VALUE; every later
 // argument containing "=" is an assignment.
-func parseEnvWrapper(argv []string) wrapperParse {
+func parseEnvWrapper(input commandInput) wrapperParse {
+	argv := input.argv
 	var p wrapperParse
 	i := 1
 	for i < len(argv) {
@@ -1028,7 +1071,7 @@ func parseEnvWrapper(argv []string) wrapperParse {
 			continue
 		}
 		if value, ok := strings.CutPrefix(arg, "--split-string="); ok {
-			return envSplitString(value, argv[i+1:])
+			return envSplitString(value, input.from(i+1), i)
 		}
 		switch arg {
 		case "--unset", "--chdir", "--path":
@@ -1041,7 +1084,7 @@ func parseEnvWrapper(argv []string) wrapperParse {
 			if i+1 >= len(argv) {
 				return undecidableWrapper("env", arg)
 			}
-			return envSplitString(argv[i+1], argv[i+2:])
+			return envSplitString(argv[i+1], input.from(i+2), i+1)
 		}
 		if strings.HasPrefix(arg, "--unset=") || strings.HasPrefix(arg, "--chdir=") || strings.HasPrefix(arg, "--path=") {
 			i++
@@ -1067,12 +1110,12 @@ func parseEnvWrapper(argv []string) wrapperParse {
 				consumed = true
 			case 'S':
 				if j+1 < len(body) {
-					return envSplitString(body[j+1:], argv[i+1:])
+					return envSplitString(body[j+1:], input.from(i+1), i)
 				}
 				if i+1 >= len(argv) {
 					return undecidableWrapper("env", arg)
 				}
-				return envSplitString(argv[i+1], argv[i+2:])
+				return envSplitString(argv[i+1], input.from(i+2), i+1)
 			default:
 				return undecidableWrapper("env", arg)
 			}
@@ -1090,12 +1133,12 @@ func parseEnvWrapper(argv []string) wrapperParse {
 	return wrapperCommand(p, argv, i)
 }
 
-func envSplitString(value string, rest []string) wrapperParse {
+func envSplitString(value string, rest commandInput, scriptIndex int) wrapperParse {
 	script := "env " + value
-	if len(rest) > 0 {
-		script += " " + quoteLiteralArgs(rest)
+	if len(rest.argv) > 0 {
+		script += " " + rest.shellQuote()
 	}
-	return wrapperParse{script: script, hasScript: true}
+	return wrapperParse{script: script, hasScript: true, scriptStart: scriptIndex, scriptEnd: scriptIndex + 1}
 }
 
 func quoteLiteralArgs(args []string) string {
@@ -1231,7 +1274,7 @@ func parseEvalWrapper(argv []string) wrapperParse {
 	if i == len(argv) {
 		return wrapperParse{}
 	}
-	return wrapperParse{script: strings.Join(argv[i:], " "), hasScript: true}
+	return wrapperParse{script: strings.Join(argv[i:], " "), hasScript: true, scriptStart: i, scriptEnd: len(argv)}
 }
 
 func gitDashedSubcommand(name string) (string, bool) {
@@ -1274,6 +1317,7 @@ type shellParse struct {
 	undecidable string
 	hasCommand  bool   // -c seen
 	command     string // the -c script text
+	scriptIndex int
 	interactive bool
 	login       bool
 	startupFile bool // --rcfile / --init-file
@@ -1365,6 +1409,7 @@ func parseShellInterpreter(argv []string) shellParse {
 			return s
 		}
 		s.command = argv[i]
+		s.scriptIndex = i
 	}
 	return s
 }

@@ -5,6 +5,7 @@ go 1.25.13
 require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/getlantern/systray v1.2.2
+	github.com/vektah/gqlparser/v2 v2.5.34
 	github.com/yuin/goldmark v1.8.6
 	golang.org/x/sys v0.44.0
 	golang.org/x/text v0.41.0

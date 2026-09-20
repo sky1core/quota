@@ -2,6 +2,7 @@ package agenthooks
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -91,8 +92,9 @@ func TestParseShellInvocationsEmptyArgsDoNotHideDynamicDispatch(t *testing.T) {
 				t.Fatalf("invocations = %#v, err = %v, want one dynamic invocation", got, err)
 			}
 			decision, err := EvaluateCommand([]Policy{policy}, command)
-			if err != nil || decision.Allowed {
-				t.Fatalf("decision = %+v, err = %v, want deny", decision, err)
+			wantAllow := strings.HasPrefix(command, "git commit -m ")
+			if err != nil || decision.Allowed != wantAllow {
+				t.Fatalf("decision = %+v, err = %v, want allowed=%v", decision, err, wantAllow)
 			}
 		})
 	}

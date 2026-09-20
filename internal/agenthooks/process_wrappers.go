@@ -7,6 +7,10 @@ import (
 )
 
 var processWrapperOptions = map[string]map[string]optionValue{
+	"xargs": optionValues(
+		optionGroup{optionNoValue, `-0 --null -r --no-run-if-empty -t --verbose -p --interactive -x --exit -o --open-tty --help --version`},
+		optionGroup{optionRequiredValue, `-I --replace -n --max-args -L --max-lines -P --max-procs -s --max-chars -a --arg-file -d --delimiter -E --eof`},
+	),
 	"nohup": optionValues(optionGroup{optionNoValue, `--help --version`}),
 	"nice": optionValues(
 		optionGroup{optionNoValue, `--help --version`},
@@ -19,8 +23,15 @@ var processWrapperOptions = map[string]map[string]optionValue{
 }
 
 func normalizeProcessWrapperArgv(argv []string) ([]string, error) {
+	input, err := parseProcessWrapperInput(commandInput{argv: argv})
+	return input.argv, err
+}
+
+func parseProcessWrapperInput(input commandInput) (commandInput, error) {
+	argv := input.argv
 	command := commandName(argv[0])
 	options := processWrapperOptions[command]
+	replacement := ""
 	i := 1
 	for i < len(argv) {
 		arg := argv[i]
@@ -41,18 +52,25 @@ func normalizeProcessWrapperArgv(argv []string) ([]string, error) {
 			name, _, attached := strings.Cut(arg, "=")
 			name, value, err := resolveLongOption(name, options, true)
 			if err != nil {
-				return argv, fmt.Errorf("%s: %w", command, err)
+				return input, fmt.Errorf("%s: %w", command, err)
 			}
 			if attached && value == optionNoValue {
-				return argv, fmt.Errorf("%s option %s does not accept a value", command, name)
+				return input, fmt.Errorf("%s option %s does not accept a value", command, name)
 			}
 			if name == "--help" || name == "--version" {
-				return argv, nil
+				return input, nil
 			}
 			if !attached && value == optionRequiredValue {
 				i++
 				if i == len(argv) {
-					return argv, fmt.Errorf("%s option %s requires a value", command, name)
+					return input, fmt.Errorf("%s option %s requires a value", command, name)
+				}
+			}
+			if command == "xargs" && name == "--replace" {
+				if attached {
+					_, replacement, _ = strings.Cut(arg, "=")
+				} else {
+					replacement = argv[i]
 				}
 			}
 		} else {
@@ -60,13 +78,20 @@ func normalizeProcessWrapperArgv(argv []string) ([]string, error) {
 				name := "-" + string(arg[j])
 				value, ok := options[name]
 				if !ok {
-					return argv, fmt.Errorf("unsupported %s option %s", command, name)
+					return input, fmt.Errorf("unsupported %s option %s", command, name)
 				}
 				if value == optionRequiredValue {
 					if j == len(arg)-1 {
 						i++
 						if i == len(argv) {
-							return argv, fmt.Errorf("%s option %s requires a value", command, name)
+							return input, fmt.Errorf("%s option %s requires a value", command, name)
+						}
+					}
+					if command == "xargs" && name == "-I" {
+						if j == len(arg)-1 {
+							replacement = argv[i]
+						} else {
+							replacement = arg[j+1:]
 						}
 					}
 					break
@@ -79,7 +104,39 @@ func normalizeProcessWrapperArgv(argv []string) ([]string, error) {
 		i++
 	}
 	if i >= len(argv) {
-		return argv, nil
+		return input, nil
 	}
-	return argv[i:], nil
+	for j := 1; j < i; j++ {
+		if input.dynamicAt(j) {
+			return input, fmt.Errorf("%s execution options cannot be determined", command)
+		}
+	}
+	rest := commandInput{argv: append([]string(nil), argv[i:]...), dynamicArgs: make([]bool, len(argv)-i)}
+	for j := range rest.argv {
+		rest.dynamicArgs[j] = input.dynamicAt(i + j)
+	}
+	if replacement != "" {
+		for i, arg := range rest.argv {
+			if strings.Contains(arg, replacement) {
+				rest.argv[i] = ""
+				rest.dynamicArgs[i] = true
+			}
+		}
+	} else if command == "xargs" {
+		rest.argv = append(rest.argv, "")
+		rest.dynamicArgs = append(rest.dynamicArgs, true)
+	}
+	return rest, nil
+}
+
+func knownIndirectProgram(arg string) bool {
+	name := commandName(arg)
+	if isShellCommand(name) || isCommandWrapper(name) {
+		return true
+	}
+	switch name {
+	case "git", "gh", "echo", "printf", "true", "false", ":", "rm", "rmdir", "unlink", "dd", "kill", "killall", "pkill", "chmod", "chown", "chgrp":
+		return true
+	}
+	return false
 }

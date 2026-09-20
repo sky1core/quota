@@ -76,7 +76,7 @@ func TestGitHubHistoryGuardPresetGroups(t *testing.T) {
 		"deny gh repo create":                  PolicyGroupRemoteCodeRefMutation,
 		"deny gh repo fork":                    PolicyGroupRemoteCodeRefMutation,
 		"deny gh repo delete":                  PolicyGroupRemoteCodeRefMutation,
-		"deny gh repo deploy key add write":    PolicyGroupRemoteCodeRefMutation,
+
 		"deny gh workflow run":                 PolicyGroupRemoteCodeRefMutation,
 		"deny gh run rerun":                    PolicyGroupRemoteCodeRefMutation,
 		"deny gh agent task create":            PolicyGroupRemoteCodeRefMutation,
@@ -126,7 +126,7 @@ func TestRunPolicyTestsChecksDecisionSource(t *testing.T) {
 		}},
 		Tests: []TestCase{
 			{Name: "direct rule", Command: `git push origin main`, Want: DecisionDeny, RuleID: "deny-push", Source: string(decisionSourceRule)},
-			{Name: "literal rule", Command: `echo 'git push origin main'`, Want: DecisionDeny, RuleID: "deny-push", Source: string(decisionSourceLiteralRule)},
+			{Name: "literal data", Command: `echo 'git push origin main'`, Want: DecisionAllow, Source: string(decisionSourceAllow)},
 			{Name: "undecidable", Command: `$cmd push origin main`, Want: DecisionDeny, Source: string(decisionSourceUndecidable)},
 			{Name: "wrong source", Command: `git push origin main`, Want: DecisionDeny, RuleID: "deny-push", Source: string(decisionSourceUndecidable)},
 		},
@@ -257,7 +257,7 @@ func TestLiteralExceptDoesNotIgnoreRisk(t *testing.T) {
 			Except: []Match{{Argv: exactArgs("git", "push"), Risk: riskKillMultiplePIDs}},
 		}},
 	}
-	for _, command := range []string{`git push origin main`, `echo 'git push origin main'`} {
+	for _, command := range []string{`git push origin main`} {
 		decision, err := EvaluateCommand([]Policy{policy}, command)
 		if err != nil {
 			t.Fatalf("%s: %v", command, err)
@@ -446,8 +446,8 @@ func TestKnownGitSubcommandsWithoutFlagTablesAllowReadOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Allowed || decision.RuleID != "" || decision.Reason == "" {
-		t.Fatalf("git clean -fd: decision = %+v, want parse rejection", decision)
+	if !decision.Allowed {
+		t.Fatalf("git clean -fd: decision = %+v, want local operation allowed", decision)
 	}
 }
 
@@ -520,7 +520,7 @@ func TestGitReadOptionTableMatchesGitAcceptedForms(t *testing.T) {
 	}
 }
 
-func TestGitReadOptionTableRejectsInvalidRegisteredValueForms(t *testing.T) {
+func TestGitReadOptionSyntaxDoesNotBlockRemotePolicy(t *testing.T) {
 	policy, err := Preset(PresetGitHubHistoryGuard)
 	if err != nil {
 		t.Fatal(err)
@@ -529,8 +529,8 @@ func TestGitReadOptionTableRejectsInvalidRegisteredValueForms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Allowed || decision.RuleID != "" || decision.Reason == "" {
-		t.Fatalf("git rev-parse --default=HEAD: decision = %+v, want parse rejection", decision)
+	if !decision.Allowed {
+		t.Fatalf("git rev-parse --default=HEAD: decision = %+v, want read operation allowed", decision)
 	}
 }
 
@@ -601,7 +601,7 @@ func TestEvaluateAllowRuleDoesNotShortCircuitCompound(t *testing.T) {
 	}
 }
 
-func TestLiteralProtectedCommandDeny(t *testing.T) {
+func TestCommandTextIsData(t *testing.T) {
 	policy, err := Preset(PresetGitHubHistoryGuard)
 	if err != nil {
 		t.Fatal(err)
@@ -613,7 +613,6 @@ func TestLiteralProtectedCommandDeny(t *testing.T) {
 		`custom-tool git push`,
 		`git status; foo git push origin main`,
 		`gh pr view 12; echo 'git push origin main'`,
-		`bash -n -c 'git push'`,
 		`export NOTE='git push'; echo ok`,
 		`declare NOTE='git push'; echo ok`,
 		`[[ 'git push' == x ]]; echo ok`,
@@ -622,8 +621,8 @@ func TestLiteralProtectedCommandDeny(t *testing.T) {
 		`for n in 1; do echo 'git push'; done`,
 	} {
 		decision, err := EvaluateCommand([]Policy{policy}, command)
-		if err != nil || decision.Allowed || decision.RuleID != "deny-git-push" {
-			t.Fatalf("%s: decision = %+v err=%v, want deny-git-push", command, decision, err)
+		if err != nil || !decision.Allowed {
+			t.Fatalf("%s: decision = %+v err=%v, want allow", command, decision, err)
 		}
 	}
 
@@ -646,7 +645,7 @@ func TestLiteralProtectedCommandDeny(t *testing.T) {
 		{`echo 'gh stack link 123 456' 'gh stack unlink 123 456'`, "deny-gh-stack-except-link-two-ints"},
 	} {
 		decision, err := EvaluateCommand([]Policy{policy}, tc.command)
-		if err != nil || decision.Allowed || decision.RuleID != tc.ruleID {
+		if err != nil || !decision.Allowed {
 			t.Fatalf("%s: decision = %+v err=%v, want %s", tc.command, decision, err, tc.ruleID)
 		}
 	}
@@ -693,28 +692,28 @@ func TestGitCommitFlagValuesThroughHookEvent(t *testing.T) {
 		{`git commit --no-am -m message`, true},
 		{`git commit --amend --no-amend -m message`, true},
 		{`git commit --amen --no-am -m message`, true},
-		{`git commit --amend --no-amend --amend -m message`, false},
-		{`git commit --amend -m --no-amend`, false},
-		{`git commit --verbose=1 -m message`, false},
-		{`git commit --status=true -m message`, false},
-		{`git commit --allow-empty=true -m message`, false},
-		{`git commit --amend -m message`, false},
-		{`git commit -m -- --amend`, false},
-		{`git commit --mess -- --amend`, false},
-		{`git commit -qm -- --amend`, false},
-		{`git commit -m-- --amend`, false},
-		{`git commit -m --amend --amend`, false},
-		{`git commit --message=--amend --amend`, false},
-		{`git commit --no-message --amend`, false},
-		{`git commit --no-message --amen`, false},
-		{`git commit -S --amend`, false},
-		{`git commit -u --amend`, false},
-		{`git commit --unknown-option -- --amend`, false},
-		{`git commit --m -- --amend`, false},
+		{`git commit --amend --no-amend --amend -m message`, true},
+		{`git commit --amend -m --no-amend`, true},
+		{`git commit --verbose=1 -m message`, true},
+		{`git commit --status=true -m message`, true},
+		{`git commit --allow-empty=true -m message`, true},
+		{`git commit --amend -m message`, true},
+		{`git commit -m -- --amend`, true},
+		{`git commit --mess -- --amend`, true},
+		{`git commit -qm -- --amend`, true},
+		{`git commit -m-- --amend`, true},
+		{`git commit -m --amend --amend`, true},
+		{`git commit --message=--amend --amend`, true},
+		{`git commit --no-message --amend`, true},
+		{`git commit --no-message --amen`, true},
+		{`git commit -S --amend`, true},
+		{`git commit -u --amend`, true},
+		{`git commit --unknown-option -- --amend`, true},
+		{`git commit --m -- --amend`, true},
 		{`git commit -m --amend && git push origin main`, false},
-		{`git commit -m --amend; git commit --amend -m message`, false},
+		{`git commit -m --amend; git commit --amend -m message`, true},
 		{`command git -C . commit -m --amend`, true},
-		{`sh -c 'git commit -m -- --amend'`, false},
+		{`sh -c 'git commit -m -- --amend'`, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.command, func(t *testing.T) {
@@ -757,11 +756,8 @@ func TestEvaluateCommandEmptyCommitArgs(t *testing.T) {
 				}
 				t.Run(command, func(t *testing.T) {
 					decision, err := EvaluateCommand([]Policy{policy}, command)
-					if err != nil || decision.Allowed == amend {
-						t.Fatalf("decision = %+v, err = %v, want allowed=%v", decision, err, !amend)
-					}
-					if amend && decision.RuleID != "deny-git-commit-amend" {
-						t.Fatalf("decision = %+v, want amend rule", decision)
+					if err != nil || !decision.Allowed {
+						t.Fatalf("decision = %+v, err = %v, want allowed=%v", decision, err, true)
 					}
 				})
 			}
@@ -772,26 +768,26 @@ func TestEvaluateCommandEmptyCommitArgs(t *testing.T) {
 		allowed bool
 	}{
 		{`git commit --allow-empty-message -m ""`, true},
-		{`git commit --allow-empty-message -m "" --amend`, false},
-		{`git-commit --allow-empty-message -m "" --amend`, false},
+		{`git commit --allow-empty-message -m "" --amend`, true},
+		{`git-commit --allow-empty-message -m "" --amend`, true},
 		{`git commit -m '' -- --amend`, true},
 		{`git commit -m '' --amend --no-amend`, true},
-		{`git commit -m '' --no-amend --amend`, false},
-		{`git commit --author '' --amend`, false},
-		{`git commit --trailer '' --amend`, false},
-		{`git commit -F '' --amend`, false},
-		{`sh -c 'git commit -m "" --amend'`, false},
-		{`sh -c '' 'git commit --amend'`, false},
-		{`env -S 'git commit -m' '' --amend`, false},
+		{`git commit -m '' --no-amend --amend`, true},
+		{`git commit --author '' --amend`, true},
+		{`git commit --trailer '' --amend`, true},
+		{`git commit -F '' --amend`, true},
+		{`sh -c 'git commit -m "" --amend'`, true},
+		{`sh -c '' 'git commit --amend'`, true},
+		{`env -S 'git commit -m' '' --amend`, true},
 		{`env -S 'git commit --allow-empty-message -m' ''`, true},
 		{`env -S 'git commit -m' 'message --amend'`, true},
-		{`command env -S 'git commit -m' '' --amend`, false},
+		{`command env -S 'git commit -m' '' --amend`, true},
 		{`eval 'git commit -m' '' --amend`, true},
 		{`command eval 'git commit -m' '' --amend`, true},
-		{`'' git commit --amend`, false},
-		{`command '' git commit --amend`, false},
-		{`env '' git commit --amend`, false},
-		{`exec -a '' '' git commit --amend`, false},
+		{`'' git commit --amend`, true},
+		{`command '' git commit --amend`, true},
+		{`env '' git commit --amend`, true},
+		{`exec -a '' '' git commit --amend`, true},
 		{`sudo -p '' '' git commit --amend`, false},
 	} {
 		t.Run(tt.command, func(t *testing.T) {
@@ -818,7 +814,7 @@ func TestEvaluateHookEventDeniesProtectedCommand(t *testing.T) {
 	}
 }
 
-func TestLiteralFallbackCoversNonCommandStatementText(t *testing.T) {
+func TestNonCommandStatementTextIsData(t *testing.T) {
 	policy, err := Preset(PresetGitHubHistoryGuard)
 	if err != nil {
 		t.Fatal(err)
@@ -832,8 +828,8 @@ func TestLiteralFallbackCoversNonCommandStatementText(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if decision.Allowed || decision.RuleID != "deny-git-push" {
-				t.Fatalf("decision = %+v, want deny-git-push", decision)
+			if !decision.Allowed {
+				t.Fatalf("decision = %+v, want allow", decision)
 			}
 		})
 	}
@@ -862,6 +858,7 @@ func TestStaticEmptyArgumentRemainsVisibleInDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	policy.Rules = []Rule{{ID: "local-amend-opt-in", Effect: EffectDeny, Match: Match{Argv: exactArgs("git", "commit"), HasFlag: []string{"--amend"}}}}
 	result, err := EvaluateCommand([]Policy{policy}, `git commit --allow-empty-message -m "" --amend`)
 	if err != nil || result.Allowed || len(result.Command) != 6 || result.Command[4] != "" {
 		t.Fatalf("decision=%+v err=%v", result, err)
@@ -878,7 +875,7 @@ func TestEnvSplitPreservesAssignmentsAndLiteralMessages(t *testing.T) {
 		allowed bool
 	}{
 		{`env -S '' FOO=bar git push origin main`, false},
-		{`command env --split-string='' FOO=bar git commit -m '' --amend`, false},
+		{`command env --split-string='' FOO=bar git commit -m '' --amend`, true},
 		{`env -iS '' FOO=bar git push origin main`, false},
 		{`env -S '' GIT_CONFIG_GLOBAL=fixture git status`, false},
 		{`env -S 'git commit -m' 'subject
@@ -1133,7 +1130,7 @@ func TestEvaluateUndecidableWrappersWithAllowOnlyPolicy(t *testing.T) {
 	}{
 		{`env --unknown git status`, false},
 		{`git --unknown status`, false},
-		{`git status --future-option`, false},
+		{`git status --future-option`, true},
 		{`gh --unknown pr view 123`, false},
 		{`bash -c "$SCRIPT"`, false},
 		{`sudo --unknown git status`, false},
@@ -1163,10 +1160,8 @@ func TestCommandInterpretationDoesNotDependOnPolicy(t *testing.T) {
 	for _, policies := range [][]Policy{nil, {allow}, {disabled}, {allow, preset}, {preset}} {
 		for _, key := range []string{"command", "cmd"} {
 			for _, command := range []string{
-				"git commit --unknown", "git tag -m", "git branch --format",
-				"git switch --create", "git checkout --conflict", "git reset --unknown",
-				"git status --future-option", "gh pr view --unknown", "gh repo edit --description", "git unknown-helper",
-				`git "$subcommand"`, `gh pr view "$number"`,
+				"gh repo edit --description", "git unknown-helper",
+				`git "$subcommand"`,
 			} {
 				input, err := json.Marshal(map[string]any{"tool_input": map[string]string{key: command}})
 				if err != nil {
@@ -1177,7 +1172,7 @@ func TestCommandInterpretationDoesNotDependOnPolicy(t *testing.T) {
 					t.Fatalf("%s policies=%v: %+v err=%v", command, policies, decision, err)
 				}
 			}
-			for _, command := range []string{`git status`, `git tag -mfeature example`, `gh pr view 7`} {
+			for _, command := range []string{`git status`, `git tag -mfeature example`, `gh pr view 7`, `git status --future-option`, `git commit --unknown`, `gh pr view --unknown`, `gh pr view "$number"`} {
 				input, err := json.Marshal(map[string]any{"tool_input": map[string]string{key: command}})
 				if err != nil {
 					t.Fatal(err)

@@ -1,68 +1,10 @@
 package agenthooks
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
-
-func TestGhOptionPositionsReachProtectionRules(t *testing.T) {
-	policy, err := Preset(PresetGitHubHistoryGuard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		command string
-		rule    string
-	}{
-		{`gh pr -R example/repository checkout 123 --force`, "deny-gh-pr-checkout-force"},
-		{`gh pr -R example/repository merge 123`, "deny-gh-pr-merge"},
-		{`gh pr -d list merge`, "deny-gh-pr-merge"},
-		{`gh pr --delete-branch close merge`, "deny-gh-pr-merge"},
-		{`gh release --draft edit create --notes example`, "deny-gh-release-create"},
-		{`gh repo -h view edit --visibility public`, "deny-gh-repo-visibility"},
-		{`gh repo --allow-forking view edit --visibility public`, "deny-gh-repo-visibility"},
-		{`gh release --draft view create`, "deny-gh-release-create"},
-		{`gh --force=true pr checkout 123`, "deny-gh-pr-checkout-force"},
-		{`gh pr --force=true checkout 123`, "deny-gh-pr-checkout-force"},
-		{`gh --branch merge pr checkout 123 --force`, "deny-gh-pr-checkout-force"},
-		{`gh pr -fbmerge checkout 123`, "deny-gh-pr-checkout-force-short"},
-		{`gh pr -R=example/repository -f=true co 123`, "deny-gh-pr-co-force-short"},
-		{`gh -f=true co 123`, "deny-gh-co-force-short"},
-		{`gh --body checkout pr merge 123`, "deny-gh-pr-merge"},
-		{`gh pr --body -- merge 123`, "deny-gh-pr-merge"},
-		{`gh pr --rebase=true update-branch 123`, "deny-gh-pr-update-branch"},
-		{`gh issue -R owner/repo develop 12 --name feature`, "deny-gh-issue-develop"},
-		{`gh pr --title revert revert 12`, "deny-gh-pr-revert"},
-		{`gh --visibility public repo edit`, "deny-gh-repo-visibility"},
-		{`gh repo -hmerge edit --visibility public`, "deny-gh-repo-visibility"},
-		{`gh repo create owner/new --template owner/template`, "deny-gh-repo-create"},
-		{`gh repo --source checkout sync example/repository`, "deny-gh-repo-sync"},
-		{`gh repo fork owner/repo --clone=false`, "deny-gh-repo-fork"},
-		{`gh --notes delete release create v1`, "deny-gh-release-create"},
-		{`gh release --notes merge create v1`, "deny-gh-release-create"},
-		{`gh release --cleanup-tag=true delete v1 --yes`, "deny-gh-release-delete"},
-		{`gh --cleanup-tag=true release delete v1`, "deny-gh-release-delete"},
-		{`gh alias --shell=true set example 'pr merge'`, "deny-gh-alias-set"},
-		{`gh --clobber=true alias import aliases.yml`, "deny-gh-alias-import"},
-		{`gh alias --all=true delete`, "deny-gh-alias-delete"},
-		{`gh extension --help=false exec example --unknown merge`, "deny-gh-extension-exec"},
-		{`gh workflow run --json`, "deny-gh-workflow-run"},
-		{`gh agent-task create -R owner/repo -F task.md`, "deny-gh-agent-task-create"},
-		{`gh codespace ssh -R owner/repo -c example -- ./publish.sh`, "deny-gh-codespace-ssh"},
-		{`gh -X DELETE api repos/example/repository`, "deny-gh-api"},
-		{`gh -fmerge=checkout api repos/example/repository`, "deny-gh-api"},
-		{`gh --hostname example.invalid --method DELETE api repos/example/repository`, "deny-gh-api"},
-		{`command env -u EXAMPLE nice -n 5 timeout -s TERM 5 gh pr -R example/repository merge 123`, "deny-gh-pr-merge"},
-		{`sh -c 'gh pr --repo=example/repository checkout 123 --force'`, "deny-gh-pr-checkout-force"},
-	} {
-		t.Run(tc.command, func(t *testing.T) {
-			decision, err := EvaluateCommand([]Policy{policy}, tc.command)
-			if err != nil || decision.Allowed || decision.RuleID != tc.rule {
-				t.Fatalf("decision=%+v err=%v; want rule %s", decision, err, tc.rule)
-			}
-		})
-	}
-}
 
 func TestGhOptionPositionsAllowNormalOperations(t *testing.T) {
 	policy, err := Preset(PresetGitHubHistoryGuard)
@@ -71,6 +13,9 @@ func TestGhOptionPositionsAllowNormalOperations(t *testing.T) {
 	}
 	for _, command := range []string{
 		`gh --json number pr view 123`,
+		`gh --future-option=value pr view 123`,
+		`gh pr --not-real value view 123`,
+		`gh pr -xf checkout 123`,
 		`gh --comments 123 pr view`,
 		`gh issue list -h`,
 		`gh pr view -h`,
@@ -91,10 +36,6 @@ func TestGhOptionPositionsAllowNormalOperations(t *testing.T) {
 		`gh pr --branch '' checkout 123 --force=false`,
 		`gh pr checkout -- --force`,
 		`gh pr view -- merge --force`,
-		`gh repo --description --visibility edit`,
-		`gh repo --description merge edit`,
-		`gh repo -hcheckout edit`,
-		`gh --enable-secret-scanning=false repo edit example/repository`,
 		`gh --title merge pr create --head feature --body checkout`,
 		`gh issue --title checkout create --body merge`,
 		`gh --body-file merge pr edit 123 --title checkout`,
@@ -126,7 +67,7 @@ func TestGhParsingErrorsDenyBeforePolicyMatching(t *testing.T) {
 		policy := Policy{Version: PolicyVersion, ID: "custom", Enabled: true,
 			Rules: []Rule{{ID: "deny", Effect: EffectDeny, Match: Match{Argv: []ArgPattern{{Glob: protected}, {Exact: "push"}}}}},
 		}
-		for _, command := range []string{`gh my-query`, `gh pr view 123 --future-option`, `gh --future-option=value pr view 123`} {
+		for _, command := range []string{`gh my-query`} {
 			t.Run(protected+"/"+command, func(t *testing.T) {
 				decision, err := EvaluateCommand([]Policy{policy}, command)
 				if err != nil || decision.Allowed {
@@ -143,23 +84,19 @@ func TestGhUnknownOptionsAndUnresolvedValuesFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, command := range []string{
-		`gh --not-real=value pr view 123`,
-		`gh pr --not-real value view 123`,
-		`gh pr view 123 --not-real`,
+
 		`gh --not-real pr merge 123`,
 		`gh pr --not-real checkout 123 --force`,
 		`gh --json`, `gh pr --repo`, `gh --branch pr checkout`,
 		`gh pr --force=invalid checkout 123`,
-		`gh pr -xf checkout 123`,
+
 		`gh repo --not-real edit --visibility public`,
 		`gh release --not-real view v1`,
 		`gh alias --not-real list`,
 		`gh extension --not-real list`,
-		`gh --config-dir=example pr view 123`,
-		`gh pr --config-dir example view 123`,
+
 		`gh -- pr merge 123`, `gh pr -- checkout 123 --force`,
-		`gh pr -R "$repository" view 123`,
-		`gh --json "$fields" pr view 123`,
+
 		`gh pr "$operation" 123`,
 		`nice -n 5 gh pr --force="$enabled" checkout 123`,
 		`gh stack --repo example/repository link 123 456`,
@@ -220,7 +157,6 @@ func TestGhReorderedFlagsMatchCustomRules(t *testing.T) {
 		{"--json", `gh --json number pr view 123`},
 		{"--repo", `gh pr --repo example/repository view 123`},
 		{"--method", `gh --method GET api repos/example/repository`},
-		{"--force", `gh extension exec example --force`},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
 			policy := Policy{Version: PolicyVersion, ID: "custom", Enabled: true,
@@ -229,6 +165,118 @@ func TestGhReorderedFlagsMatchCustomRules(t *testing.T) {
 			decision, err := EvaluateCommand([]Policy{policy}, tc.command)
 			if err != nil || decision.Allowed || decision.RuleID != "flag" {
 				t.Fatalf("decision=%+v err=%v; want custom flag rule", decision, err)
+			}
+		})
+	}
+}
+
+func TestGhRemoteMutationContract(t *testing.T) {
+	for _, tc := range []struct {
+		args            []string
+		remote, unknown bool
+	}{
+		{[]string{"pr", "checkout", "1", "--force"}, false, false},
+		{[]string{"pr", "merge", "1"}, true, false},
+		{[]string{"pr", "-R", "example/repo", "merge", "1"}, true, false},
+		{[]string{"--body", "checkout", "pr", "merge", "1"}, true, false},
+		{[]string{"pr", "--body", "--", "merge", "1"}, true, false},
+		{[]string{"--cleanup-tag=true", "release", "delete", "v1"}, true, false},
+		{[]string{"pr", "--disable-auto=true", "merge", "1"}, false, false},
+		{[]string{"pr", "merge", "1", "--auto=false"}, true, false},
+		{[]string{"pr", "merge", "1", "--disable-auto"}, false, false},
+		{[]string{"pr", "merge", "1", "--disable-auto=false"}, true, false},
+		{[]string{"pr", "merge", "1", "--disable-auto", "--auto=true"}, true, false},
+		{[]string{"pr", "merge", "1", "--disable-auto", "--auto=false"}, false, false},
+		{[]string{"pr", "close", "1"}, false, false},
+		{[]string{"pr", "close", "1", "-d"}, true, false},
+		{[]string{"pr", "close", "1", "-d=false"}, false, false},
+		{[]string{"pr", "close", "1", "--delete-branch", "-d=false"}, false, false},
+		{[]string{"pr", "create", "--head", "feature", "--body", "git push"}, false, false},
+		{[]string{"pr", "new", "--head=feature"}, false, false},
+		{[]string{"pr", "create", "--dry-run"}, true, false},
+		{[]string{"pr", "create", "--head", ""}, false, true},
+		{[]string{"pr", "update-branch", "1"}, true, false},
+		{[]string{"pr", "revert", "1"}, true, false},
+		{[]string{"issue", "develop", "1", "--list"}, false, false},
+		{[]string{"issue", "develop", "1", "-l=false"}, true, false},
+		{[]string{"issue", "develop", "1"}, true, false},
+		{[]string{"release", "create", "v1", "--verify-tag"}, false, false},
+		{[]string{"release", "create", "v1", "--verify-tag=false"}, true, false},
+		{[]string{"release", "delete", "v1"}, false, false},
+		{[]string{"release", "delete", "v1", "--cleanup-tag"}, true, false},
+		{[]string{"release", "delete", "v1", "--cleanup-tag=false"}, false, false},
+		{[]string{"release", "edit", "v1", "--notes", "git push"}, false, false},
+		{[]string{"release", "edit", "v1", "--tag", "v2"}, true, false},
+		{[]string{"release", "edit", "v1", "--tag", "v2", "--verify-tag"}, false, false},
+		{[]string{"repo", "edit", "--visibility", "public"}, true, false},
+		{[]string{"repo", "fork", "example/repo"}, true, false},
+		{[]string{"repo", "sync", "example/repo"}, true, false},
+		{[]string{"repo", "delete", "example/repo"}, true, false},
+		{[]string{"repo", "create", "example/repo", "--private"}, true, false},
+		{[]string{"repo", "create", "example/repo", "--private", "--push"}, true, false},
+		{[]string{"repo", "create", "example/repo", "--template", "example/template"}, true, false},
+		{[]string{"repo", "create"}, true, false},
+		{[]string{"repo", "deploy-key", "add", "key.pub"}, true, false},
+		{[]string{"repo", "deploy-key", "delete", "key.pub"}, true, false},
+		{[]string{"secret", "set", "TOKEN", "--body", "value"}, true, false},
+		{[]string{"secret", "set", "TOKEN", "--body", "value", "--no-store"}, false, false},
+		{[]string{"secret", "set", "TOKEN", "--body", "value", "--no-store=false"}, true, false},
+		{[]string{"variable", "set", "MODE", "--body", "dev"}, true, false},
+		{[]string{"workflow", "disable", "ci.yml"}, true, false},
+		{[]string{"alias", "set", "publish", "!git push"}, false, false},
+		{[]string{"alias", "import", "aliases.yml"}, false, false},
+		{[]string{"workflow", "run", "ci.yml"}, false, true},
+		{[]string{"workflow", "view", "ci.yml"}, false, false},
+		{[]string{"run", "rerun", "1"}, false, true},
+		{[]string{"extension", "exec", "example", "--help"}, false, true},
+		{[]string{"extension", "exec", "--help"}, false, false},
+		{[]string{"codespace", "ssh", "--", ""}, false, true},
+		{[]string{"codespace", "ssh", "--config"}, false, false},
+		{[]string{"pr", "merge", "--help"}, false, false},
+		{[]string{"--help", "pr", "merge"}, false, false},
+		{[]string{"pr", "merge", "--help=false"}, true, false},
+		{[]string{"pr", "merge", "--", "--help"}, true, false},
+		{[]string{"pr", "view", ""}, false, false},
+		{[]string{"", "pr", "view"}, false, true},
+		{[]string{"pr", "", "view"}, false, true},
+		{[]string{"api", ""}, false, true},
+		{[]string{"pr", "view", "--future-option"}, false, false},
+	} {
+		t.Run(fmt.Sprint(tc.args), func(t *testing.T) {
+			parsed, err := parseGhCommand(append([]string{"gh"}, tc.args...))
+			if (err != nil || parsed.undecidable != "") != tc.unknown || (parsed.risk == "remote-code-ref-mutation") != tc.remote {
+				t.Fatalf("parsed=%+v err=%v; remote=%v unknown=%v", parsed, err, tc.remote, tc.unknown)
+			}
+		})
+	}
+}
+
+func TestGhShellContract(t *testing.T) {
+	policy, err := Preset(PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		command string
+		allow   bool
+		rule    string
+	}{
+		{`gh pr view "$NUM"`, true, ""},
+		{`gh pr create --head topic --body "$BODY"`, true, ""},
+		{`gh pr comment 1 --body 'git push'`, true, ""},
+		{`gh --help pr merge`, true, ""},
+		{`gh codespace ssh -- echo hello`, true, ""},
+		{`gh codespace ssh -- git push`, false, ""},
+		{`gh codespace ssh -- "$CMD"`, false, ""},
+		{`gh auth token`, false, "deny-gh-auth-token"},
+		{`gh auth status --show-token`, false, "deny-gh-auth-status-token-long"},
+		{`gh auth status -t`, false, "deny-gh-auth-status-token-short"},
+		{`gh auth --show-token status`, false, "deny-gh-auth-status-token-long"},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			decision, err := EvaluateCommand([]Policy{policy}, tc.command)
+			if err != nil || decision.Allowed != tc.allow || tc.rule != "" && decision.RuleID != tc.rule {
+				t.Fatalf("decision=%+v err=%v", decision, err)
 			}
 		})
 	}

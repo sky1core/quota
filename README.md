@@ -205,24 +205,18 @@ quota-cli agent hooks doctor
 정책 파일은 기본적으로 `~/.config/quota/agent-hooks.d/*.json`에 저장된다. 사용자는 정책을 한 번만
 작성하고, `quota-cli`가 Claude/Codex hook 설정으로 렌더링한다.
 
-기본 preset `github-history-guard`는 두 그룹을 구분한다. `remote-code-ref-mutation`은 코드 이력, 원격 ref,
-tag/release, PR branch, repo 상태를 바꾸거나 그런 명령을 숨길 수 있는 명령을 차단한다.
-`github-collaboration-metadata`는 PR/Issue 본문·코멘트·조회와 push 없이 PR끼리 연결만 하는 stack link 작업을
-허용한다.
+기본 preset `github-history-guard`의 Git/GitHub 보호 범위는 **원격 코드·브랜치·태그·저장소 설정 변경**이다.
+`remote-code-ref-mutation`은 push, PR merge·자동 merge, 원격 ref 생성·삭제, 저장소 공개 범위·권한·보안/자동화 설정 변경 등을 차단한다.
+로컬 commit/amend/merge/rebase, 브랜치·태그 조작, 조회, push 없는 PR 생성과 협업 메타데이터 작업은 허용한다.
+`gh api`는 요청의 실제 대상을 판정하며, 릴리스 정보·첨부물과 태그 변경도 구분한다.
+`gh stack link <number> <number>`만 허용하는 형식 제한은 별도로 유지한다.
+Git/GitHub의 추가 제한은 대상·조건·사유·영향을 명시해 승인받고 별도 규칙으로 설정한다.
+기본 원격 보호를 켰다는 이유로 로컬 작업 제한까지 함께 활성화하지 않는다.
 
-차단 그룹에는 `git push`, `git send-pack`, `git pull`, `git merge`, `git rebase`, `git commit --amend`,
-`git reset --hard`, `git filter-branch`, `git hook run`, `git for-each-repo`, `git bisect run`,
-`git submodule foreach`, `git update-ref`, `git replace`, `git reflog expire`, 강제 branch reset,
-branch delete/move/copy, tag force/delete, `gh issue develop`, `gh pr merge`, `gh pr update-branch`,
-`gh pr revert`, `gh pr close --delete-branch`, `gh pr checkout/co --force`, `gh repo create`,
-`gh repo delete`, `gh repo fork`, `gh repo deploy-key add --allow-write`, `gh repo edit --visibility`, `gh repo sync`,
-`gh release create/edit/upload/delete/delete-asset`, `gh workflow run`, `gh run rerun`, `gh agent-task create`,
-`gh codespace ssh`, raw `gh api`처럼
-코드 이력이나 ref 상태를 바꾸거나 원격 자동화로 우회할 수 있는 명령이 들어간다. 보호 명령을 숨길 수 있는
-`git config alias.*`/`include.*`, shell `alias`/`source`/`.`/`trap`/`xargs`,
-`gh alias set/import/delete`, `gh extension exec`, 알 수 없는 `git`/`gh` alias·extension dispatch도 차단한다.
-PR/Issue 본문·코멘트·조회, branch 삭제 없는 PR close와 `gh stack link <number> <number>`만 metadata 그룹으로 허용하고 다른
-`gh stack ...` 형태는 차단한다.
+`github-collaboration-metadata`는 협업 작업의 허용 대조군이며, `local-system-secret-safety`의 별도 안전 규칙도 유지한다.
+실행 내용이 보이지 않는 간접 실행은 판정불가 사유와 함께 차단한다. 명령 문자열의 검색·출력은 실행으로 취급하지 않는다.
+이미 저장된 정책은 바이너리 업데이트로 덮어쓰지 않는다. 새 기본값을 적용하려면 기존 사용자 규칙과 대조한 뒤
+`init --preset=github-history-guard --force`로 정책을 교체하고 `verify`로 허용·차단 결과를 확인한다.
 `list`/`plan`은 그룹 이름과 설명을 보여주고, `verify` 출력은 내장 테스트 이름 앞에 그룹 이름을 붙여 어느 그룹의 동작을 확인하는지 보여준다.
 
 `plan`은 설치될 hook 위치와 명령을 보여주고 파일을 수정하지 않는다. `plan`/`doctor`/`apply`는

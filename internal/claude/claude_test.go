@@ -847,8 +847,12 @@ func TestFetchEnv_ScrubsAccountOverrides(t *testing.T) {
 	t.Setenv("ANTHROPIC_BASE_URL", "https://example.invalid")
 	t.Setenv("CLAUDE_API_KEY", "secret")
 	t.Setenv("CLAUDE_CODE_API_BASE_URL", "https://example.invalid")
+	t.Setenv("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1")
+	t.Setenv("CLAUDE_CODE_EFFORT_LEVEL", "low")
 	t.Setenv("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "secret")
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "secret")
+	t.Setenv("CLAUDE_CODE_SIMPLE", "1")
+	t.Setenv("CLAUDE_CODE_USE_VERTEX", "1")
 	t.Setenv("PATH_MARKER_FOR_TEST", "kept")
 
 	env := fetchEnv("")
@@ -856,7 +860,8 @@ func TestFetchEnv_ScrubsAccountOverrides(t *testing.T) {
 	for _, kv := range env {
 		for _, banned := range []string{
 			"CLAUDECODE=", "ANTHROPIC_API_HOST=", "ANTHROPIC_API_KEY=", "ANTHROPIC_AUTH_TOKEN=", "ANTHROPIC_BASE_URL=",
-			"CLAUDE_API_KEY=", "CLAUDE_CODE_API_BASE_URL=", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN=", "CLAUDE_CODE_OAUTH_TOKEN=",
+			"CLAUDE_API_KEY=", "CLAUDE_CODE_API_BASE_URL=", "CLAUDE_CODE_DISABLE_CLAUDE_MDS=", "CLAUDE_CODE_EFFORT_LEVEL=",
+			"CLAUDE_CODE_OAUTH_REFRESH_TOKEN=", "CLAUDE_CODE_OAUTH_TOKEN=", "CLAUDE_CODE_SIMPLE=", "CLAUDE_CODE_USE_VERTEX=",
 		} {
 			if strings.HasPrefix(kv, banned) {
 				t.Errorf("%s must be scrubbed from the probe environment", strings.TrimSuffix(banned, "="))

@@ -19,6 +19,7 @@ func TestEnvForHomeSelectsAccountAndScrubsOverrides(t *testing.T) {
 		"OPENAI_BASE_URL=https://example.invalid",
 		"OPENAI_ORGANIZATION=org",
 		"OPENAI_PROJECT=project",
+		"CODEX_SQLITE_HOME=/caller-state",
 	}
 	env := EnvForHome(base, "/selected")
 
@@ -27,7 +28,7 @@ func TestEnvForHomeSelectsAccountAndScrubsOverrides(t *testing.T) {
 	}
 	for _, key := range []string{
 		"CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "CODEX_AUTH", "CODEX_AUTHAPI_BASE_URL", "CODEX_URL",
-		"OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORGANIZATION", "OPENAI_PROJECT",
+		"OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORGANIZATION", "OPENAI_PROJECT", "CODEX_SQLITE_HOME",
 	} {
 		if countEnv(env, key, "") != 0 {
 			t.Fatalf("%s must be removed", key)

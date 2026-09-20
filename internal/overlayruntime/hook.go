@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -164,7 +165,7 @@ func sessionStart(ctx context.Context, agent, event string, stdin io.Reader, std
 	nativeBlocked := false
 	var claudeExcludePatterns []string
 	if agent == "claude" && (result.LocalPresent || exists(filepath.Join(result.Checkout, sharedRule))) {
-		if notice := claudeNativeRefusal(); notice != "" {
+		if notice := claudeHookRuntimeRefusal(os.Environ()); notice != "" {
 			notices = append(notices, notice)
 			nativeBlocked = true
 		}

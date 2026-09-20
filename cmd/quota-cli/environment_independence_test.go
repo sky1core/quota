@@ -70,11 +70,12 @@ func TestQueryEntryPointCallerEnvironmentDoesNotChangeProbeTargets(t *testing.T)
 		codexEnv       string
 		claudeProjects string
 		codexSessions  string
+		controlEnv     bool
 	}{
 		{name: "no-agent-env"},
 		{name: "claude-env", claudeEnv: filepath.Join(home, "caller-claude")},
 		{name: "codex-env", codexEnv: filepath.Join(home, "caller-codex")},
-		{name: "unregistered-agent-envs", claudeEnv: filepath.Join(home, "caller-claude"), codexEnv: filepath.Join(home, "caller-codex"), claudeProjects: filepath.Join(home, "caller-projects"), codexSessions: filepath.Join(home, "caller-sessions")},
+		{name: "unregistered-agent-envs", claudeEnv: filepath.Join(home, "caller-claude"), codexEnv: filepath.Join(home, "caller-codex"), claudeProjects: filepath.Join(home, "caller-projects"), codexSessions: filepath.Join(home, "caller-sessions"), controlEnv: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.Remove(filepath.Join(home, ".config", "quota", "quota-cache.json")); err != nil && !os.IsNotExist(err) {
@@ -103,6 +104,15 @@ func TestQueryEntryPointCallerEnvironmentDoesNotChangeProbeTargets(t *testing.T)
 			if tc.codexSessions != "" {
 				env = append(env, "CODEX_SESSIONS_DIR="+tc.codexSessions)
 			}
+			if tc.controlEnv {
+				env = append(env,
+					"CLAUDE_CODE_DISABLE_CLAUDE_MDS=1",
+					"CLAUDE_CODE_EFFORT_LEVEL=low",
+					"CLAUDE_CODE_SIMPLE=1",
+					"CLAUDE_CODE_USE_VERTEX=1",
+					"CODEX_SQLITE_HOME="+filepath.Join(home, "caller-sqlite"),
+				)
+			}
 			testBinary, err := os.Executable()
 			if err != nil {
 				t.Fatal(err)
@@ -128,6 +138,12 @@ func TestQueryEntryPointCallerEnvironmentDoesNotChangeProbeTargets(t *testing.T)
 			if got := sortedRecordedLines(t, filepath.Join(recordDir, "codex-env")); strings.Join(got, "\n") != strings.Join(wantCodex, "\n") {
 				t.Fatalf("Codex child targets = %v, want %v", got, wantCodex)
 			}
+			if got := optionalSortedRecordedLines(t, filepath.Join(recordDir, "claude-control-env")); len(got) != 0 {
+				t.Fatalf("Claude child inherited control environment: %v", got)
+			}
+			if got := optionalSortedRecordedLines(t, filepath.Join(recordDir, "codex-control-env")); len(got) != 0 {
+				t.Fatalf("Codex child inherited control environment: %v", got)
+			}
 		})
 	}
 }
@@ -139,10 +155,15 @@ func writeFakeQuotaCLIs(t *testing.T, binDir string) {
 	}
 	claudeScript := `#!/bin/sh
 printf '%s\n' "$CLAUDE_CONFIG_DIR" >> "$QUOTA_TEST_RECORD_DIR/claude-env"
+[ -n "${CLAUDE_CODE_DISABLE_CLAUDE_MDS+x}" ] && printf '%s\n' CLAUDE_CODE_DISABLE_CLAUDE_MDS >> "$QUOTA_TEST_RECORD_DIR/claude-control-env"
+[ -n "${CLAUDE_CODE_EFFORT_LEVEL+x}" ] && printf '%s\n' CLAUDE_CODE_EFFORT_LEVEL >> "$QUOTA_TEST_RECORD_DIR/claude-control-env"
+[ -n "${CLAUDE_CODE_SIMPLE+x}" ] && printf '%s\n' CLAUDE_CODE_SIMPLE >> "$QUOTA_TEST_RECORD_DIR/claude-control-env"
+[ -n "${CLAUDE_CODE_USE_VERTEX+x}" ] && printf '%s\n' CLAUDE_CODE_USE_VERTEX >> "$QUOTA_TEST_RECORD_DIR/claude-control-env"
 printf '%s\n' '{"result":"Current session: 10% used\nCurrent week (all models): 20% used\n","is_error":false}'
 `
 	codexScript := `#!/bin/sh
 printf '%s\n' "$CODEX_HOME" >> "$QUOTA_TEST_RECORD_DIR/codex-env"
+[ -n "${CODEX_SQLITE_HOME+x}" ] && printf '%s\n' CODEX_SQLITE_HOME >> "$QUOTA_TEST_RECORD_DIR/codex-control-env"
 [ "$1" = app-server ] || exit 2
 while IFS= read -r line; do
 	case "$line" in
@@ -173,6 +194,14 @@ func sortedRecordedLines(t *testing.T, path string) []string {
 	}
 	sort.Strings(lines)
 	return lines
+}
+
+func optionalSortedRecordedLines(t *testing.T, path string) []string {
+	t.Helper()
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
+	return sortedRecordedLines(t, path)
 }
 
 func TestCallerAgentEnvironmentDoesNotChangeConfiguredTargets(t *testing.T) {
@@ -206,11 +235,12 @@ func TestCallerAgentEnvironmentDoesNotChangeConfiguredTargets(t *testing.T) {
 		codexEnv       string
 		claudeProjects string
 		codexSessions  string
+		controlEnv     bool
 	}{
 		{name: "no-agent-env"},
 		{name: "claude-env", claudeEnv: callerClaude},
 		{name: "codex-env", codexEnv: callerCodex},
-		{name: "unregistered-agent-envs", claudeEnv: callerClaude, codexEnv: callerCodex, claudeProjects: filepath.Join(home, "caller-projects"), codexSessions: filepath.Join(home, "caller-sessions")},
+		{name: "unregistered-agent-envs", claudeEnv: callerClaude, codexEnv: callerCodex, claudeProjects: filepath.Join(home, "caller-projects"), codexSessions: filepath.Join(home, "caller-sessions"), controlEnv: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("HOME", home)
@@ -219,6 +249,13 @@ func TestCallerAgentEnvironmentDoesNotChangeConfiguredTargets(t *testing.T) {
 			t.Setenv("CODEX_HOME", tc.codexEnv)
 			t.Setenv("CLAUDE_PROJECTS_DIR", tc.claudeProjects)
 			t.Setenv("CODEX_SESSIONS_DIR", tc.codexSessions)
+			if tc.controlEnv {
+				t.Setenv("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1")
+				t.Setenv("CLAUDE_CODE_EFFORT_LEVEL", "low")
+				t.Setenv("CLAUDE_CODE_SIMPLE", "1")
+				t.Setenv("CLAUDE_CODE_USE_VERTEX", "1")
+				t.Setenv("CODEX_SQLITE_HOME", filepath.Join(home, "caller-sqlite"))
+			}
 
 			loaded, err := config.Load()
 			if err != nil {

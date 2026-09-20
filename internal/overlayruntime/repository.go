@@ -390,9 +390,13 @@ func safeDirectory(p string) error {
 	}
 	return os.MkdirAll(p, 0o700)
 }
-func claudeNativeRefusal() string {
-	if os.Getenv("CLAUDE_CODE_DISABLE_CLAUDE_MDS") == "1" {
-		return "Rules not delivered: CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 disables the native instruction file channel"
+
+func claudeHookRuntimeRefusal(env []string) string {
+	for _, kv := range env {
+		key, value, ok := strings.Cut(kv, "=")
+		if ok && key == "CLAUDE_CODE_DISABLE_CLAUDE_MDS" && value == "1" {
+			return "Rules not delivered: CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 disables the native instruction file channel"
+		}
 	}
 	return ""
 }

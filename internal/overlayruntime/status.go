@@ -81,9 +81,6 @@ func CheckRepository(ctx context.Context, dir, agent string, options CheckOption
 	status.Generated = existingGeneratedFiles(r.Top, agent, state, actions)
 	if agent == "all" || agent == "claude" {
 		if local != nil || exists(filepath.Join(r.Top, sharedRule)) {
-			if notice := claudeNativeRefusal(); notice != "" {
-				problems = append(problems, notice)
-			}
 			problems = append(problems, claudeSettingsFindings(r)...)
 		}
 	}

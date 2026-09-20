@@ -170,8 +170,12 @@ func EnvForConfigDir(base []string, configDir string) []string {
 		"ANTHROPIC_BASE_URL":              true,
 		"CLAUDE_API_KEY":                  true,
 		"CLAUDE_CODE_API_BASE_URL":        true,
+		"CLAUDE_CODE_DISABLE_CLAUDE_MDS":  true,
+		"CLAUDE_CODE_EFFORT_LEVEL":        true,
 		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN": true,
 		"CLAUDE_CODE_OAUTH_TOKEN":         true,
+		"CLAUDE_CODE_SIMPLE":              true,
+		"CLAUDE_CODE_USE_VERTEX":          true,
 		"CLAUDE_CONFIG_DIR":               true,
 	}
 	env := make([]string, 0, len(base)+1)

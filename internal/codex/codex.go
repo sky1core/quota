@@ -282,6 +282,7 @@ func EnvForHome(base []string, home string) []string {
 		"OPENAI_ORGANIZATION":    true,
 		"OPENAI_PROJECT":         true,
 		"CODEX_HOME":             true,
+		"CODEX_SQLITE_HOME":      true,
 	}
 	env := make([]string, 0, len(base)+1)
 	for _, kv := range base {

@@ -739,7 +739,7 @@ func TestSessionStartDeliversBodyOnlyOnFirstPreparedStartup(t *testing.T) {
 	}
 }
 
-func TestClaudeNativeDisabledDoesNotFallbackInjectBody(t *testing.T) {
+func TestClaudeHookRuntimeNativeDisableWarnsWithoutInjectingBody(t *testing.T) {
 	testHome(t)
 	globalIgnore(t, "AGENTS.override.md", ".claude/AGENTS.md")
 	repo := newRepo(t)
@@ -1371,7 +1371,7 @@ func TestCheckRepositoryReportsPreparationAndIgnoreState(t *testing.T) {
 	}
 	t.Setenv("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1")
 	status, _ = CheckRepository(ctx, repo, "claude", CheckOptions{})
-	if len(status.Problems) != 1 || !strings.Contains(status.Problems[0], "CLAUDE_CODE_DISABLE_CLAUDE_MDS") {
+	if strings.Contains(strings.Join(status.Problems, "\n"), "CLAUDE_CODE_DISABLE_CLAUDE_MDS") {
 		t.Fatalf("status = %+v", status)
 	}
 }
@@ -1772,10 +1772,9 @@ func TestCheckRepositoryReportsSharedOnlyNativeProblems(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1")
 	status, err := CheckRepository(ctx, repo, "claude", CheckOptions{})
-	if err != nil || len(status.Problems) != 1 || !strings.Contains(status.Problems[0], "CLAUDE_CODE_DISABLE_CLAUDE_MDS") {
+	if err != nil || len(status.Problems) != 0 {
 		t.Fatalf("status = %+v, err = %v", status, err)
 	}
-	t.Setenv("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "")
 	write(t, filepath.Join(repo, "AGENTS.md"), "bad\x00rule\n")
 	status, err = CheckRepository(ctx, repo, "all", CheckOptions{})
 	if err != nil || len(status.Problems) == 0 || !strings.Contains(strings.Join(status.Problems, "\n"), "contains NUL") {

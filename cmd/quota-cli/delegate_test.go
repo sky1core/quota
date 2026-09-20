@@ -365,11 +365,16 @@ func TestPromptEnvironmentsSelectOnlyRequestedAccount(t *testing.T) {
 		"ANTHROPIC_BASE_URL=https://example.invalid",
 		"CLAUDE_API_KEY=secret",
 		"CLAUDE_CODE_API_BASE_URL=https://example.invalid",
+		"CLAUDE_CODE_DISABLE_CLAUDE_MDS=1",
+		"CLAUDE_CODE_EFFORT_LEVEL=low",
 		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN=secret",
 		"CLAUDE_CODE_OAUTH_TOKEN=secret",
+		"CLAUDE_CODE_SIMPLE=1",
+		"CLAUDE_CODE_USE_VERTEX=1",
 		"CODEX_HOME=/old-codex",
 		"CODEX_ACCESS_TOKEN=secret",
 		"CODEX_API_KEY=secret",
+		"CODEX_SQLITE_HOME=/caller-state",
 		"OPENAI_API_KEY=secret",
 		"OPENAI_BASE_URL=https://example.invalid",
 	}
@@ -379,7 +384,8 @@ func TestPromptEnvironmentsSelectOnlyRequestedAccount(t *testing.T) {
 	}
 	for _, key := range []string{
 		"CLAUDECODE", "ANTHROPIC_API_HOST", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
-		"CLAUDE_API_KEY", "CLAUDE_CODE_API_BASE_URL", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+		"CLAUDE_API_KEY", "CLAUDE_CODE_API_BASE_URL", "CLAUDE_CODE_DISABLE_CLAUDE_MDS", "CLAUDE_CODE_EFFORT_LEVEL",
+		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_USE_VERTEX",
 	} {
 		if _, ok := claudeEnv[key]; ok {
 			t.Fatalf("%s must be removed", key)
@@ -393,7 +399,7 @@ func TestPromptEnvironmentsSelectOnlyRequestedAccount(t *testing.T) {
 	if codexEnv["CODEX_HOME"] != "/new-codex" {
 		t.Fatalf("CODEX_HOME = %q", codexEnv["CODEX_HOME"])
 	}
-	for _, key := range []string{"CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"} {
+	for _, key := range []string{"CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "CODEX_SQLITE_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL"} {
 		if _, ok := codexEnv[key]; ok {
 			t.Fatalf("%s must be removed", key)
 		}

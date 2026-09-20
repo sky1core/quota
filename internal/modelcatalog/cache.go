@@ -15,6 +15,7 @@ import (
 )
 
 const MaxAge = 3 * time.Hour
+const cacheSchemaVersion = 2
 
 type Snapshot struct {
 	SchemaVersion int       `json:"schemaVersion"`
@@ -76,7 +77,7 @@ func (c Cache) Get(ctx context.Context, target Target, force bool) (Snapshot, er
 	if currentVersion != version {
 		return Snapshot{}, errors.New("CLI version changed during model discovery; retry refresh")
 	}
-	snapshot := Snapshot{SchemaVersion: 1, Provider: target.Provider, Binary: target.Binary,
+	snapshot := Snapshot{SchemaVersion: cacheSchemaVersion, Provider: target.Provider, Binary: target.Binary,
 		ConfigDir: target.ConfigDir, CLIVersion: version, FetchedAt: time.Now(), Models: models}
 	if err := writeSnapshot(path, snapshot); err != nil {
 		return Snapshot{}, err
@@ -101,7 +102,7 @@ func cacheKey(target Target) string {
 }
 
 func (s Snapshot) fresh(target Target, version string, now time.Time) bool {
-	return s.SchemaVersion == 1 && s.Provider == target.Provider && s.Binary == target.Binary &&
+	return s.SchemaVersion == cacheSchemaVersion && s.Provider == target.Provider && s.Binary == target.Binary &&
 		s.ConfigDir == target.ConfigDir && version != "" && s.CLIVersion == version &&
 		!s.FetchedAt.IsZero() && !now.Before(s.FetchedAt) && now.Sub(s.FetchedAt) < MaxAge && len(s.Models) > 0
 }

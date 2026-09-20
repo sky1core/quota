@@ -271,22 +271,10 @@ func resolveHome(home string) (string, error) {
 }
 
 func EnvForHome(base []string, home string) []string {
-	drop := map[string]bool{
-		"CODEX_ACCESS_TOKEN":     true,
-		"CODEX_API_KEY":          true,
-		"CODEX_AUTH":             true,
-		"CODEX_AUTHAPI_BASE_URL": true,
-		"CODEX_URL":              true,
-		"OPENAI_API_KEY":         true,
-		"OPENAI_BASE_URL":        true,
-		"OPENAI_ORGANIZATION":    true,
-		"OPENAI_PROJECT":         true,
-		"CODEX_HOME":             true,
-		"CODEX_SQLITE_HOME":      true,
-	}
 	env := make([]string, 0, len(base)+1)
 	for _, kv := range base {
-		if eq := strings.IndexByte(kv, '='); eq > 0 && drop[kv[:eq]] {
+		key, _, _ := strings.Cut(kv, "=")
+		if key != "CODEX_CA_CERTIFICATE" && (strings.HasPrefix(key, "CODEX_") || strings.HasPrefix(key, "OPENAI_")) {
 			continue
 		}
 		env = append(env, kv)

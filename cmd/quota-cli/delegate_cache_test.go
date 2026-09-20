@@ -46,7 +46,7 @@ func TestExecPromptPreservesSharedCache(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
-						snapshot := modelcatalog.Snapshot{SchemaVersion: 1, Provider: p, Binary: bin, ConfigDir: dir, CLIVersion: "test-cli-v1", FetchedAt: time.Now(), Models: []modelcatalog.Model{autoPromptTestModel(id, "high")}}
+						snapshot := modelcatalog.Snapshot{SchemaVersion: 2, Provider: p, Binary: bin, ConfigDir: dir, CLIVersion: "test-cli-v1", FetchedAt: time.Now(), Models: []modelcatalog.Model{autoPromptTestModel(id, "high")}}
 						envKey := "CLAUDE_CONFIG_DIR"
 						if p == "codex" {
 							envKey = "CODEX_HOME"

@@ -1,9 +1,31 @@
 package codex
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestEnvForHomeSeparatesRuntimeSettingsFromGeneralEnvironment(t *testing.T) {
+	general := []string{"HOME=/account-home", "PATH=/bin", "TMPDIR=/tmp", "LANG=C.UTF-8",
+		"HTTPS_PROXY=http://proxy.invalid:8080", "NO_PROXY=localhost", "SSL_CERT_FILE=/cert.pem",
+		"CODEX_CA_CERTIFICATE=/codex-cert.pem", "RUST_LOG=warn", "UNRELATED=value"}
+	base := append(append([]string{}, general...), "CODEX_HOME=/caller", "CODEX_SESSIONS_DIR=/caller-sessions",
+		"CODEX_FUTURE_SETTING=caller", "OPENAI_FUTURE_SETTING=caller", "OPENAI_API_KEY=caller-key")
+	before := append([]string{}, base...)
+	for _, home := range []string{"", "/selected"} {
+		want := append([]string{}, general...)
+		if home != "" {
+			want = append(want, "CODEX_HOME="+home)
+		}
+		if got := EnvForHome(base, home); !reflect.DeepEqual(got, want) {
+			t.Fatalf("environment for %q = %v, want %v", home, got, want)
+		}
+	}
+	if !reflect.DeepEqual(base, before) {
+		t.Fatal("caller environment was modified")
+	}
+}
 
 func TestEnvForHomeSelectsAccountAndScrubsOverrides(t *testing.T) {
 	base := []string{

@@ -292,6 +292,14 @@ func TestSelectAgentReportsUnsetEnvForSelectedProviderOverrides(t *testing.T) {
 	t.Setenv("CLAUDECODE", "1")
 	t.Setenv("ANTHROPIC_API_KEY", "secret")
 	t.Setenv("OPENAI_API_KEY", "secret")
+	claudeKeys := []string{"ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "CLAUDE_CODE_USE_BEDROCK",
+		"CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_FUTURE_SETTING", "MAX_THINKING_TOKENS"}
+	codexKeys := []string{"CODEX_FUTURE_SETTING", "OPENAI_FUTURE_SETTING", "CODEX_SESSIONS_DIR"}
+	for _, key := range append(claudeKeys, codexKeys...) {
+		t.Setenv(key, "caller-value")
+	}
+	t.Setenv("HTTPS_PROXY", "http://proxy.invalid:8080")
+	t.Setenv("CODEX_CA_CERTIFICATE", "/cert.pem")
 
 	claudeUnset := selectAgentClaudeUnsetEnv("/tmp/claude-2")
 	if !stringSliceContains(claudeUnset, "ANTHROPIC_API_KEY") || !stringSliceContains(claudeUnset, "CLAUDECODE") {
@@ -306,6 +314,20 @@ func TestSelectAgentReportsUnsetEnvForSelectedProviderOverrides(t *testing.T) {
 	}
 	if stringSliceContains(codexUnset, "ANTHROPIC_API_KEY") {
 		t.Fatalf("codex unset env must not include Claude/Anthropic keys: %v", codexUnset)
+	}
+	for _, key := range claudeKeys {
+		if !stringSliceContains(claudeUnset, key) {
+			t.Errorf("Claude recommendation did not remove %s", key)
+		}
+	}
+	for _, key := range codexKeys {
+		if !stringSliceContains(codexUnset, key) {
+			t.Errorf("Codex recommendation did not remove %s", key)
+		}
+	}
+	if stringSliceContains(claudeUnset, "HTTPS_PROXY") || stringSliceContains(codexUnset, "HTTPS_PROXY") ||
+		stringSliceContains(codexUnset, "CODEX_CA_CERTIFICATE") {
+		t.Fatal("network settings must not be recommended for removal")
 	}
 }
 

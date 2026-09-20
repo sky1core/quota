@@ -70,7 +70,7 @@ func TestModelCacheSeparatesAccountEnvironment(t *testing.T) {
 func TestSnapshotFreshness(t *testing.T) {
 	now := time.Now()
 	target := Target{Provider: "claude", Binary: "/bin/provider", ConfigDir: "/accounts/one"}
-	base := Snapshot{SchemaVersion: 1, Provider: target.Provider, Binary: target.Binary, ConfigDir: target.ConfigDir,
+	base := Snapshot{SchemaVersion: cacheSchemaVersion, Provider: target.Provider, Binary: target.Binary, ConfigDir: target.ConfigDir,
 		CLIVersion: "1.0", FetchedAt: now, Models: []Model{{ID: "example"}}}
 	for _, tc := range []struct {
 		name   string
@@ -86,7 +86,8 @@ func TestSnapshotFreshness(t *testing.T) {
 		{"account change", func(s *Snapshot) { s.ConfigDir = "/accounts/two" }, false},
 		{"binary change", func(s *Snapshot) { s.Binary = "/other/provider" }, false},
 		{"provider change", func(s *Snapshot) { s.Provider = "codex" }, false},
-		{"schema change", func(s *Snapshot) { s.SchemaVersion = 2 }, false},
+		{"previous environment policy", func(s *Snapshot) { s.SchemaVersion = 1 }, false},
+		{"schema change", func(s *Snapshot) { s.SchemaVersion = cacheSchemaVersion + 1 }, false},
 		{"empty models", func(s *Snapshot) { s.Models = nil }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -158,7 +159,7 @@ func TestUnavailableCLIDoesNotReuseOrReplaceCache(t *testing.T) {
 	dir := t.TempDir()
 	target := Target{Provider: "codex", Binary: filepath.Join(dir, "missing-cli"), ConfigDir: dir, Env: []string{}}
 	path := filepath.Join(dir, cacheKey(target)+".json")
-	snapshot := Snapshot{SchemaVersion: 1, Provider: target.Provider, Binary: target.Binary, ConfigDir: target.ConfigDir,
+	snapshot := Snapshot{SchemaVersion: cacheSchemaVersion, Provider: target.Provider, Binary: target.Binary, ConfigDir: target.ConfigDir,
 		CLIVersion: "1.0", FetchedAt: time.Now().UTC(), Models: []Model{{ID: "example"}}}
 	if err := writeSnapshot(path, snapshot); err != nil {
 		t.Fatal(err)

@@ -186,6 +186,37 @@ func TestRiskMatchRespectsRuleOrderAndExcept(t *testing.T) {
 	}
 }
 
+func TestKillZeroDoesNotMaskExistingRiskPolicies(t *testing.T) {
+	policy := Policy{
+		Version: PolicyVersion,
+		ID:      "old-kill-policy",
+		Enabled: true,
+		Rules: []Rule{
+			{ID: "deny-kill-multiple-pids", Effect: EffectDeny, Match: Match{Argv: exactArgs("kill"), Risk: riskKillMultiplePIDs}},
+			{ID: "deny-kill-multiple-pids-with-signal", Effect: EffectDeny, Match: Match{Argv: exactArgs("kill"), Risk: riskKillMultiplePIDsWithSignal}},
+			{ID: "deny-kill-negative-pid", Effect: EffectDeny, Match: Match{Argv: exactArgs("kill"), Risk: riskKillNegativePID}},
+			{ID: "deny-kill-negative-pid-after-end", Effect: EffectDeny, Match: Match{Argv: exactArgs("kill"), Risk: riskKillNegativePIDAfterEnd}},
+		},
+	}
+	tests := []struct {
+		command string
+		ruleID  string
+	}{
+		{`kill 12345 0`, "deny-kill-multiple-pids"},
+		{`kill -TERM 12345 0`, "deny-kill-multiple-pids-with-signal"},
+		{`kill -- 0 -12345`, "deny-kill-negative-pid-after-end"},
+	}
+	for _, tt := range tests {
+		decision, err := EvaluateCommand([]Policy{policy}, tt.command)
+		if err != nil {
+			t.Fatalf("%s: %v", tt.command, err)
+		}
+		if decision.Decision != DecisionDeny || decision.RuleID != tt.ruleID {
+			t.Fatalf("%s: decision = %+v, want deny %s", tt.command, decision, tt.ruleID)
+		}
+	}
+}
+
 func TestRiskMatchIsScopedToKillCommand(t *testing.T) {
 	policy := Policy{
 		Version: PolicyVersion,

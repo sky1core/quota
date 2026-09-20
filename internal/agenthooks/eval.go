@@ -417,7 +417,8 @@ func killRisk(argv []string) string {
 			operands = append(operands, arg)
 		}
 	}
-	positivePIDs := 0
+	pidOperands := 0
+	zeroPID := false
 	for _, operand := range operands {
 		if negativeIntArg(operand) {
 			if sawEnd {
@@ -426,17 +427,20 @@ func killRisk(argv []string) string {
 			return riskKillNegativePID
 		}
 		if zeroIntArg(operand) {
-			return riskKillZeroPID
+			zeroPID = true
 		}
 		if intArgRe.MatchString(operand) {
-			positivePIDs++
+			pidOperands++
 		}
 	}
-	if positivePIDs >= 2 {
+	if pidOperands >= 2 {
 		if sawSignal {
 			return riskKillMultiplePIDsWithSignal
 		}
 		return riskKillMultiplePIDs
+	}
+	if zeroPID {
+		return riskKillZeroPID
 	}
 	return ""
 }

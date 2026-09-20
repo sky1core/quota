@@ -250,7 +250,7 @@ func validateMatch(match Match) error {
 		}
 	}
 	switch match.Risk {
-	case "", riskKillMultiplePIDs, riskKillMultiplePIDsWithSignal, riskKillNegativePID, riskKillNegativePIDAfterEnd:
+	case "", riskKillMultiplePIDs, riskKillMultiplePIDsWithSignal, riskKillZeroPID, riskKillNegativePID, riskKillNegativePIDAfterEnd:
 	default:
 		return fmt.Errorf("unsupported risk %q", match.Risk)
 	}

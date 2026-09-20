@@ -42,7 +42,7 @@ func TestGitHubHistoryGuardPresetGroups(t *testing.T) {
 			"deny-dd-input", "deny-dd-output", "deny-sudo", "deny-doas", "deny-su", "deny-shutdown",
 			"deny-reboot", "deny-poweroff", "deny-halt", "deny-init-stop", "deny-init-reboot",
 			"deny-killall", "deny-pkill", "deny-kill-multiple-pids", "deny-kill-multiple-pids-with-signal",
-			"deny-kill-negative-pid", "deny-kill-negative-pid-after-end", "deny-chmod", "deny-chown",
+			"deny-kill-zero-pid", "deny-kill-negative-pid", "deny-kill-negative-pid-after-end", "deny-chmod", "deny-chown",
 			"deny-chgrp", "deny-gh-auth-token", "deny-gh-auth-status-token-long", "deny-gh-auth-status-token-short":
 			if rule.Group != PolicyGroupLocalSystemSecretSafety {
 				t.Fatalf("rule %s group = %q, want %q", rule.ID, rule.Group, PolicyGroupLocalSystemSecretSafety)

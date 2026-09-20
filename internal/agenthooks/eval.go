@@ -45,6 +45,7 @@ var intArgRe = regexp.MustCompile(`^[0-9]+$`)
 const (
 	riskKillMultiplePIDs           = "kill-multiple-pids"
 	riskKillMultiplePIDsWithSignal = "kill-multiple-pids-with-signal"
+	riskKillZeroPID                = "kill-zero-pid"
 	riskKillNegativePID            = "kill-negative-pid"
 	riskKillNegativePIDAfterEnd    = "kill-negative-pid-after-end"
 )
@@ -424,6 +425,9 @@ func killRisk(argv []string) string {
 			}
 			return riskKillNegativePID
 		}
+		if zeroIntArg(operand) {
+			return riskKillZeroPID
+		}
 		if intArgRe.MatchString(operand) {
 			positivePIDs++
 		}
@@ -439,6 +443,10 @@ func killRisk(argv []string) string {
 
 func negativeIntArg(arg string) bool {
 	return strings.HasPrefix(arg, "-") && len(arg) > 1 && intArgRe.MatchString(arg[1:])
+}
+
+func zeroIntArg(arg string) bool {
+	return intArgRe.MatchString(arg) && strings.TrimLeft(arg, "0") == ""
 }
 
 func EvaluateHookEvent(policies []Policy, input []byte) (Decision, error) {
@@ -555,7 +563,7 @@ func matchRisk(risk string, inv Invocation) bool {
 		return false
 	}
 	switch risk {
-	case riskKillMultiplePIDs, riskKillMultiplePIDsWithSignal, riskKillNegativePID, riskKillNegativePIDAfterEnd:
+	case riskKillMultiplePIDs, riskKillMultiplePIDsWithSignal, riskKillZeroPID, riskKillNegativePID, riskKillNegativePIDAfterEnd:
 		return killRisk(inv.Argv) == risk
 	default:
 		return false

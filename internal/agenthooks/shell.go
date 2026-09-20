@@ -1267,6 +1267,11 @@ func parseEnvWrapper(input commandInput) wrapperParse {
 }
 
 func envSplitString(value string, rest commandInput, scriptIndex int) wrapperParse {
+	for i := range rest.argv {
+		if rest.maySplitAt(i) {
+			return wrapperParse{undecidable: "env split-string trailing arguments cannot be determined"}
+		}
+	}
 	script := "env " + value
 	if len(rest.argv) > 0 {
 		script += " " + rest.shellQuote()
@@ -1589,7 +1594,8 @@ func ShellQuote(args []string) string {
 	return b.String()
 }
 
-func normalizeGitGlobalOptions(argv []string) ([]string, bool, string) {
+func normalizeGitGlobalOptions(input commandInput) (commandInput, bool, string) {
+	argv := input.argv
 	i := 1
 	for i < len(argv) {
 		arg := argv[i]
@@ -1602,30 +1608,39 @@ func normalizeGitGlobalOptions(argv []string) ([]string, bool, string) {
 		}
 		switch {
 		case gitGlobalFlagNoValue(arg):
+			if input.maySplitAt(i) {
+				return input, true, "git global option cannot be determined"
+			}
 			i++
 		case gitGlobalDispatchFlagHasInlineValue(arg):
-			return argv, true, "git execution path can change command dispatch"
+			return input, true, "git execution path can change command dispatch"
 		case gitGlobalConfigFlagHasInlineDispatchKey(arg):
-			return argv, true, "git config can change command dispatch"
+			return input, true, "git config can change command dispatch"
 		case gitGlobalFlagHasInlineValue(arg):
+			if input.maySplitAt(i) {
+				return input, true, "git global option value can change command position"
+			}
 			i++
 		case gitGlobalDispatchFlagTakesValue(arg):
-			return argv, true, "git execution path can change command dispatch"
+			return input, true, "git execution path can change command dispatch"
 		case gitGlobalConfigFlagTakesDispatchKeyValue(argv, i):
-			return argv, true, "git config can change command dispatch"
+			return input, true, "git config can change command dispatch"
 		case gitGlobalFlagTakesValue(arg):
 			if i+1 >= len(argv) {
-				return argv, true, "git global option requires a value"
+				return input, true, "git global option requires a value"
+			}
+			if input.maySplitAt(i) || input.maySplitAt(i+1) {
+				return input, true, "git global option value can change command position"
 			}
 			i += 2
 		default:
-			return argv, true, "unsupported git global option"
+			return input, true, "unsupported git global option"
 		}
 	}
 	if i <= 1 || i >= len(argv) {
-		return argv, false, ""
+		return input, false, ""
 	}
-	return append([]string{argv[0]}, argv[i:]...), false, ""
+	return input.withArgvPrefixAndTail([]string{argv[0]}, i), false, ""
 }
 
 func gitGlobalFlagNoValue(arg string) bool {

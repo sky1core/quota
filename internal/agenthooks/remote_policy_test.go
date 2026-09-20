@@ -51,6 +51,8 @@ func TestRemotePolicyBoundaryThroughHookEvents(t *testing.T) {
 		{`sh -c 'git push origin main' -- "$arg"`, false},
 		{`sh -c 'git log "$1"' -- "$branch"`, true},
 		{`sh -c "$script"`, false},
+		{`git -C "$ROOT" status`, true},
+		{`git -C $ROOT status`, false},
 		{`git for-each-repo --config=maintenance.repo status`, true},
 		{`git for-each-repo --config=maintenance.repo push origin main`, false},
 		{`git for-each-repo --config=maintenance.repo rebase --onto "$BASE" main`, true},
@@ -66,6 +68,8 @@ func TestRemotePolicyBoundaryThroughHookEvents(t *testing.T) {
 		{`git submodule foreach --help`, true},
 		{`git submodule foreach 'git push origin main'`, false},
 		{`git submodule foreach git push origin main`, false},
+		{`git submodule foreach sh -c 'git push origin main'`, false},
+		{`git submodule foreach echo 'git push origin main'`, true},
 		{`git submodule foreach --recursive git push origin main`, false},
 		{`git submodule foreach 'git push origin main; :' --help`, false},
 		{`git rebase --exec 'git status' main`, true},
@@ -124,6 +128,7 @@ func TestRemotePolicyBoundaryThroughHookEvents(t *testing.T) {
 		{`gh pr merge 12 --auto`, false},
 		{`gh pr close 12`, true},
 		{`gh pr close -- "$NUM"`, true},
+		{`gh pr close https://github.com/example/repo/pull/"$NUM"`, true},
 		{`gh pr close 12 "$FLAG"`, false},
 		{`gh pr close 12 --delete-branch`, false},
 		{`gh pr close 12 --"$FLAG"`, false},
@@ -148,6 +153,7 @@ func TestRemotePolicyBoundaryThroughHookEvents(t *testing.T) {
 		{`gh repo view owner/repo`, true},
 		{`gh repo deploy-key list --repo owner/repo`, true},
 		{`gh release create v1 --verify-tag --notes change`, true},
+		{`gh release create --verify-tag v1."$PATCH"`, true},
 		{`gh release create --verify-tag -- "$TAG"`, true},
 		{`gh release create v1 --notes change`, false},
 		{`gh release delete v1 --yes`, true},
@@ -166,6 +172,8 @@ func TestRemotePolicyBoundaryThroughHookEvents(t *testing.T) {
 		{`gh api repos/example/project/git/refs -X POST -f ref=refs/heads/main -f sha=abcdef`, false},
 		{`gh pr comment 12 -bprefix"$BODY"`, true},
 		{`env -S 'git log' "$BRANCH"`, true},
+		{`env -S 'gh pr close 12 --comment' "$BODY"`, true},
+		{`env -S 'gh pr close 12 --comment' $BODY`, false},
 		{`env LANG="$LANG" git status`, true},
 		{`env LANG=$LANG git status`, false},
 		{`env FOO="${arr[0]}" git status`, true},
@@ -209,6 +217,10 @@ func TestLocalAmendRestrictionRequiresSeparateRule(t *testing.T) {
 		got, err := EvaluateCommand([]Policy{policy, extra}, `git commit --amend -m change`)
 		if err != nil || got.Allowed == enabled || enabled && got.RuleID != "deny-local-amend" {
 			t.Fatalf("enabled=%v: %+v, %v", enabled, got, err)
+		}
+		got, err = EvaluateCommand([]Policy{policy, extra}, `git commit -m "$message"`)
+		if err != nil || !got.Allowed {
+			t.Fatalf("message value, enabled=%v: %+v, %v", enabled, got, err)
 		}
 		got, err = EvaluateCommand([]Policy{policy, extra}, `git commit "$options"`)
 		if err != nil || got.Allowed == enabled {

@@ -120,7 +120,7 @@ func evaluateInvocationWithoutAudit(policies []Policy, inv Invocation) Decision 
 			continue
 		}
 		for _, rule := range policy.Rules {
-			if (inv.command.flagError != "" || inv.Dynamic) && ruleNeedsFlags(rule) {
+			if (inv.command.flagError != "" || inv.command.flagsUncertain) && ruleNeedsFlags(rule) {
 				prefix := rule.Match
 				prefix.HasFlag = nil
 				if matchCommand(prefix, inv) {

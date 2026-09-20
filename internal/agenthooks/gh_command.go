@@ -104,11 +104,13 @@ func parseGhCommandInput(input commandInput) (parsedCommand, error) {
 	}
 	if parsedArgs.dynamicOptionSyntax {
 		parsed.flags = parsedArgs.flags
+		parsed.flagsUncertain = true
 		parsed.undecidable = "gh options cannot be determined"
 		return parsed, nil
 	}
 	if parsedArgs.dynamicOptions && !ghUnconditionalDataCommand(path) {
 		parsed.flags = parsedArgs.flags
+		parsed.flagsUncertain = true
 		parsed.undecidable = "gh arguments cannot be determined"
 		return parsed, nil
 	}
@@ -125,6 +127,7 @@ func parseGhCommandInput(input commandInput) (parsedCommand, error) {
 		}
 	}
 	parsed.flags = parsedArgs.flags
+	parsed.flagsUncertain = parsedArgs.dynamicOptions || parsedArgs.dynamicOptionSyntax
 	classifyGhCommand(&parsed, path, parsedArgs.operands, options)
 	return parsed, nil
 }

@@ -212,6 +212,7 @@ type parsedCommand struct {
 	undecidable      string
 	risk             string
 	flagError        string
+	flagsUncertain   bool
 	nestedScripts    []string
 	nestedArgv       []commandInput
 	allowDynamicArgs bool
@@ -261,6 +262,21 @@ func (input commandInput) from(i int) commandInput {
 	return out
 }
 
+func (input commandInput) withArgvPrefixAndTail(prefix []string, tail int) commandInput {
+	out := commandInput{argv: append(append([]string(nil), prefix...), input.argv[tail:]...)}
+	for i := range prefix {
+		out.dynamicArgs = append(out.dynamicArgs, input.dynamicAt(i))
+		out.splitArgs = append(out.splitArgs, input.maySplitAt(i))
+	}
+	if tail < len(input.dynamicArgs) {
+		out.dynamicArgs = append(out.dynamicArgs, input.dynamicArgs[tail:]...)
+	}
+	if tail < len(input.splitArgs) {
+		out.splitArgs = append(out.splitArgs, input.splitArgs[tail:]...)
+	}
+	return out
+}
+
 func (input commandInput) shellQuote() string {
 	parts := make([]string, len(input.argv))
 	for i, arg := range input.argv {
@@ -297,15 +313,16 @@ func parseCommandInput(input commandInput) parsedCommand {
 	}
 	switch name {
 	case "git":
-		parsed.argv[0] = name
+		input.argv = append([]string(nil), input.argv...)
+		input.argv[0] = name
 		var unknown bool
-		parsed.argv, unknown, parsed.undecidable = normalizeGitGlobalOptions(parsed.argv)
+		input, unknown, parsed.undecidable = normalizeGitGlobalOptions(input)
+		parsed.argv = append([]string(nil), input.argv...)
 		parsed.dynamic = unknown
 		if unknown || len(parsed.argv) < 2 {
 			return parsed
 		}
-		subcommandIndex := len(input.argv) - len(parsed.argv) + 1
-		if input.dynamicAt(subcommandIndex) {
+		if input.dynamicAt(1) {
 			parsed.undecidable = "git subcommand cannot be determined"
 			return parsed
 		}
@@ -317,10 +334,11 @@ func parseCommandInput(input commandInput) parsedCommand {
 		if options == nil {
 			options = gitDefaultSubcommandOptions
 		}
-		input = input.from(len(input.argv) - len(parsed.argv) + 2)
+		input = input.from(2)
 		stopAtOperand := parsed.argv[1] == "for-each-repo" || parsed.argv[1] == "bisect" || parsed.argv[1] == "submodule"
 		args, err := parseCommandArgumentInput("git "+parsed.argv[1], input, options, true, stopAtOperand)
 		parsed.flags = args.flags
+		parsed.flagsUncertain = args.dynamicOptions || args.dynamicOptionSyntax
 		if err != nil {
 			parsed.flagError = err.Error()
 		}
@@ -489,13 +507,18 @@ func classifyGitSubmoduleCommand(parsed *parsedCommand, args parsedArguments) {
 		parsed.undecidable = "git submodule foreach options cannot be determined"
 		return
 	}
-	scripts := foreach.operands.argv
-	if len(scripts) == 0 || scripts[0] == "" || foreach.operands.anyDynamic() {
+	scriptInput := foreach.operands
+	scripts := scriptInput.argv
+	if len(scripts) == 0 || scripts[0] == "" || scriptInput.anyDynamic() {
 		parsed.undecidable = "git submodule foreach script cannot be determined"
 		return
 	}
 	parsed.flagError = ""
-	parsed.nestedScripts = []string{strings.Join(scripts, " ")}
+	if len(scripts) == 1 {
+		parsed.nestedScripts = []string{scripts[0]}
+	} else {
+		parsed.nestedArgv = []commandInput{scriptInput}
+	}
 }
 
 func commandHasFlag(flags []commandFlag, names ...string) bool {
@@ -579,7 +602,7 @@ func parseCommandArgumentInput(command string, input commandInput, options map[s
 				}
 				break
 			}
-			dynamicOptions = dynamicOptions || input.dynamicAt(i) || input.maySplitAt(i)
+			dynamicOptions = dynamicOptions || input.maySplitAt(i) || arg == "" && input.dynamicAt(i)
 			operands = append(operands, arg)
 			operandDynamic = append(operandDynamic, input.dynamicAt(i))
 			operandSplit = append(operandSplit, input.maySplitAt(i))

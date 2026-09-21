@@ -1167,11 +1167,71 @@ body'`, true},
 		{"env -S 'git commit -m' 'subject\tbody'", true},
 		{`env -S 'git commit -m' 'subject --amend'`, true},
 		{`env -S '' FOO=bar git commit -m ''`, true},
+		{`env -S 'git push origin main # --help'`, false},
+		{`env -S 'LANG=C # comment' git push origin main`, false},
+		{"env -S 'git push origin main\r# --help'", false},
+		{"env -S 'git\vstatus'", true},
+		{`env -S '# comment' git status`, true},
+		{`env -S 'git log "#" x'`, true},
+		{`env -S 'git commit -m a#b'`, true},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
 			got, err := EvaluateCommand([]Policy{policy}, tc.command)
 			if err != nil || got.Allowed != tc.allowed {
 				t.Fatalf("decision = %+v, err=%v, want allowed=%v", got, err, tc.allowed)
+			}
+		})
+	}
+}
+
+func TestFlagUncertaintyHonorsDefiniteExcept(t *testing.T) {
+	amend := Policy{Version: 1, ID: "custom-amend", Enabled: true, Rules: []Rule{{
+		ID:     "deny-amend",
+		Effect: EffectDeny,
+		Match:  Match{Argv: exactArgs("git", "commit"), HasFlag: []string{"--amend"}},
+		Except: []Match{{Contains: []ArgPattern{{Exact: "approved"}}}},
+	}}}
+	tagList := Policy{Version: 1, ID: "custom-tag", Enabled: true, Rules: []Rule{{
+		ID:     "tag-list-only",
+		Effect: EffectDeny,
+		Match:  Match{Argv: exactArgs("git", "tag")},
+		Except: []Match{{HasFlag: []string{"--list"}}},
+	}}}
+	noAmend := Policy{Version: 1, ID: "custom-no-amend", Enabled: true, Rules: []Rule{{
+		ID:     "deny-amend",
+		Effect: EffectDeny,
+		Match:  Match{Argv: exactArgs("git", "commit"), HasFlag: []string{"--amend"}},
+		Except: []Match{{HasFlag: []string{"--no-amend"}}},
+	}}}
+	for _, tc := range []struct {
+		policy  Policy
+		command string
+		allowed bool
+	}{
+		{amend, `git commit "$OPTIONS" -m approved`, true},
+		{amend, `git commit "$OPTIONS" -m fix`, false},
+		{amend, `git commit --amend -m approved`, true},
+		{amend, `git commit --amend -m fix`, false},
+		{tagList, `git tag --list v1`, true},
+		{tagList, `git tag v1`, false},
+		// A dynamic option token can consume --list as its value (e.g.
+		// OPTIONS=-m), so a hasFlag except is never definite here.
+		{tagList, `git tag "$OPTIONS" --list v1`, false},
+		{tagList, `git tag --list "$PATTERN"`, false},
+		{tagList, `git tag "$PATTERN"`, false},
+		// A flag parse error truncates the collected flags, so a hasFlag
+		// except is not definite on that partial data either.
+		{noAmend, `git commit --no-amend --unknown-option --amend -m fix`, false},
+		{noAmend, `git commit --amend -m fix`, false},
+		{noAmend, `git commit --no-amend -m fix`, true},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			if err := ValidatePolicy(tc.policy); err != nil {
+				t.Fatal(err)
+			}
+			decision, err := EvaluateCommand([]Policy{tc.policy}, tc.command)
+			if err != nil || decision.Allowed != tc.allowed {
+				t.Fatalf("decision = %+v, err = %v, want allowed=%v", decision, err, tc.allowed)
 			}
 		})
 	}

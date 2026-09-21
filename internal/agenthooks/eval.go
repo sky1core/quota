@@ -111,14 +111,16 @@ func evaluateInvocationWithoutAudit(policies []Policy, inv Invocation) Decision 
 		}
 		for _, rule := range policy.Rules {
 			if inv.Dynamic {
+				// dynamicRuleUncertainty judges the whole rule (match, flag
+				// uncertainty, except precedence) in one pass; a second
+				// flag-only check here would re-block rules it excluded.
 				if reason, ok := dynamicRuleUncertainty(rule, inv); ok {
 					return Decision{Decision: DecisionDeny, Allowed: false, Reason: reason, Command: visibleArgv(inv.Argv, inv.Dynamic), source: decisionSourceUndecidable}
 				}
-			}
-			if (inv.command.flagError != "" || inv.command.flagsUncertain) && ruleNeedsFlags(rule) {
+			} else if (inv.command.flagError != "" || inv.command.flagsUncertain) && ruleNeedsFlags(rule) {
 				prefix := rule.Match
 				prefix.HasFlag = nil
-				if matchCommand(prefix, inv) {
+				if matchCommand(prefix, inv) && !definiteExcept(rule.Except, inv) {
 					reason := inv.command.flagError
 					if reason == "" {
 						reason = "dynamic arguments cannot be checked against configured flag restrictions"
@@ -163,11 +165,22 @@ func ruleNeedsFlags(rule Rule) bool {
 	return false
 }
 
-func dynamicRuleUncertainty(rule Rule, inv Invocation) (string, bool) {
-	for _, except := range rule.Except {
+// definiteExcept reports whether an except certainly excludes the command.
+// dynamicMatchPossible treats any flag-dependent match as uncertain while
+// flags are unparsed or dynamic, so a hasFlag except never counts as definite
+// on unreliable flag data.
+func definiteExcept(excepts []Match, inv Invocation) bool {
+	for _, except := range excepts {
 		if possible, reason := dynamicMatchPossible(except, inv); possible && reason == "" {
-			return "", false
+			return true
 		}
+	}
+	return false
+}
+
+func dynamicRuleUncertainty(rule Rule, inv Invocation) (string, bool) {
+	if definiteExcept(rule.Except, inv) {
+		return "", false
 	}
 	matchPossible, reason := dynamicMatchPossible(rule.Match, inv)
 	if reason != "" {
@@ -203,11 +216,13 @@ func dynamicMatchPossible(match Match, inv Invocation) (bool, string) {
 	}
 
 	for _, flag := range match.HasFlag {
-		if invocationHasFlag(inv, flag) {
+		if inv.command.flagError != "" || inv.command.flagsUncertain {
+			// A dynamic option token can consume a later flag as its value,
+			// so even a flag that parsed as present is not certain.
+			note("dynamic arguments cannot be checked against configured flag restrictions")
 			continue
 		}
-		if inv.command.flagError != "" || inv.command.flagsUncertain {
-			note("dynamic arguments cannot be checked against configured flag restrictions")
+		if invocationHasFlag(inv, flag) {
 			continue
 		}
 		return false, ""

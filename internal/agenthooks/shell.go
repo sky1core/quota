@@ -1361,12 +1361,17 @@ func splitEnvString(value string) ([]string, error) {
 		case r == '"' && !inSingle:
 			inDouble = !inDouble
 			have = true
-		case (r == ' ' || r == '\t' || r == '\n') && !inSingle && !inDouble:
+		case (r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f') && !inSingle && !inDouble:
 			if have {
 				args = append(args, b.String())
 				b.Reset()
 				have = false
 			}
+		case r == '#' && !have && !inSingle && !inDouble:
+			// env -S drops an argument starting with an unquoted '#' and the
+			// remainder of the string as a comment; quoted or mid-word '#'
+			// stays literal.
+			return args, nil
 		default:
 			b.WriteRune(r)
 			have = true

@@ -208,6 +208,7 @@ var ghRepoEditOptions = optionValues(
 
 type parsedCommand struct {
 	argv             []string
+	input            commandInput
 	flags            []commandFlag
 	undecidable      string
 	risk             string
@@ -236,6 +237,15 @@ func (input commandInput) maySplitAt(i int) bool {
 
 func (input commandInput) literalPrefixAt(i int) bool {
 	return !input.dynamicAt(i) || i >= 0 && i < len(input.literalPrefix) && input.literalPrefix[i]
+}
+
+func (input commandInput) clone() commandInput {
+	return commandInput{
+		argv:          append([]string(nil), input.argv...),
+		dynamicArgs:   append([]bool(nil), input.dynamicArgs...),
+		splitArgs:     append([]bool(nil), input.splitArgs...),
+		literalPrefix: append([]bool(nil), input.literalPrefix...),
+	}
 }
 
 func (input commandInput) anyDynamic() bool {
@@ -314,8 +324,9 @@ func parseCommand(argv []string) parsedCommand {
 }
 
 func parseCommandInput(input commandInput) parsedCommand {
+	input = input.clone()
 	argv := input.argv
-	parsed := parsedCommand{argv: append([]string(nil), argv...)}
+	parsed := parsedCommand{argv: append([]string(nil), argv...), input: input.clone()}
 	if len(argv) == 0 {
 		return parsed
 	}
@@ -341,6 +352,7 @@ func parseCommandInput(input commandInput) parsedCommand {
 		var unknown bool
 		input, unknown, parsed.undecidable = normalizeGitGlobalOptions(input)
 		parsed.argv = append([]string(nil), input.argv...)
+		parsed.input = input.clone()
 		parsed.dynamic = unknown
 		if unknown || len(parsed.argv) < 2 {
 			return parsed

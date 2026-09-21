@@ -115,9 +115,12 @@ func TestRemotePolicyBoundaryThroughHookEvents(t *testing.T) {
 		{`printf '%s\n' 'message --delete-branch' | xargs gh pr close 12 --comment`, false},
 		{`printf '%s\n' 'message --delete-branch' | xargs -n 1 gh pr close 12 --comment`, true},
 		{`printf '%s\n' 'message --delete-branch' | xargs -n 2 gh pr close 12 --comment`, false},
+		{`printf '%s\n' 'message --delete-branch' | xargs -n 1 -L 1 gh pr close 12 --comment`, false},
+		{`printf '%s\n' push | xargs -Istatus -n 1 git status`, false},
 		{`printf '%s\n' 'message --delete-branch' | xargs -I{} gh pr close 12 --comment={}`, true},
 		{`printf main | xargs -I{} git log '{}'`, true},
 		{`printf main | xargs -I{} sh -c 'git log "$1"' -- '{}'`, true},
+		{`printf '=victim\n' | xargs -I{} dd 'of{}.bin' count=0`, false},
 		{`trap -p`, true},
 		{`trap 'git push origin main' EXIT`, false},
 		{`trap "$script" EXIT`, false},
@@ -187,6 +190,7 @@ func TestRemotePolicyBoundaryThroughHookEvents(t *testing.T) {
 		{`env -S 'echo marker; git push origin main'`, true},
 		{`env -S 'sh -c "git push origin main"'`, false},
 		{`env -S 'kill ${PIDS}'`, false},
+		{`env -S 'git\_push origin main'`, false},
 		{`env -S 'gh pr close 12 --comment' "$BODY"`, true},
 		{`env -S 'gh pr close 12 --comment' $BODY`, false},
 		{`env LANG="$LANG" git status`, true},
@@ -204,7 +208,11 @@ func TestRemotePolicyBoundaryThroughHookEvents(t *testing.T) {
 		{`sudo git commit --amend -m change`, false},
 		{`git commit --amend -m change; rm file.txt`, false},
 		{`kill "$PID"`, false},
+		{`command kill "$PID"`, false},
 		{`kill 12345`, true},
+		{`command dd "$OPERAND"`, false},
+		{`dd "of$OUTPUT" count=0`, false},
+		{`dd "of${OUTPUT}.bin" count=0`, false},
 	} {
 		for _, key := range []string{"command", "cmd"} {
 			t.Run(key+"/"+tc.command, func(t *testing.T) {

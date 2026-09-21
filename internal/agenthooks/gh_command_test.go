@@ -265,6 +265,7 @@ func TestGhShellContract(t *testing.T) {
 		{`gh pr create --head topic --body "$BODY"`, true, ""},
 		{`gh pr comment 1 --body 'git push'`, true, ""},
 		{`gh --help pr merge`, true, ""},
+		{`gh --help pr merge 1 --help=false`, false, ""},
 		{`gh codespace ssh -- echo hello`, true, ""},
 		{`gh codespace ssh -- git push`, false, ""},
 		{`gh codespace ssh -- "$CMD"`, false, ""},

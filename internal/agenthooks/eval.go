@@ -164,28 +164,118 @@ func ruleNeedsFlags(rule Rule) bool {
 }
 
 func dynamicRuleUncertainty(rule Rule, inv Invocation) (string, bool) {
-	if matchNeedsRisk(rule.Match) && dynamicRiskApplies(rule.Match, inv) {
-		return "dynamic arguments cannot be checked against configured risk restrictions", true
-	}
 	for _, except := range rule.Except {
-		if matchNeedsRisk(except) && dynamicRiskApplies(except, inv) {
-			return "dynamic arguments cannot be checked against configured risk restrictions", true
+		if possible, reason := dynamicMatchPossible(except, inv); possible && reason == "" {
+			return "", false
 		}
 	}
-	if matchNeedsContains(rule.Match) && dynamicContainsApplies(rule.Match, inv) {
-		return "dynamic arguments cannot be checked against configured token restrictions", true
+	matchPossible, reason := dynamicMatchPossible(rule.Match, inv)
+	if reason != "" {
+		return reason, true
+	}
+	if !matchPossible {
+		return "", false
 	}
 	for _, except := range rule.Except {
-		if matchNeedsContains(except) && dynamicContainsApplies(except, inv) {
-			return "dynamic arguments cannot be checked against configured token restrictions", true
+		if _, reason := dynamicMatchPossible(except, inv); reason != "" {
+			return reason, true
 		}
 	}
 	return "", false
 }
 
-func matchNeedsRisk(match Match) bool { return match.Risk != "" }
+// dynamicMatchPossible reports whether match can still fire against inv, and an
+// uncertainty reason when firing cannot be statically confirmed.
+func dynamicMatchPossible(match Match, inv Invocation) (bool, string) {
+	reason := ""
+	note := func(r string) {
+		if reason == "" {
+			reason = r
+		}
+	}
 
-func matchNeedsContains(match Match) bool { return len(match.Contains) > 0 }
+	possible, uncertain := dynamicArgvMatchPossible(match, inv)
+	if !possible {
+		return false, ""
+	}
+	if uncertain {
+		note("dynamic arguments cannot be checked against configured argv restrictions")
+	}
+
+	for _, flag := range match.HasFlag {
+		if invocationHasFlag(inv, flag) {
+			continue
+		}
+		if inv.command.flagError != "" || inv.command.flagsUncertain {
+			note("dynamic arguments cannot be checked against configured flag restrictions")
+			continue
+		}
+		return false, ""
+	}
+
+	if match.Risk != "" && !matchRisk(match.Risk, inv) {
+		if dynamicRiskApplies(match, inv) {
+			note("dynamic arguments cannot be checked against configured risk restrictions")
+		} else {
+			return false, ""
+		}
+	}
+
+	for _, pattern := range match.Contains {
+		if argvContainsDefinite(inv, pattern) {
+			continue
+		}
+		if invHasDynamicArg(inv) {
+			note("dynamic arguments cannot be checked against configured token restrictions")
+			continue
+		}
+		return false, ""
+	}
+
+	return true, reason
+}
+
+// dynamicArgvMatchPossible reports whether a rule's Argv pattern can still fire
+// against inv, and whether that cannot be statically confirmed. Do not infer a
+// dynamic argument's possible values to eliminate the rule: a dynamic argument is
+// uncertain and only static arguments can rule the pattern out.
+func dynamicArgvMatchPossible(match Match, inv Invocation) (bool, bool) {
+	if len(match.Argv) == 0 {
+		return true, false
+	}
+	// A split-capable argument (unquoted expansion) can expand to zero or many
+	// words, so positions at or after it cannot be aligned: treat them as uncertain.
+	splitAt := -1
+	for i := range inv.Argv {
+		if inv.maySplitAt(i) {
+			splitAt = i
+			break
+		}
+	}
+	if splitAt < 0 {
+		if len(inv.Argv) < len(match.Argv) {
+			return false, false
+		}
+		if match.Exact && len(inv.Argv) != len(match.Argv) {
+			return false, false
+		}
+	}
+	uncertain := match.Exact && splitAt >= 0
+	for i, pattern := range match.Argv {
+		if splitAt >= 0 && splitAt <= i {
+			uncertain = true
+			continue
+		}
+		if inv.dynamicAt(i) {
+			uncertain = true
+			continue
+		}
+		if !matchArg(pattern, inv.Argv[i], i == 0) {
+			return false, false
+		}
+	}
+	return true, uncertain
+}
 
 func dynamicRiskApplies(match Match, inv Invocation) bool {
 	prefix := match
@@ -207,14 +297,21 @@ func dynamicRiskApplies(match Match, inv Invocation) bool {
 	return false
 }
 
-func dynamicContainsApplies(match Match, inv Invocation) bool {
-	prefix := match
-	prefix.Contains = nil
-	if !matchCommand(prefix, inv) {
-		return false
+func argvContainsDefinite(inv Invocation, pattern ArgPattern) bool {
+	for i, arg := range inv.Argv {
+		if inv.dynamicAt(i) {
+			continue
+		}
+		if matchArg(pattern, arg, i == 0) {
+			return true
+		}
 	}
+	return false
+}
+
+func invHasDynamicArg(inv Invocation) bool {
 	for i := range inv.Argv {
-		if inv.maySplitAt(i) || inv.dynamicAt(i) && !inv.literalPrefixAt(i) {
+		if inv.dynamicAt(i) || inv.maySplitAt(i) {
 			return true
 		}
 	}

@@ -220,6 +220,188 @@ func TestDynamicLocalRiskDependsOnActiveRules(t *testing.T) {
 	}
 }
 
+func TestDynamicRiskAndContainsBothChecked(t *testing.T) {
+	policy := Policy{
+		Version: PolicyVersion,
+		ID:      "risk-and-contains",
+		Enabled: true,
+		Rules: []Rule{{
+			ID:     "deny-remote-push-main",
+			Effect: EffectDeny,
+			Match: Match{
+				Argv:     exactArgs("git", "push"),
+				Risk:     PolicyGroupRemoteCodeRefMutation,
+				Contains: []ArgPattern{{Exact: "main"}},
+			},
+		}},
+	}
+
+	// Risk matches statically, but the Contains token is a dynamic argument that
+	// could resolve to "main". The rule's firing cannot be confirmed, so it must
+	// be undecidable rather than silently allowed.
+	decision, err := EvaluateCommand([]Policy{policy}, `git push origin "$REF"`)
+	if err != nil || decision.Allowed || decision.source != decisionSourceUndecidable {
+		t.Fatalf("dynamic contains: decision=%+v err=%v, want undecidable deny", decision, err)
+	}
+
+	// Risk matches, but the Contains token is definitely absent (no static match,
+	// no dynamic argument). The AND-term cannot hold, so the rule does not fire.
+	decision, err = EvaluateCommand([]Policy{policy}, `git push origin feature`)
+	if err != nil || !decision.Allowed {
+		t.Fatalf("contains absent: decision=%+v err=%v, want allow", decision, err)
+	}
+}
+
+func TestDynamicArgvLaterStaticMismatchEliminatesMatch(t *testing.T) {
+	policy := Policy{
+		Version: PolicyVersion,
+		ID:      "docker-stop-prod",
+		Enabled: true,
+		Rules: []Rule{{
+			ID:     "deny-docker-stop-prod",
+			Effect: EffectDeny,
+			Match:  Match{Argv: exactArgs("docker", "stop", "prod"), Exact: true},
+		}},
+	}
+
+	// A later static argument ("staging") definitively mismatches the rule, so the
+	// quoted (non-splitting) dynamic argument cannot make the rule fire: allow.
+	decision, err := EvaluateCommand([]Policy{policy}, `docker "$ACTION" staging`)
+	if err != nil || !decision.Allowed {
+		t.Fatalf("later static mismatch: decision=%+v err=%v, want allow", decision, err)
+	}
+
+	// Every static argument is consistent and the dynamic argument may resolve to
+	// "stop", so the rule may fire: undecidable.
+	decision, err = EvaluateCommand([]Policy{policy}, `docker "$ACTION" prod`)
+	if err != nil || decision.Allowed || decision.source != decisionSourceUndecidable {
+		t.Fatalf("dynamic command word: decision=%+v err=%v, want undecidable deny", decision, err)
+	}
+
+	// An unquoted expansion can split to zero words, so a later static token cannot
+	// be trusted to hold its position: the rule may still fire, so undecidable.
+	decision, err = EvaluateCommand([]Policy{policy}, `docker $E stop prod`)
+	if err != nil || decision.Allowed || decision.source != decisionSourceUndecidable {
+		t.Fatalf("split before static: decision=%+v err=%v, want undecidable deny", decision, err)
+	}
+}
+
+func TestGhLeadingOptionReachesFlags(t *testing.T) {
+	policy := Policy{
+		Version: PolicyVersion,
+		ID:      "gh-repo-flag",
+		Enabled: true,
+		Rules: []Rule{{
+			ID:     "deny-gh-pr-view-repo",
+			Effect: EffectDeny,
+			Match:  Match{Argv: exactArgs("gh", "pr", "view"), HasFlag: []string{"--repo"}},
+		}},
+	}
+
+	decision, err := EvaluateCommand([]Policy{policy}, `gh --repo o/r pr view 1`)
+	if err != nil || decision.Allowed {
+		t.Fatalf("leading --repo: decision=%+v err=%v, want deny", decision, err)
+	}
+
+	decision, err = EvaluateCommand([]Policy{policy}, `gh pr view 1`)
+	if err != nil || !decision.Allowed {
+		t.Fatalf("no --repo: decision=%+v err=%v, want allow", decision, err)
+	}
+}
+
+func TestDynamicExceptDoesNotApplyWhenRuleMatchMisses(t *testing.T) {
+	policy := Policy{
+		Version: PolicyVersion,
+		ID:      "push-only",
+		Enabled: true,
+		Rules: []Rule{{
+			ID:     "deny-push",
+			Effect: EffectDeny,
+			Match:  Match{Argv: exactArgs("git", "push")},
+			Except: []Match{{Contains: []ArgPattern{{Exact: "--dry-run"}}}},
+		}},
+	}
+	decision, err := EvaluateCommand([]Policy{policy}, `git commit -m "$message"`)
+	if err != nil || !decision.Allowed {
+		t.Fatalf("decision=%+v err=%v, want allow for unrelated rule", decision, err)
+	}
+
+	policy.Rules[0].Match = Match{Argv: exactArgs("git", "commit"), HasFlag: []string{"--amend"}}
+	decision, err = EvaluateCommand([]Policy{policy}, `git commit -m "$message"`)
+	if err != nil || !decision.Allowed {
+		t.Fatalf("flag miss: decision=%+v err=%v, want allow for unrelated except", decision, err)
+	}
+}
+
+func TestDynamicMetadataSurvivesNormalization(t *testing.T) {
+	policy := Policy{
+		Version: PolicyVersion,
+		ID:      "push-main",
+		Enabled: true,
+		Rules: []Rule{{
+			ID:     "deny-main-push",
+			Effect: EffectDeny,
+			Match:  Match{Argv: exactArgs("git", "push"), Contains: []ArgPattern{{Exact: "main"}}},
+		}},
+	}
+	decision, err := EvaluateCommand([]Policy{policy}, `command git -C . push origin "$REF"`)
+	if err != nil || decision.Allowed || decision.source != decisionSourceUndecidable {
+		t.Fatalf("decision=%+v err=%v, want undecidable deny for normalized dynamic ref", decision, err)
+	}
+}
+
+func TestDynamicExceptCannotUseTentativeExactMatch(t *testing.T) {
+	policy := Policy{
+		Version: PolicyVersion,
+		ID:      "push-except",
+		Enabled: true,
+		Rules: []Rule{{
+			ID:     "deny-push",
+			Effect: EffectDeny,
+			Match:  Match{Argv: exactArgs("git", "push")},
+			Except: []Match{{Contains: []ArgPattern{{Exact: "refs/heads/safe"}}}},
+		}},
+	}
+	decision, err := EvaluateCommand([]Policy{policy}, `git push origin "refs/heads/safe${SUFFIX}"`)
+	if err != nil || decision.Allowed || decision.source != decisionSourceUndecidable {
+		t.Fatalf("decision=%+v err=%v, want undecidable deny for dynamic except token", decision, err)
+	}
+
+	policy.Rules[0].Except = []Match{{Argv: exactArgs("git", "push", "origin", "refs/heads/safe"), Exact: true}}
+	decision, err = EvaluateCommand([]Policy{policy}, `git push origin "refs/heads/safe${SUFFIX}"`)
+	if err != nil || decision.Allowed || decision.source != decisionSourceUndecidable {
+		t.Fatalf("argv except: decision=%+v err=%v, want undecidable deny", decision, err)
+	}
+
+	policy.Rules[0].Except = []Match{{Contains: []ArgPattern{{Type: "int"}}}}
+	decision, err = EvaluateCommand([]Policy{policy}, `git push origin "123${SUFFIX}"`)
+	if err != nil || decision.Allowed || decision.source != decisionSourceUndecidable {
+		t.Fatalf("int except: decision=%+v err=%v, want undecidable deny", decision, err)
+	}
+}
+
+func TestDynamicMatchWithStaticExceptExcluded(t *testing.T) {
+	policy := Policy{
+		Version: PolicyVersion,
+		ID:      "force-push-except",
+		Enabled: true,
+		Rules: []Rule{{
+			ID:     "deny-force-push",
+			Effect: EffectDeny,
+			Match:  Match{Argv: exactArgs("git", "push"), Contains: []ArgPattern{{Exact: "--force"}}},
+			Except: []Match{{Contains: []ArgPattern{{Exact: "--dry-run"}}}},
+		}},
+	}
+
+	// The match is dynamically uncertain ($X could be "--force"), but the except
+	// token "--dry-run" is statically present and definitely excludes the rule, so
+	// it cannot fire: allow rather than undecidable over-block.
+	decision, err := EvaluateCommand([]Policy{policy}, `git push "$X" --dry-run`)
+	if err != nil || !decision.Allowed {
+		t.Fatalf("static except with uncertain match: decision=%+v err=%v, want allow", decision, err)
+	}
+}
+
 func TestKillZeroDoesNotMaskExistingRiskPolicies(t *testing.T) {
 	policy := Policy{
 		Version: PolicyVersion,

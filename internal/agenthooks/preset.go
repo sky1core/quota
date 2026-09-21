@@ -380,7 +380,7 @@ func githubHistoryGuardPreset() Policy {
 			{Name: "deny fdisk", Command: `fdisk /dev/disk9`, Want: DecisionDeny, RuleID: "deny-fdisk"},
 			{Name: "deny dd input", Command: `dd if=/dev/disk9 of=image.bin`, Want: DecisionDeny, RuleID: "deny-dd-input"},
 			{Name: "deny dd output", Command: `dd of=/dev/disk9 bs=1m`, Want: DecisionDeny, RuleID: "deny-dd-output"},
-			{Name: "deny dynamic dd output", Command: `dd of="$TARGET" count=0`, Want: DecisionDeny, RuleID: "deny-dd-output"},
+			{Name: "deny dynamic dd output", Command: `dd of="$TARGET" count=0`, Want: DecisionDeny, Source: string(decisionSourceUndecidable)},
 			{Name: "deny sudo", Command: `sudo git status`, Want: DecisionDeny, RuleID: "deny-sudo"},
 			{Name: "deny command sudo", Command: `command sudo git status`, Want: DecisionDeny, RuleID: "deny-sudo"},
 			{Name: "deny sudo empty nested shell", Command: `sudo sh -c ''`, Want: DecisionDeny, RuleID: "deny-sudo"},

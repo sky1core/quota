@@ -30,10 +30,6 @@ func (inv Invocation) maySplitAt(i int) bool {
 	return i >= 0 && i < len(inv.splitArgs) && inv.splitArgs[i]
 }
 
-func (inv Invocation) literalPrefixAt(i int) bool {
-	return !inv.dynamicAt(i) || i >= 0 && i < len(inv.literalPrefix) && inv.literalPrefix[i]
-}
-
 func ParseShellInvocations(command string) ([]Invocation, error) {
 	return parseShellInvocations(command, 0, "")
 }
@@ -150,6 +146,9 @@ func expandInvocation(inv Invocation, assigns []*syntax.Assign, depth int, inher
 	}
 	parsed := parseCommandInput(input)
 	norm := parsed.argv
+	inv.dynamicArgs = append([]bool(nil), parsed.input.dynamicArgs...)
+	inv.splitArgs = append([]bool(nil), parsed.input.splitArgs...)
+	inv.literalPrefix = append([]bool(nil), parsed.input.literalPrefix...)
 	if inv.Dynamic && len(norm) > 1 && commandName(norm[0]) == "trap" && norm[1] == "" {
 		parsed.undecidable = "trap script cannot be determined"
 	}
@@ -177,7 +176,7 @@ func expandInvocation(inv Invocation, assigns []*syntax.Assign, depth int, inher
 	script, hasScript := wrappers.script, wrappers.hasScript
 	if len(norm) > 0 && isShellCommand(norm[0]) {
 		shell := parseShellInterpreter(input)
-		if shell.hasCommand && wrappers.consumed+shell.scriptIndex < len(inv.dynamicArgs) && inv.dynamicArgs[wrappers.consumed+shell.scriptIndex] {
+		if shell.hasCommand && input.dynamicAt(shell.scriptIndex) {
 			dynamicCommand, dynamicReason = true, "shell script cannot be determined"
 		}
 		canExecute := shell.canExecute()
@@ -405,13 +404,17 @@ func commandWord(word *syntax.Word) (string, bool, bool, bool, bool) {
 	}
 	text := b.String()
 	literalPrefix := firstDynamicOffset > 0
+	prefix := ""
+	if literalPrefix {
+		prefix = text[:firstDynamicOffset]
+	}
 	if eq := strings.IndexByte(text, '='); eq >= 0 && firstDynamicOffset <= eq {
 		return text[eq:], true, maySplit, false, true
 	}
 	if strings.HasPrefix(text, "-") && firstDynamicOffset <= 1 {
 		return "-?", true, maySplit, literalPrefix, true
 	}
-	return text, true, maySplit, literalPrefix, true
+	return prefix, true, maySplit, literalPrefix, true
 }
 
 func appendCommandWordPart(b *strings.Builder, part syntax.WordPart, quoted bool, firstDynamicOffset *int) (bool, bool) {
@@ -1326,7 +1329,7 @@ func envSplitString(value string, dynamic bool, rest commandInput, scriptIndex i
 	if dynamic {
 		return wrapperParse{undecidable: "env split-string cannot be determined"}
 	}
-	if strings.Contains(value, "$") {
+	if strings.ContainsAny(value, `\$`) {
 		return wrapperParse{undecidable: "env split-string expansion cannot be determined"}
 	}
 	args, err := splitEnvString(value)

@@ -98,7 +98,14 @@ func parseProcessWrapperInput(input commandInput) (commandInput, error) {
 				if err != nil || n < 1 {
 					return input, fmt.Errorf("%s option %s requires a positive integer value", command, name)
 				}
+				if replacement != "" && n != 1 {
+					return input, fmt.Errorf("%s option %s conflicts with replacement mode", command, name)
+				}
 				xargsMaxArgs = n
+			}
+			if command == "xargs" && name == "--max-lines" {
+				replacement = ""
+				xargsMaxArgs = 0
 			}
 		} else {
 			for j := 1; j < len(arg); j++ {
@@ -141,7 +148,14 @@ func parseProcessWrapperInput(input commandInput) (commandInput, error) {
 						if err != nil || n < 1 {
 							return input, fmt.Errorf("%s option %s requires a positive integer value", command, name)
 						}
+						if replacement != "" && n != 1 {
+							return input, fmt.Errorf("%s option %s conflicts with replacement mode", command, name)
+						}
 						xargsMaxArgs = n
+					}
+					if command == "xargs" && name == "-L" {
+						replacement = ""
+						xargsMaxArgs = 0
 					}
 					break
 				}
@@ -172,7 +186,7 @@ func parseProcessWrapperInput(input commandInput) (commandInput, error) {
 		for i, arg := range rest.argv {
 			index := strings.Index(arg, replacement)
 			if index >= 0 {
-				rest.argv[i] = strings.ReplaceAll(arg, replacement, "")
+				rest.argv[i] = arg[:index]
 				rest.dynamicArgs[i] = true
 				if i < len(rest.splitArgs) {
 					rest.splitArgs[i] = false

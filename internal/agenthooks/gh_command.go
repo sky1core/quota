@@ -51,12 +51,6 @@ func parseGhCommandInput(input commandInput) (parsedCommand, error) {
 		args = append(args[:index], args[index+1:]...)
 		indices = append(indices[:index], indices[index+1:]...)
 	}
-	parseInput := commandInput{argv: append([]string(nil), args...), dynamicArgs: make([]bool, len(args)), splitArgs: make([]bool, len(args)), literalPrefix: make([]bool, len(args))}
-	for i, index := range indices {
-		parseInput.dynamicArgs[i] = input.dynamicAt(index)
-		parseInput.splitArgs[i] = input.maySplitAt(index)
-		parseInput.literalPrefix[i] = input.literalPrefixAt(index)
-	}
 	leadingEnd := 1
 	for leadingEnd < firstCommand {
 		end, ok := ghOptionEnd(argv, leadingEnd, ghLeadingOptions)
@@ -64,6 +58,12 @@ func parseGhCommandInput(input commandInput) (parsedCommand, error) {
 			break
 		}
 		leadingEnd = end
+	}
+	parseInput := commandInput{argv: append([]string(nil), args...), dynamicArgs: make([]bool, len(args)), splitArgs: make([]bool, len(args)), literalPrefix: make([]bool, len(args))}
+	for i, index := range indices {
+		parseInput.dynamicArgs[i] = input.dynamicAt(index)
+		parseInput.splitArgs[i] = input.maySplitAt(index)
+		parseInput.literalPrefix[i] = input.literalPrefixAt(index)
 	}
 	if len(command) > 0 {
 		kept := args[:0]
@@ -80,7 +80,16 @@ func parseGhCommandInput(input commandInput) (parsedCommand, error) {
 	path := strings.Join(command, " ")
 	out := append([]string{"gh"}, command...)
 	out = append(out, args...)
-	parsed := parsedCommand{argv: out}
+	parsedInput := commandInput{argv: append([]string(nil), out...), dynamicArgs: make([]bool, len(out)), splitArgs: make([]bool, len(out)), literalPrefix: make([]bool, len(out))}
+	for i := range parsedInput.literalPrefix {
+		parsedInput.literalPrefix[i] = true
+	}
+	for i, index := range indices {
+		parsedInput.dynamicArgs[1+len(command)+i] = input.dynamicAt(index)
+		parsedInput.splitArgs[1+len(command)+i] = input.maySplitAt(index)
+		parsedInput.literalPrefix[1+len(command)+i] = input.literalPrefixAt(index)
+	}
+	parsed := parsedCommand{argv: out, input: parsedInput}
 	if path == "extension exec" {
 		parsed.flags = literalCommandFlags(args)
 		parsed.undecidable = "gh extension execution content is not statically available"

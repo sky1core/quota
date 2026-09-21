@@ -212,6 +212,7 @@ type parsedCommand struct {
 	flags            []commandFlag
 	undecidable      string
 	risk             string
+	riskScope        string
 	flagError        string
 	flagsUncertain   bool
 	nestedScripts    []string
@@ -441,6 +442,9 @@ func classifyGitCommand(parsed *parsedCommand, args parsedArguments) {
 	switch argv[1] {
 	case "push", "send-pack", "http-push":
 		parsed.allowDynamicArgs = false
+		// Remote-write family: the risk scope holds even when --dry-run downgrades
+		// the confirmed risk, because a dynamic argument could re-enable the write.
+		parsed.riskScope = PolicyGroupRemoteCodeRefMutation
 		if commandHasFlag(parsed.flags, "--dry-run", "-n") && parsed.flagError == "" {
 			if gitPushHasCustomReceiveProgram(parsed.flags) {
 				parsed.undecidable = "git push receiver execution content is not visible to policy evaluator"

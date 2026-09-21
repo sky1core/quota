@@ -277,14 +277,13 @@ func dynamicArgvMatchPossible(match Match, inv Invocation) (bool, bool) {
 	return true, uncertain
 }
 
+// dynamicRiskApplies reports whether a rule's Risk restriction may still hold for
+// a dynamic inv. Do not re-match the rule's Argv/Contains/HasFlag here: those are
+// separate dimensions the caller evaluates, and re-matching them lets a dynamic
+// token wrongly eliminate the rule.
 func dynamicRiskApplies(match Match, inv Invocation) bool {
-	prefix := match
-	prefix.Risk = ""
-	if !matchCommand(prefix, inv) {
-		return false
-	}
 	if match.Risk == PolicyGroupRemoteCodeRefMutation {
-		return !inv.command.allowDynamicArgs
+		return inv.command.riskScope == PolicyGroupRemoteCodeRefMutation && !inv.command.allowDynamicArgs
 	}
 	if len(inv.Argv) == 0 || commandName(inv.Argv[0]) != "kill" {
 		return false

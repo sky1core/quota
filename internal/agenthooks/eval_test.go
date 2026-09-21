@@ -402,6 +402,74 @@ func TestDynamicMatchWithStaticExceptExcluded(t *testing.T) {
 	}
 }
 
+func TestDynamicRiskWithDynamicContainsOrFlagUndecidable(t *testing.T) {
+	// A rule that restricts a risk together with a Contains token or HasFlag must
+	// not be eliminated just because the token is not statically present: risk
+	// applicability is judged from the command's own scope, and a push-family
+	// command with a dynamic argument keeps the risk uncertain.
+	contains := Policy{
+		Version: PolicyVersion, ID: "risk-contains", Enabled: true,
+		Rules: []Rule{{
+			ID:     "deny-push-main",
+			Effect: EffectDeny,
+			Match:  Match{Argv: exactArgs("git", "push"), Risk: PolicyGroupRemoteCodeRefMutation, Contains: []ArgPattern{{Exact: "main"}}},
+		}},
+	}
+	// git push --dry-run reads as non-mutating, but an unquoted expansion could add
+	// "--no-dry-run" and "main" and make it a real push to a protected ref.
+	decision, err := EvaluateCommand([]Policy{contains}, `git push --dry-run $ARGS`)
+	if err != nil || decision.Allowed || decision.source != decisionSourceUndecidable {
+		t.Fatalf("risk+contains: decision=%+v err=%v, want undecidable deny", decision, err)
+	}
+
+	hasFlag := Policy{
+		Version: PolicyVersion, ID: "risk-hasflag", Enabled: true,
+		Rules: []Rule{{
+			ID:     "deny-force-push",
+			Effect: EffectDeny,
+			Match:  Match{Argv: exactArgs("git", "push"), Risk: PolicyGroupRemoteCodeRefMutation, HasFlag: []string{"--force"}},
+		}},
+	}
+	decision, err = EvaluateCommand([]Policy{hasFlag}, `git push --dry-run $ARGS`)
+	if err != nil || decision.Allowed || decision.source != decisionSourceUndecidable {
+		t.Fatalf("risk+hasflag: decision=%+v err=%v, want undecidable deny", decision, err)
+	}
+
+	// A dynamic argument in a later Argv position must not be compared as a
+	// placeholder and eliminate the rule: risk applicability is judged from the
+	// command scope, so the risk stays uncertain.
+	argvPos := Policy{
+		Version: PolicyVersion, ID: "risk-argv", Enabled: true,
+		Rules: []Rule{{
+			ID:     "deny-push-origin",
+			Effect: EffectDeny,
+			Match:  Match{Argv: []ArgPattern{{Exact: "git"}, {Exact: "push"}, {Glob: "*"}, {Exact: "origin"}}, Risk: PolicyGroupRemoteCodeRefMutation},
+		}},
+	}
+	decision, err = EvaluateCommand([]Policy{argvPos}, `git push --dry-run $ARGS`)
+	if err != nil || decision.Allowed || decision.source != decisionSourceUndecidable {
+		t.Fatalf("risk+dynamic argv: decision=%+v err=%v, want undecidable deny", decision, err)
+	}
+
+	// Risk applicability comes from the command's own scope, so a rule with no Argv
+	// that restricts the remote risk must not block commands that cannot carry it.
+	// A dynamic argument on a non-push command is allowed, not over-blocked.
+	openScope := Policy{
+		Version: PolicyVersion, ID: "risk-open", Enabled: true,
+		Rules: []Rule{{
+			ID:     "deny-remote-main",
+			Effect: EffectDeny,
+			Match:  Match{Risk: PolicyGroupRemoteCodeRefMutation, Contains: []ArgPattern{{Exact: "main"}}},
+		}},
+	}
+	for _, command := range []string{`echo "$X"`, `git log "$BRANCH"`} {
+		decision, err = EvaluateCommand([]Policy{openScope}, command)
+		if err != nil || !decision.Allowed {
+			t.Fatalf("non-remote under remote risk: %s decision=%+v err=%v, want allow", command, decision, err)
+		}
+	}
+}
+
 func TestKillZeroDoesNotMaskExistingRiskPolicies(t *testing.T) {
 	policy := Policy{
 		Version: PolicyVersion,

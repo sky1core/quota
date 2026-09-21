@@ -27,6 +27,7 @@ func parseProcessWrapperInput(input commandInput) (commandInput, error) {
 	command := commandName(argv[0])
 	options := processWrapperOptions[command]
 	replacement := ""
+	xargsMaxArgs := 0
 	i := 1
 	for i < len(argv) {
 		arg := argv[i]
@@ -39,9 +40,15 @@ func parseProcessWrapperInput(input commandInput) (commandInput, error) {
 		}
 		if command == "nice" {
 			if _, err := strconv.Atoi(arg[1:]); err == nil {
+				if input.dynamicAt(i) || input.maySplitAt(i) {
+					return input, fmt.Errorf("%s execution options cannot be determined", command)
+				}
 				i++
 				continue
 			}
+		}
+		if input.maySplitAt(i) || input.dynamicAt(i) && !input.literalPrefixAt(i) {
+			return input, fmt.Errorf("%s execution options cannot be determined", command)
 		}
 		if strings.HasPrefix(arg, "--") {
 			name, _, attached := strings.Cut(arg, "=")
@@ -49,8 +56,14 @@ func parseProcessWrapperInput(input commandInput) (commandInput, error) {
 			if err != nil {
 				return input, fmt.Errorf("%s: %w", command, err)
 			}
+			if input.dynamicAt(i) && !attached {
+				return input, fmt.Errorf("%s execution options cannot be determined", command)
+			}
 			if attached && value == optionNoValue {
 				return input, fmt.Errorf("%s option %s does not accept a value", command, name)
+			}
+			if command == "xargs" && attached && value == optionRequiredValue && input.dynamicAt(i) {
+				return input, fmt.Errorf("%s execution options cannot be determined", command)
 			}
 			if name == "--help" || name == "--version" {
 				return input, nil
@@ -60,6 +73,12 @@ func parseProcessWrapperInput(input commandInput) (commandInput, error) {
 				if i == len(argv) {
 					return input, fmt.Errorf("%s option %s requires a value", command, name)
 				}
+				if input.maySplitAt(i) {
+					return input, fmt.Errorf("%s option %s value can change command position", command, name)
+				}
+				if command == "xargs" && input.dynamicAt(i) {
+					return input, fmt.Errorf("%s execution options cannot be determined", command)
+				}
 			}
 			if command == "xargs" && name == "--replace" {
 				if attached {
@@ -68,6 +87,19 @@ func parseProcessWrapperInput(input commandInput) (commandInput, error) {
 					replacement = argv[i]
 				}
 			}
+			if command == "xargs" && name == "--max-args" {
+				valueText := ""
+				if attached {
+					_, valueText, _ = strings.Cut(arg, "=")
+				} else {
+					valueText = argv[i]
+				}
+				n, err := strconv.Atoi(valueText)
+				if err != nil || n < 1 {
+					return input, fmt.Errorf("%s option %s requires a positive integer value", command, name)
+				}
+				xargsMaxArgs = n
+			}
 		} else {
 			for j := 1; j < len(arg); j++ {
 				name := "-" + string(arg[j])
@@ -75,19 +107,41 @@ func parseProcessWrapperInput(input commandInput) (commandInput, error) {
 				if !ok {
 					return input, fmt.Errorf("unsupported %s option %s", command, name)
 				}
+				if input.dynamicAt(i) && value != optionRequiredValue {
+					return input, fmt.Errorf("%s execution options cannot be determined", command)
+				}
 				if value == optionRequiredValue {
+					valueText := ""
 					if j == len(arg)-1 {
+						if input.dynamicAt(i) {
+							return input, fmt.Errorf("%s execution options cannot be determined", command)
+						}
 						i++
 						if i == len(argv) {
 							return input, fmt.Errorf("%s option %s requires a value", command, name)
 						}
+						if input.maySplitAt(i) {
+							return input, fmt.Errorf("%s option %s value can change command position", command, name)
+						}
+						if command == "xargs" && input.dynamicAt(i) {
+							return input, fmt.Errorf("%s execution options cannot be determined", command)
+						}
+						valueText = argv[i]
+					} else {
+						valueText = arg[j+1:]
+						if input.dynamicAt(i) {
+							return input, fmt.Errorf("%s execution options cannot be determined", command)
+						}
 					}
 					if command == "xargs" && name == "-I" {
-						if j == len(arg)-1 {
-							replacement = argv[i]
-						} else {
-							replacement = arg[j+1:]
+						replacement = valueText
+					}
+					if command == "xargs" && name == "-n" {
+						n, err := strconv.Atoi(valueText)
+						if err != nil || n < 1 {
+							return input, fmt.Errorf("%s option %s requires a positive integer value", command, name)
 						}
+						xargsMaxArgs = n
 					}
 					break
 				}
@@ -96,15 +150,13 @@ func parseProcessWrapperInput(input commandInput) (commandInput, error) {
 		i++
 	}
 	if command == "timeout" {
+		if i < len(argv) && input.maySplitAt(i) {
+			return input, fmt.Errorf("%s duration can change command position", command)
+		}
 		i++
 	}
 	if i >= len(argv) {
 		return input, nil
-	}
-	for j := 1; j < i; j++ {
-		if input.dynamicAt(j) {
-			return input, fmt.Errorf("%s execution options cannot be determined", command)
-		}
 	}
 	rest := commandInput{argv: append([]string(nil), argv[i:]...), dynamicArgs: make([]bool, len(argv)-i)}
 	for j := range rest.argv {
@@ -118,17 +170,22 @@ func parseProcessWrapperInput(input commandInput) (commandInput, error) {
 	}
 	if replacement != "" {
 		for i, arg := range rest.argv {
-			if strings.Contains(arg, replacement) {
-				rest.argv[i] = ""
+			index := strings.Index(arg, replacement)
+			if index >= 0 {
+				rest.argv[i] = strings.ReplaceAll(arg, replacement, "")
 				rest.dynamicArgs[i] = true
+				if i < len(rest.splitArgs) {
+					rest.splitArgs[i] = false
+				}
 				if i < len(rest.literalPrefix) {
-					rest.literalPrefix[i] = false
+					rest.literalPrefix[i] = index > 0
 				}
 			}
 		}
 	} else if command == "xargs" {
 		rest.argv = append(rest.argv, "")
 		rest.dynamicArgs = append(rest.dynamicArgs, true)
+		rest.splitArgs = append(rest.splitArgs, xargsMaxArgs != 1)
 		rest.literalPrefix = append(rest.literalPrefix, false)
 	}
 	return rest, nil

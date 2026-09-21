@@ -105,21 +105,16 @@ func evaluateInvocationWithoutAudit(policies []Policy, inv Invocation) Decision 
 			source:   decisionSourceUndecidable,
 		}
 	}
-	if inv.Dynamic && protectedInvocation(inv) && !inv.command.allowDynamicArgs {
-		return Decision{
-			Decision: DecisionDeny,
-			Allowed:  false,
-			Reason:   "dynamic arguments for protected command are blocked",
-			Command:  visibleArgv(inv.Argv, inv.Dynamic),
-			source:   decisionSourceUndecidable,
-		}
-	}
-
 	for _, policy := range policies {
 		if !policy.Enabled {
 			continue
 		}
 		for _, rule := range policy.Rules {
+			if inv.Dynamic {
+				if reason, ok := dynamicRuleUncertainty(rule, inv); ok {
+					return Decision{Decision: DecisionDeny, Allowed: false, Reason: reason, Command: visibleArgv(inv.Argv, inv.Dynamic), source: decisionSourceUndecidable}
+				}
+			}
 			if (inv.command.flagError != "" || inv.command.flagsUncertain) && ruleNeedsFlags(rule) {
 				prefix := rule.Match
 				prefix.HasFlag = nil
@@ -162,6 +157,64 @@ func ruleNeedsFlags(rule Rule) bool {
 	}
 	for _, except := range rule.Except {
 		if len(except.HasFlag) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func dynamicRuleUncertainty(rule Rule, inv Invocation) (string, bool) {
+	if matchNeedsRisk(rule.Match) && dynamicRiskApplies(rule.Match, inv) {
+		return "dynamic arguments cannot be checked against configured risk restrictions", true
+	}
+	for _, except := range rule.Except {
+		if matchNeedsRisk(except) && dynamicRiskApplies(except, inv) {
+			return "dynamic arguments cannot be checked against configured risk restrictions", true
+		}
+	}
+	if matchNeedsContains(rule.Match) && dynamicContainsApplies(rule.Match, inv) {
+		return "dynamic arguments cannot be checked against configured token restrictions", true
+	}
+	for _, except := range rule.Except {
+		if matchNeedsContains(except) && dynamicContainsApplies(except, inv) {
+			return "dynamic arguments cannot be checked against configured token restrictions", true
+		}
+	}
+	return "", false
+}
+
+func matchNeedsRisk(match Match) bool { return match.Risk != "" }
+
+func matchNeedsContains(match Match) bool { return len(match.Contains) > 0 }
+
+func dynamicRiskApplies(match Match, inv Invocation) bool {
+	prefix := match
+	prefix.Risk = ""
+	if !matchCommand(prefix, inv) {
+		return false
+	}
+	if match.Risk == PolicyGroupRemoteCodeRefMutation {
+		return !inv.command.allowDynamicArgs
+	}
+	if len(inv.Argv) == 0 || commandName(inv.Argv[0]) != "kill" {
+		return false
+	}
+	for i := 1; i < len(inv.Argv); i++ {
+		if inv.dynamicAt(i) || inv.maySplitAt(i) {
+			return true
+		}
+	}
+	return false
+}
+
+func dynamicContainsApplies(match Match, inv Invocation) bool {
+	prefix := match
+	prefix.Contains = nil
+	if !matchCommand(prefix, inv) {
+		return false
+	}
+	for i := range inv.Argv {
+		if inv.maySplitAt(i) || inv.dynamicAt(i) && !inv.literalPrefixAt(i) {
 			return true
 		}
 	}

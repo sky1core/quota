@@ -134,7 +134,7 @@ func TestGlobalAndWrapperNormalizationFailsClosed(t *testing.T) {
 		`nohup git --unknown=value push`, `timeout --unknown 5 git push`, `nice --unknown git push`,
 		`nice -n`, `timeout -s`, `timeout --signal`,
 		`env --unknown=value git push`, `env --argv0=example git push`, `env -u`,
-		`nohup "$cmd"`, `nice -n "$priority" git status`, `timeout "$duration" git status`,
+		`nohup "$cmd"`,
 		`env GIT_CONFIG_GLOBAL=example nohup nice timeout 5 git status`,
 		`env GH_CONFIG_DIR=example nohup nice timeout 5 gh pr view 123`,
 		`env BASH_ENV=example nohup nice timeout 5 bash -c 'git status'`,

@@ -22,6 +22,18 @@ type Invocation struct {
 	auditArgv      [][]string
 }
 
+func (inv Invocation) dynamicAt(i int) bool {
+	return i >= 0 && i < len(inv.dynamicArgs) && inv.dynamicArgs[i]
+}
+
+func (inv Invocation) maySplitAt(i int) bool {
+	return i >= 0 && i < len(inv.splitArgs) && inv.splitArgs[i]
+}
+
+func (inv Invocation) literalPrefixAt(i int) bool {
+	return !inv.dynamicAt(i) || i >= 0 && i < len(inv.literalPrefix) && inv.literalPrefix[i]
+}
+
 func ParseShellInvocations(command string) ([]Invocation, error) {
 	return parseShellInvocations(command, 0, "")
 }
@@ -383,16 +395,9 @@ func commandWord(word *syntax.Word) (string, bool, bool, bool, bool) {
 	maySplit := false
 	firstDynamicOffset := -1
 	for _, part := range word.Parts {
-		value, ok := staticWordPart(part, false)
-		if !ok {
-			if firstDynamicOffset < 0 {
-				firstDynamicOffset = b.Len()
-			}
-			dynamic = true
-			maySplit = maySplit || wordPartMaySplit(part, false)
-			continue
-		}
-		b.WriteString(value)
+		partDynamic, partMaySplit := appendCommandWordPart(&b, part, false, &firstDynamicOffset)
+		dynamic = dynamic || partDynamic
+		maySplit = maySplit || partMaySplit
 	}
 	maySplit = maySplit || wordHasExpansionMeta(word)
 	if !dynamic || b.Len() == 0 {
@@ -407,6 +412,27 @@ func commandWord(word *syntax.Word) (string, bool, bool, bool, bool) {
 		return "-?", true, maySplit, literalPrefix, true
 	}
 	return text, true, maySplit, literalPrefix, true
+}
+
+func appendCommandWordPart(b *strings.Builder, part syntax.WordPart, quoted bool, firstDynamicOffset *int) (bool, bool) {
+	if value, ok := staticWordPart(part, quoted); ok {
+		b.WriteString(value)
+		return false, false
+	}
+	if quoted, ok := part.(*syntax.DblQuoted); ok {
+		dynamic := false
+		maySplit := false
+		for _, nested := range quoted.Parts {
+			nestedDynamic, nestedMaySplit := appendCommandWordPart(b, nested, true, firstDynamicOffset)
+			dynamic = dynamic || nestedDynamic
+			maySplit = maySplit || nestedMaySplit
+		}
+		return dynamic, maySplit
+	}
+	if *firstDynamicOffset < 0 {
+		*firstDynamicOffset = b.Len()
+	}
+	return true, wordPartMaySplit(part, quoted)
 }
 
 func wordPartMaySplit(part syntax.WordPart, quoted bool) bool {
@@ -1201,7 +1227,7 @@ func parseEnvWrapper(input commandInput) wrapperParse {
 			continue
 		}
 		if value, ok := strings.CutPrefix(arg, "--split-string="); ok {
-			return envSplitString(value, input.from(i+1), i)
+			return envSplitString(value, input.dynamicAt(i), input.from(i+1), i)
 		}
 		switch arg {
 		case "--unset", "--chdir", "--path":
@@ -1218,7 +1244,7 @@ func parseEnvWrapper(input commandInput) wrapperParse {
 			if i+1 >= len(argv) {
 				return undecidableWrapper("env", arg)
 			}
-			return envSplitString(argv[i+1], input.from(i+2), i+1)
+			return envSplitString(argv[i+1], input.dynamicAt(i+1), input.from(i+2), i+1)
 		}
 		if strings.HasPrefix(arg, "--unset=") || strings.HasPrefix(arg, "--chdir=") || strings.HasPrefix(arg, "--path=") {
 			if input.dynamicAt(i) {
@@ -1260,12 +1286,12 @@ func parseEnvWrapper(input commandInput) wrapperParse {
 				consumed = true
 			case 'S':
 				if j+1 < len(body) {
-					return envSplitString(body[j+1:], input.from(i+1), i)
+					return envSplitString(body[j+1:], input.dynamicAt(i), input.from(i+1), i)
 				}
 				if i+1 >= len(argv) {
 					return undecidableWrapper("env", arg)
 				}
-				return envSplitString(argv[i+1], input.from(i+2), i+1)
+				return envSplitString(argv[i+1], input.dynamicAt(i+1), input.from(i+2), i+1)
 			default:
 				return undecidableWrapper("env", arg)
 			}
@@ -1296,12 +1322,63 @@ func parseEnvWrapper(input commandInput) wrapperParse {
 	return wrapperCommand(p, argv, i)
 }
 
-func envSplitString(value string, rest commandInput, scriptIndex int) wrapperParse {
-	script := "env " + value
+func envSplitString(value string, dynamic bool, rest commandInput, scriptIndex int) wrapperParse {
+	if dynamic {
+		return wrapperParse{undecidable: "env split-string cannot be determined"}
+	}
+	if strings.Contains(value, "$") {
+		return wrapperParse{undecidable: "env split-string expansion cannot be determined"}
+	}
+	args, err := splitEnvString(value)
+	if err != nil {
+		return wrapperParse{undecidable: "env split-string cannot be determined: " + err.Error()}
+	}
+	script := ShellQuote(append([]string{"env"}, args...))
 	if len(rest.argv) > 0 {
 		script += " " + rest.shellQuote()
 	}
 	return wrapperParse{script: script, hasScript: true, scriptStart: scriptIndex, scriptEnd: scriptIndex + 1}
+}
+
+func splitEnvString(value string) ([]string, error) {
+	var args []string
+	var b strings.Builder
+	inSingle, inDouble, escaping, have := false, false, false, false
+	for _, r := range value {
+		switch {
+		case escaping:
+			b.WriteRune(r)
+			escaping, have = false, true
+		case r == '\\' && !inSingle:
+			escaping = true
+			have = true
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+			have = true
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+			have = true
+		case (r == ' ' || r == '\t' || r == '\n') && !inSingle && !inDouble:
+			if have {
+				args = append(args, b.String())
+				b.Reset()
+				have = false
+			}
+		default:
+			b.WriteRune(r)
+			have = true
+		}
+	}
+	if escaping {
+		return nil, fmt.Errorf("trailing escape")
+	}
+	if inSingle || inDouble {
+		return nil, fmt.Errorf("unterminated quote")
+	}
+	if have {
+		args = append(args, b.String())
+	}
+	return args, nil
 }
 
 func quoteLiteralArgs(args []string) string {
@@ -1535,6 +1612,10 @@ func parseShellInterpreter(input commandInput) shellParse {
 		}
 		if input.maySplitAt(i) {
 			s.undecidable = "shell option can change command position"
+			return s
+		}
+		if input.dynamicAt(i) {
+			s.undecidable = "shell option cannot be determined"
 			return s
 		}
 		if strings.HasPrefix(arg, "--") {

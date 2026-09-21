@@ -186,6 +186,40 @@ func TestRiskMatchRespectsRuleOrderAndExcept(t *testing.T) {
 	}
 }
 
+func TestDynamicLocalRiskDependsOnActiveRules(t *testing.T) {
+	remoteOnly := Policy{
+		Version: PolicyVersion,
+		ID:      "remote-only",
+		Enabled: true,
+		Rules: []Rule{{
+			ID:     "deny-remote-gh",
+			Effect: EffectDeny,
+			Match:  Match{Argv: exactArgs("gh"), Risk: PolicyGroupRemoteCodeRefMutation},
+		}},
+	}
+	for _, command := range []string{`kill "$PID"`, `dd if="$INPUT" of="$OUTPUT"`} {
+		decision, err := EvaluateCommand([]Policy{remoteOnly}, command)
+		if err != nil || !decision.Allowed {
+			t.Fatalf("%s: decision=%+v err=%v, want allow without local safety rules", command, decision, err)
+		}
+	}
+
+	killPolicy := Policy{
+		Version: PolicyVersion,
+		ID:      "kill-risk",
+		Enabled: true,
+		Rules: []Rule{{
+			ID:     "deny-kill-multiple",
+			Effect: EffectDeny,
+			Match:  Match{Argv: exactArgs("kill"), Risk: riskKillMultiplePIDs},
+		}},
+	}
+	decision, err := EvaluateCommand([]Policy{killPolicy}, `kill "$PID"`)
+	if err != nil || decision.Allowed || decision.source != decisionSourceUndecidable {
+		t.Fatalf("kill dynamic risk: decision=%+v err=%v, want undecidable deny", decision, err)
+	}
+}
+
 func TestKillZeroDoesNotMaskExistingRiskPolicies(t *testing.T) {
 	policy := Policy{
 		Version: PolicyVersion,

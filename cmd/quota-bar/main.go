@@ -762,11 +762,14 @@ func sameExecutable(a, b string) bool {
 
 func main() {
 	if os.Getenv("QUOTA_BAR_DAEMON") != "1" {
-		exe, err := os.Executable()
+		exe, err := realExecutable()
 		if err != nil {
 			log.Fatal(err)
 		}
-		cmd := exec.Command(exe, os.Args[1:]...)
+		if err := ensureAppBundle(exe); err != nil {
+			log.Fatal(err)
+		}
+		cmd := exec.Command(appBundleExecutable(), os.Args[1:]...)
 		cmd.Env = append(os.Environ(), "QUOTA_BAR_DAEMON=1")
 		cmd.Stdout = nil
 		cmd.Stderr = nil
@@ -782,6 +785,29 @@ func main() {
 		_ = os.Chdir(home)
 	}
 	setupLog()
+	if !runningFromAppBundle() {
+		// A bare binary (old launchd plist, update handover) has no bundle
+		// identity for LaunchServices; exec through the wrapper bundle so
+		// launchd keeps this pid. The marker stops a second attempt from
+		// looping if the exec'd path still does not match.
+		if os.Getenv("QUOTA_BAR_BUNDLED") == "1" {
+			log.Fatalf("started via %s but not recognized as the app bundle executable", appBundleExecutable())
+		}
+		exe, err := realExecutable()
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := ensureAppBundle(exe); err != nil {
+			log.Fatal(err)
+		}
+		bundled := appBundleExecutable()
+		log.Printf("re-executing through app bundle %s", bundled)
+		err = syscall.Exec(bundled, append([]string{bundled}, os.Args[1:]...), append(os.Environ(), "QUOTA_BAR_BUNDLED=1"))
+		log.Fatalf("exec %s: %v", bundled, err)
+	}
+	// The marker only guards the exec above; drop it so processes spawned
+	// from here (update handover) start with a clean bare-binary path.
+	os.Unsetenv("QUOTA_BAR_BUNDLED")
 	var contended bool
 	if lockFD, contended = acquireLock(); lockFD < 0 {
 		if contended {
@@ -816,9 +842,6 @@ func onReady() {
 	icon := ui.GenIcon(50)
 	systray.SetTemplateIcon(icon, icon)
 	systray.SetTooltip("quota-bar")
-	if err := pinStatusItem(); err != nil {
-		log.Printf("menu bar: %v", err)
-	}
 
 	cfg := loadSettings()
 

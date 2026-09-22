@@ -718,14 +718,14 @@ func rollbackSettingsObject(f settingsFileSnapshot, expected map[string]any) err
 }
 
 func newLoginRegistration() ([]byte, error) {
-	exe, err := os.Executable()
+	real, err := realExecutable()
 	if err != nil {
 		return nil, err
 	}
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
+	if err := ensureAppBundle(real); err != nil {
 		return nil, err
 	}
+	exe := appBundleExecutable()
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err

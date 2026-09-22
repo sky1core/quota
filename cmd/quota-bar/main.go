@@ -816,6 +816,9 @@ func onReady() {
 	icon := ui.GenIcon(50)
 	systray.SetTemplateIcon(icon, icon)
 	systray.SetTooltip("quota-bar")
+	if err := pinStatusItem(); err != nil {
+		log.Printf("menu bar: %v", err)
+	}
 
 	cfg := loadSettings()
 

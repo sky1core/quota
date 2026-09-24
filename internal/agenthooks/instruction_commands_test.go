@@ -26,6 +26,30 @@ func TestOwnsInstructionCommandAcceptsSameExecutableThroughSymlink(t *testing.T)
 	}
 }
 
+func TestOwnsInstructionCommandRecognizesSessionStartParts(t *testing.T) {
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "quota-cli")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prepare := func(extra ...string) string {
+		return ShellQuote(append([]string{executable, "agent", "instructions", "_prepare", "--agent=claude", "--event=SessionStart"}, extra...))
+	}
+	for _, command := range []string{prepare("--part=1"), prepare("--part=8"), prepare()} {
+		if !OwnsInstructionCommand(command, executable, "claude", "SessionStart") {
+			t.Fatalf("session start part command was not owned: %s", command)
+		}
+	}
+	for _, command := range []string{prepare("--part=0"), prepare("--part=x"), prepare("--part"), prepare("--part=1", "extra")} {
+		if OwnsInstructionCommand(command, executable, "claude", "SessionStart") {
+			t.Fatalf("malformed part command was owned: %s", command)
+		}
+	}
+	if OwnsInstructionCommand(prepare("--part=1"), executable, "codex", "SessionStart") {
+		t.Fatal("Claude command was owned for Codex")
+	}
+}
+
 func TestOwnsInstructionCommandRejectsDifferentExecutable(t *testing.T) {
 	dir := t.TempDir()
 	owned := filepath.Join(dir, "owned-quota-cli")

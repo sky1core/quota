@@ -1,20 +1,20 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/sky1core/quota/internal/agentinstructions"
+	"github.com/sky1core/quota/internal/claude"
 	"github.com/sky1core/quota/internal/config"
 	"github.com/sky1core/quota/internal/overlayruntime"
 )
@@ -30,26 +30,24 @@ type instructionAgentReport struct {
 }
 
 type instructionsReport struct {
-	Operation    string                              `json:"operation"`
-	Directory    string                              `json:"directory,omitempty"`
-	DryRun       bool                                `json:"dryRun,omitempty"`
-	Plan         *agentinstructions.InstallPlan      `json:"plan,omitempty"`
-	GlobalIgnore *agentinstructions.GlobalIgnorePlan `json:"globalIgnore,omitempty"`
-	Applied      *agentinstructions.InstallResult    `json:"accountChanges,omitempty"`
-	LocalFiles   []string                            `json:"localFiles,omitempty"`
-	Agents       []instructionAgentReport            `json:"agents,omitempty"`
-	Error        string                              `json:"error,omitempty"`
+	Operation string                           `json:"operation"`
+	Directory string                           `json:"directory,omitempty"`
+	DryRun    bool                             `json:"dryRun,omitempty"`
+	Plan      *agentinstructions.InstallPlan   `json:"plan,omitempty"`
+	Applied   *agentinstructions.InstallResult `json:"accountChanges,omitempty"`
+	Agents    []instructionAgentReport         `json:"agents,omitempty"`
+	Notices   []string                         `json:"notices,omitempty"`
+	Error     string                           `json:"error,omitempty"`
 }
 
 func printAgentInstructionsUsage(out io.Writer) {
 	fmt.Fprint(out, `usage:
-  quota-cli agent instructions setup [--agent=all|claude|codex] [--dry-run] [--no-global-ignore] [--json]
-  quota-cli agent instructions uninstall [--agent=all|claude|codex] [--dry-run] [--remove-global-ignore] [--json]
+  quota-cli agent instructions setup [--agent=all|claude|codex] [--dry-run] [--json]
+  quota-cli agent instructions uninstall [--agent=all|claude|codex] [--dry-run] [--json]
   quota-cli agent instructions status [dir] [--agent=all|claude|codex] [--json]
-  quota-cli agent instructions local-file add|remove|list [dir] [PATH ...] [--json]
 
-Deliver AGENTS.md and AGENTS.local.md to Claude Code and Codex CLI. Repositories are
-prepared automatically at session start.
+Install session-start hooks that deliver the primary AGENTS.local.md of the
+current Git repository to Claude Code and Codex CLI. AGENTS.md is read natively.
 `)
 }
 
@@ -105,7 +103,7 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 	case "--help", "-h":
 		printAgentInstructionsUsage(stdout)
 		return 0
-	case "setup", "uninstall", "status", "local-file":
+	case "setup", "uninstall", "status":
 	default:
 		fmt.Fprintf(stderr, "unknown agent instructions command: %q\n", operation)
 		printAgentInstructionsUsage(stderr)
@@ -115,19 +113,10 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 	fs.SetOutput(stderr)
 	fs.Usage = func() { printAgentInstructionsUsage(stderr) }
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	agent := "all"
-	var dryRun, noGlobalIgnore, removeGlobalIgnore bool
-	switch operation {
-	case "setup":
-		fs.StringVar(&agent, "agent", "all", "Agent runtime: all, claude or codex")
+	agent := fs.String("agent", "all", "Agent runtime: all, claude or codex")
+	var dryRun bool
+	if operation != "status" {
 		fs.BoolVar(&dryRun, "dry-run", false, "Print the plan without saving")
-		fs.BoolVar(&noGlobalIgnore, "no-global-ignore", false, "Do not add generated file names to the global git ignore file")
-	case "uninstall":
-		fs.StringVar(&agent, "agent", "all", "Agent runtime: all, claude or codex")
-		fs.BoolVar(&dryRun, "dry-run", false, "Print the plan without saving")
-		fs.BoolVar(&removeGlobalIgnore, "remove-global-ignore", false, "Also remove the quota-managed lines from the global git ignore file (requires --agent=all)")
-	case "status":
-		fs.StringVar(&agent, "agent", "all", "Agent runtime: all, claude or codex")
 	}
 	ordered, err := instructionFlagOrder(fs, args[1:])
 	if err == nil {
@@ -140,7 +129,7 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 		fmt.Fprintln(stderr, err)
 		return 2
 	}
-	if agent != "all" && agent != "claude" && agent != "codex" {
+	if *agent != "all" && *agent != "claude" && *agent != "codex" {
 		printAgentInstructionsUsage(stderr)
 		return 2
 	}
@@ -158,9 +147,6 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 			return 1
 		}
 		return 0
-	}
-	if operation == "local-file" {
-		return runInstructionsLocalFile(ctx, fs.Args(), &report, finish, stderr)
 	}
 	dir := ""
 	if operation == "status" {
@@ -192,8 +178,8 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 	if err != nil {
 		return finish(err, true)
 	}
-	agents := []string{agent}
-	if agent == "all" {
+	agents := []string{*agent}
+	if *agent == "all" {
 		agents = []string{"claude", "codex"}
 	}
 	installations, targetErrs := instructionInstallations(executable, cfg, agents)
@@ -201,96 +187,113 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 	if targetErr != nil && (operation == "setup" || len(installations) == 0) {
 		return finish(fmt.Errorf("%s", strings.Join(errorsAsStrings(targetErrs), "; ")), true)
 	}
-	switch operation {
-	case "setup", "uninstall":
-		uninstall := operation == "uninstall"
-		plans := map[int]agentinstructions.InstallPlan{}
-		combined := agentinstructions.InstallPlan{Agents: agents, Uninstall: uninstall}
-		for n, target := range installations {
-			plan, err := target.installation.Plan([]string{target.agent}, uninstall)
+	if operation == "status" {
+		statuses, failed := inspectInstructions(ctx, installations, dir)
+		report.Agents = statuses
+		return finish(targetErr, failed || targetErr != nil)
+	}
+	uninstall := operation == "uninstall"
+	plans := map[int]agentinstructions.InstallPlan{}
+	combined := agentinstructions.InstallPlan{Agents: agents, Uninstall: uninstall}
+	for n, target := range installations {
+		plan, err := target.installation.Plan([]string{target.agent}, uninstall)
+		if err != nil {
+			report.Plan = &combined
+			return finish(err, true)
+		}
+		if !uninstall && target.agent == "codex" {
+			cwd, err := os.Getwd()
 			if err != nil {
 				report.Plan = &combined
 				return finish(err, true)
 			}
-			if !uninstall && target.agent == "codex" {
-				cwd, err := os.Getwd()
-				if err != nil {
-					report.Plan = &combined
-					return finish(err, true)
-				}
-				trustChange, err := target.installation.PlanCodexHookTrust(ctx, cwd, codexHookInstallChanged(plan))
-				if err != nil {
-					report.Plan = &combined
-					return finish(err, true)
-				}
-				if trustChange != nil {
-					trustChange.Account = target.account
-					plan.Changes = append(plan.Changes, *trustChange)
-				}
-			}
-			plans[n] = plan
-			combined.Changes = append(combined.Changes, plan.Changes...)
-		}
-		report.Plan = &combined
-		if removeGlobalIgnore && agent != "all" {
-			return finish(fmt.Errorf("--remove-global-ignore requires --agent=all"), true)
-		}
-		manageIgnore := !noGlobalIgnore
-		if uninstall {
-			manageIgnore = removeGlobalIgnore
-		}
-		if manageIgnore {
-			ignorePath, err := agentinstructions.GlobalIgnorePath(ctx)
+			trustChange, err := target.installation.PlanCodexHookTrust(ctx, cwd, codexHookInstallChanged(plan))
 			if err != nil {
+				report.Plan = &combined
 				return finish(err, true)
 			}
-			ignorePlan, err := agentinstructions.PlanGlobalIgnore(ignorePath, uninstall)
-			report.GlobalIgnore = &ignorePlan
-			if err != nil {
-				return finish(err, true)
-			}
-		}
-		if dryRun {
-			return finish(targetErr, targetErr != nil)
-		}
-		result := agentinstructions.InstallResult{}
-		report.Applied = &result
-		for n, target := range installations {
-			applied, err := target.installation.Apply(plans[n])
-			report.Applied.Applied = append(report.Applied.Applied, applied.Applied...)
-			report.Applied.Unchanged = append(report.Applied.Unchanged, applied.Unchanged...)
-			report.Applied.FailedPath = applied.FailedPath
-			if err != nil {
-				return finish(err, true)
-			}
-			if !uninstall && target.agent == "codex" {
-				cwd, err := os.Getwd()
-				if err != nil {
-					return finish(err, true)
-				}
-				trust, err := target.installation.SyncCodexHookTrust(ctx, cwd)
-				if err != nil {
-					report.Applied.FailedPath = trust.Path
-					return finish(err, true)
-				}
-				if trust.Changed {
-					report.Applied.Unchanged = removePath(report.Applied.Unchanged, trust.Path)
-					report.Applied.Applied = appendUniquePath(report.Applied.Applied, trust.Path)
-				} else if !trust.Skipped && !hasPath(report.Applied.Applied, trust.Path) {
-					report.Applied.Unchanged = appendUniquePath(report.Applied.Unchanged, trust.Path)
-				}
+			if trustChange != nil {
+				trustChange.Account = target.account
+				plan.Changes = append(plan.Changes, *trustChange)
 			}
 		}
-		if manageIgnore {
-			if err := report.GlobalIgnore.Apply(); err != nil {
-				return finish(err, true)
+		plans[n] = plan
+		combined.Changes = append(combined.Changes, plan.Changes...)
+	}
+	report.Plan = &combined
+	if dryRun {
+		if !uninstall {
+			for _, target := range installations {
+				if target.agent == "claude" {
+					report.Notices = append(report.Notices, target.account+": will run claude --init-only after hook installation")
+				}
 			}
 		}
 		return finish(targetErr, targetErr != nil)
 	}
-	statuses, failed := inspectInstructions(ctx, installations, dir)
-	report.Agents = statuses
-	return finish(targetErr, failed || targetErr != nil)
+	result := agentinstructions.InstallResult{}
+	report.Applied = &result
+	for n, target := range installations {
+		applied, err := target.installation.Apply(plans[n])
+		report.Applied.Applied = append(report.Applied.Applied, applied.Applied...)
+		report.Applied.Unchanged = append(report.Applied.Unchanged, applied.Unchanged...)
+		report.Applied.FailedPath = applied.FailedPath
+		if err != nil {
+			return finish(err, true)
+		}
+		if !uninstall && target.agent == "codex" {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return finish(err, true)
+			}
+			trust, err := target.installation.SyncCodexHookTrust(ctx, cwd)
+			if err != nil {
+				report.Applied.FailedPath = trust.Path
+				return finish(err, true)
+			}
+			if trust.Changed {
+				report.Applied.Unchanged = removePath(report.Applied.Unchanged, trust.Path)
+				report.Applied.Applied = appendUniquePath(report.Applied.Applied, trust.Path)
+			} else if !trust.Skipped && !hasPath(report.Applied.Applied, trust.Path) {
+				report.Applied.Unchanged = appendUniquePath(report.Applied.Unchanged, trust.Path)
+			}
+		}
+	}
+	if !uninstall {
+		for _, target := range installations {
+			if target.agent != "claude" {
+				continue
+			}
+			err := initializeClaudeInstructions(ctx, target.configDir)
+			if ctx.Err() != nil {
+				return finish(ctx.Err(), true)
+			}
+			if err != nil {
+				report.Notices = append(report.Notices, fmt.Sprintf("WARN %s: claude --init-only failed: %v; hooks remain installed. Check Claude login/network and rerun setup --agent=claude.", target.account, err))
+			} else {
+				report.Notices = append(report.Notices, target.account+": claude --init-only completed; instruction delivery is not verified")
+			}
+		}
+	}
+	return finish(targetErr, targetErr != nil)
+}
+
+func initializeClaudeInstructions(ctx context.Context, configDir string) error {
+	bin, err := claude.FindBinary()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(config.Path())
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, bin, "--init-only")
+	cmd.Dir = dir
+	cmd.Env = claude.EnvForConfigDir(cmd.Environ(), configDir)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	return cmd.Run()
 }
 
 type instructionInstallation struct {
@@ -321,7 +324,7 @@ func instructionInstallations(executable string, cfg config.Config, agents []str
 				errs = append(errs, err)
 				continue
 			}
-			out = append(out, instructionInstallation{agent: "claude", account: account.Key, configDir: account.ConfigDir, installation: installation})
+			out = append(out, instructionInstallation{agent: "claude", account: account.Key, configDir: targets.ClaudeConfigDir, installation: installation})
 		}
 	}
 	if include("codex") {
@@ -340,7 +343,7 @@ func instructionInstallations(executable string, cfg config.Config, agents []str
 				errs = append(errs, err)
 				continue
 			}
-			out = append(out, instructionInstallation{agent: "codex", account: account.Key, home: account.Home, installation: installation})
+			out = append(out, instructionInstallation{agent: "codex", account: account.Key, home: targets.CodexHome, installation: installation})
 		}
 	}
 	return out, errs
@@ -390,62 +393,6 @@ func codexHookInstallChanged(plan agentinstructions.InstallPlan) bool {
 	return false
 }
 
-func runInstructionsLocalFile(ctx context.Context, operands []string, report *instructionsReport, finish func(error, bool) int, stderr io.Writer) int {
-	if len(operands) == 0 {
-		printAgentInstructionsUsage(stderr)
-		return 2
-	}
-	action, operands := operands[0], operands[1:]
-	report.Operation = "local-file " + action
-	dir := "."
-	switch action {
-	case "list":
-		if len(operands) > 1 {
-			printAgentInstructionsUsage(stderr)
-			return 2
-		}
-		if len(operands) == 1 {
-			dir = operands[0]
-		}
-	case "add", "remove":
-		if len(operands) >= 2 {
-			if info, err := os.Stat(operands[0]); err == nil && info.IsDir() {
-				dir, operands = operands[0], operands[1:]
-			}
-		}
-		if len(operands) == 0 {
-			fmt.Fprintln(stderr, "local-file "+action+" requires at least one PATH")
-			return 2
-		}
-		for _, path := range operands {
-			if path == "" || strings.HasPrefix(path, "-") {
-				fmt.Fprintf(stderr, "invalid local file path %q\n", path)
-				return 2
-			}
-		}
-	default:
-		fmt.Fprintf(stderr, "unknown local-file action: %q\n", action)
-		printAgentInstructionsUsage(stderr)
-		return 2
-	}
-	dir, err := filepath.Abs(dir)
-	if err != nil {
-		return finish(err, true)
-	}
-	report.Directory = dir
-	var files []string
-	switch action {
-	case "list":
-		files, err = overlayruntime.ListLocalFiles(ctx, dir)
-	case "add":
-		files, err = overlayruntime.AddLocalFiles(ctx, dir, operands)
-	case "remove":
-		files, err = overlayruntime.RemoveLocalFiles(ctx, dir, operands)
-	}
-	report.LocalFiles = files
-	return finish(err, err != nil)
-}
-
 func inspectInstructions(ctx context.Context, installations []instructionInstallation, dir string) ([]instructionAgentReport, bool) {
 	var reports []instructionAgentReport
 	failed := false
@@ -461,23 +408,7 @@ func inspectInstructions(ctx context.Context, installations []instructionInstall
 			if !status.Configured {
 				r.State = "blocked"
 			}
-			options := overlayruntime.CheckOptions{ClaudeConfigDir: target.configDir, CodexHome: target.home}
-			if status.Agent == "codex" {
-				native, err := agentinstructions.InspectNativeCodexForHome(ctx, dir, target.home, target.installation.ExpectedCodexHooks())
-				r.Native = &native
-				if err != nil {
-					r.Issues = append(r.Issues, err.Error())
-					if r.State == "configured" {
-						r.State = "unknown"
-					}
-				} else {
-					options.CodexProjectDocMaxBytes = native.ProjectDocMaxBytes
-					if r.State == "configured" && native.State != "configured" {
-						r.State = native.State
-					}
-				}
-			}
-			repository, err := overlayruntime.CheckRepository(ctx, dir, status.Agent, options)
+			repository, err := overlayruntime.CheckRepository(ctx, dir, status.Agent, overlayruntime.CheckOptions{ClaudeConfigDir: target.configDir})
 			if err != nil {
 				r.State = "blocked"
 				r.Issues = append(r.Issues, err.Error())
@@ -487,14 +418,16 @@ func inspectInstructions(ctx context.Context, installations []instructionInstall
 					r.State = "blocked"
 				}
 			}
-			if status.Agent == "claude" {
-				problems, err := target.installation.InspectClaudeRepositoryHooks(ctx, dir)
+			if status.Agent == "codex" {
+				native, err := agentinstructions.InspectNativeCodexHooksForHome(ctx, dir, target.home, target.installation.ExpectedCodexHooks())
+				r.Native = &native
 				if err != nil {
-					problems = append(problems, err.Error())
-				}
-				if len(problems) > 0 {
+					r.Issues = append(r.Issues, err.Error())
+					if r.State == "configured" {
+						r.State = "unknown"
+					}
+				} else if native.State != "configured" && r.State == "configured" {
 					r.State = "blocked"
-					r.Issues = append(r.Issues, problems...)
 				}
 			}
 			r.Issues = uniqueIssues(r.Issues)
@@ -526,7 +459,7 @@ func printInstructionsReport(out io.Writer, r instructionsReport) {
 	}
 	fmt.Fprintln(out)
 	if r.DryRun {
-		fmt.Fprintln(out, "dry-run: no account configuration or ignore files changed")
+		fmt.Fprintln(out, "dry-run: no account configuration changed")
 	}
 	if r.Plan != nil {
 		for _, change := range r.Plan.Changes {
@@ -537,28 +470,13 @@ func printInstructionsReport(out io.Writer, r instructionsReport) {
 			fmt.Fprintf(out, "%s/%s: %s: %s (change=%t)\n", change.Agent, account, change.Operation, change.Path, change.Changed)
 		}
 	}
-	if r.GlobalIgnore != nil {
-		fmt.Fprintf(out, "global ignore: %s (change=%t", r.GlobalIgnore.Path, r.GlobalIgnore.Changed)
-		if len(r.GlobalIgnore.Add) > 0 {
-			fmt.Fprintf(out, "; add %s", strings.Join(r.GlobalIgnore.Add, ", "))
-		}
-		if len(r.GlobalIgnore.Remove) > 0 {
-			fmt.Fprintf(out, "; remove %s", strings.Join(r.GlobalIgnore.Remove, ", "))
-		}
-		fmt.Fprintln(out, ")")
-	}
 	if r.Applied != nil {
 		for _, path := range r.Applied.Applied {
 			fmt.Fprintln(out, "saved:", path)
 		}
 	}
-	if strings.HasPrefix(r.Operation, "local-file") && r.Error == "" {
-		if len(r.LocalFiles) == 0 {
-			fmt.Fprintln(out, "no registered local files")
-		}
-		for _, path := range r.LocalFiles {
-			fmt.Fprintln(out, "local file:", path)
-		}
+	for _, notice := range r.Notices {
+		fmt.Fprintln(out, notice)
 	}
 	for _, agent := range r.Agents {
 		label := agent.Agent
@@ -570,8 +488,10 @@ func printInstructionsReport(out io.Writer, r instructionsReport) {
 			fmt.Fprintln(out, "  "+issue)
 		}
 		if agent.Repository != nil {
-			for _, path := range agent.Repository.Generated {
-				fmt.Fprintln(out, "  generated: "+path)
+			if agent.Repository.LocalPresent {
+				fmt.Fprintf(out, "  AGENTS.local.md: %s\n", agent.Repository.LocalInstructions)
+			} else {
+				fmt.Fprintf(out, "  AGENTS.local.md: %s (absent)\n", agent.Repository.LocalInstructions)
 			}
 			for _, problem := range agent.Repository.Problems {
 				fmt.Fprintln(out, "  FAIL: "+problem)
@@ -596,8 +516,6 @@ func runInstructionsPrepare(ctx context.Context, args []string, stdin io.Reader,
 	fs.SetOutput(stderr)
 	agent := fs.String("agent", "", "Agent")
 	event := fs.String("event", "", "Event")
-	claudeConfigDir := fs.String("claude-config-dir", "", "Claude config directory")
-	codexHome := fs.String("codex-home", "", "Codex home directory")
 	ordered, err := instructionFlagOrder(fs, args)
 	if err == nil {
 		err = fs.Parse(ordered)
@@ -613,56 +531,12 @@ func runInstructionsPrepare(ctx context.Context, args []string, stdin io.Reader,
 		fmt.Fprintln(stderr, "instruction hooks do not accept positional arguments")
 		return 2
 	}
-	input, err := io.ReadAll(io.LimitReader(stdin, 1<<20+1))
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+	if *event == "SessionStart" && (*agent == "claude" || *agent == "codex") {
+		return overlayruntime.RunSessionStartHook(ctx, *agent, stdin, stdout, stderr)
 	}
-	options, err := prepareHookOptions(ctx, *agent, *event, *claudeConfigDir, *codexHome, input)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 2
+	if *event == "UserPromptSubmit" && *agent == "claude" {
+		return overlayruntime.RunClaudePromptHook(ctx, stdin, stdout, stderr)
 	}
-	return overlayruntime.RunPrepareHookWithOptions(ctx, *agent, *event, bytes.NewReader(input), stdout, stderr, options)
-}
-
-func prepareHookOptions(ctx context.Context, agent, event, claudeConfigDir, codexHome string, input []byte) (overlayruntime.PrepareHookOptions, error) {
-	var err error
-	options := overlayruntime.PrepareHookOptions{}
-	switch agent {
-	case "claude":
-		if claudeConfigDir != "" {
-			options.ClaudeConfigDir, err = config.CanonicalAccountDirectory(claudeConfigDir)
-		} else {
-			options.ClaudeConfigDir, err = config.DefaultAccountDirectory("claude")
-		}
-	case "codex":
-		if codexHome != "" {
-			options.CodexHome, err = config.CanonicalAccountDirectory(codexHome)
-		} else {
-			options.CodexHome, err = config.DefaultAccountDirectory("codex")
-		}
-	default:
-		return options, nil
-	}
-	if err != nil {
-		return options, err
-	}
-	if agent != "codex" || event != "SessionStart" {
-		return options, nil
-	}
-	var h struct {
-		CWD string `json:"cwd"`
-	}
-	if err := json.Unmarshal(input, &h); err != nil || h.CWD == "" {
-		return options, nil
-	}
-	native, err := agentinstructions.InspectNativeCodexConfigForHome(ctx, h.CWD, options.CodexHome)
-	if err != nil {
-		options.CodexNativeIssues = []string{"could not inspect effective Codex config: " + err.Error()}
-		return options, nil
-	}
-	options.CodexProjectDocMaxBytes = native.ProjectDocMaxBytes
-	options.CodexNativeIssues = native.Issues
-	return options, nil
+	fmt.Fprintln(stderr, "unsupported instruction agent/event combination")
+	return 2
 }

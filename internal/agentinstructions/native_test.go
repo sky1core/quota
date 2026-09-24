@@ -140,65 +140,6 @@ func TestNativeMalformedDiscoveryCannotSucceed(t *testing.T) {
 	}
 }
 
-func TestNativeConfigRequiresEffectiveBudgetAndLayers(t *testing.T) {
-	for _, raw := range []string{`{}`, `{"config":{},"layers":[]}`, `{"config":{"project_doc_max_bytes":null},"layers":[]}`, `{"config":{"project_doc_max_bytes":-1},"layers":[]}`, `{"config":{"project_doc_max_bytes":42},"layers":null}`} {
-		if err := parseNativeConfig([]byte(raw), &NativeReport{}); err == nil {
-			t.Fatalf("accepted %s", raw)
-		}
-	}
-	report := NativeReport{}
-	err := parseNativeConfig([]byte(`{"config":{"project_root_markers":[".git"],"project_doc_max_bytes":42,"project_doc_fallback_filenames":["EXAMPLE.md"],"features":{"hooks":false}},"layers":[{"name":{"type":"project","dotCodexFolder":"/example/repo/.codex"},"disabledReason":"project is untrusted","config":{}}]}`), &report)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if *report.ProjectDocMaxBytes != 42 || report.HooksEnabled == nil || *report.HooksEnabled || len(report.ConfigLayers) != 1 || len(report.Issues) != 1 {
-		t.Fatalf("report = %+v", report)
-	}
-}
-
-func TestNativeCodexTrustIssueUsesEffectiveProjects(t *testing.T) {
-	report := NativeReport{}
-	raw := []byte(`{"config":{"project_root_markers":[],"project_doc_max_bytes":4096,"project_doc_fallback_filenames":[],"projects":{"/example/repo":{"trust_level":"trusted"},"/example/repo/sub":{"trust_level":"untrusted"}}},"layers":[]}`)
-	if err := parseNativeConfig(raw, &report); err != nil {
-		t.Fatal(err)
-	}
-	if issue := nativeCodexTrustIssue(report, "/example/repo/sub"); !strings.Contains(issue, "explicitly untrusted") {
-		t.Fatalf("issue = %q", issue)
-	}
-	if issue := nativeCodexTrustIssue(report, "/example/repo"); issue != "" {
-		t.Fatalf("trusted parent blocked: %q", issue)
-	}
-	report = NativeReport{}
-	raw = []byte(`{"config":{"project_root_markers":[],"project_doc_max_bytes":4096,"project_doc_fallback_filenames":[],"projects":{"/example/repo":{"trust_level":"untrusted"}}},"layers":[]}`)
-	if err := parseNativeConfig(raw, &report); err != nil {
-		t.Fatal(err)
-	}
-	if issue := nativeCodexTrustIssue(report, "/example/repo/sub"); !strings.Contains(issue, "/example/repo is explicitly untrusted") {
-		t.Fatalf("parent issue = %q", issue)
-	}
-	report = NativeReport{}
-	raw = []byte(`{"config":{"project_root_markers":[],"project_doc_max_bytes":4096,"project_doc_fallback_filenames":[],"projects":{"/example/repo":{"trust_level":"untrusted"},"/example/repo/sub":{"trust_level":"trusted"}}},"layers":[]}`)
-	if err := parseNativeConfig(raw, &report); err != nil {
-		t.Fatal(err)
-	}
-	if issue := nativeCodexTrustIssue(report, "/example/repo/sub/nested"); issue != "" {
-		t.Fatalf("trusted child blocked: %q", issue)
-	}
-}
-
-func TestNativeConfigMissingDiscoveryFields(t *testing.T) {
-	for _, config := range []string{
-		`{"project_root_markers":[".git"],"project_doc_max_bytes":42}`,
-		`{"project_root_markers":[".git"],"project_doc_max_bytes":42,"project_doc_fallback_filenames":null}`,
-		`{"project_root_markers":[".git"],"project_doc_max_bytes":42,"project_doc_fallback_filenames":[],"features":{"hooks":null}}`,
-		`{"project_doc_max_bytes":42,"project_doc_fallback_filenames":[]}`,
-	} {
-		if err := parseNativeConfig([]byte(`{"config":`+config+`,"layers":[]}`), &NativeReport{}); err == nil {
-			t.Fatalf("accepted %s", config)
-		}
-	}
-}
-
 func TestNativeReportDoesNotExposeUnrelatedCommands(t *testing.T) {
 	owned, unrelated := syntheticNativeHook(), syntheticNativeHook()
 	unrelated.Command = "unrelated-sensitive-command"
@@ -279,7 +220,7 @@ func TestNativeMixedRepresentationsWithoutDuplicateInstructions(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := map[string]string{"sessionStart": "example-session-hook", "subagentStart": "example-subagent-hook"}
-	report, err := InspectNativeCodexForHome(context.Background(), repo, codexHome, expected)
+	report, err := InspectNativeCodexHooksForHome(context.Background(), repo, codexHome, expected)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,51 +248,6 @@ func TestNativeMixedRepresentationsWithoutDuplicateInstructions(t *testing.T) {
 	raw, err := json.Marshal(report)
 	if err != nil || !privatePolicy || strings.Contains(string(raw), "example-policy-tool") {
 		t.Fatal("native metadata did not retain the unrelated command privately")
-	}
-	for _, setting := range []struct{ key, value string }{
-		{"project_doc_max_bytes", "0"},
-		{"project_doc_fallback_filenames", "['EXAMPLE.md']"},
-	} {
-		if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(setting.key+" = "+setting.value+"\n"+config), 0600); err != nil {
-			t.Fatal(err)
-		}
-		report, err = InspectNativeCodexForHome(context.Background(), repo, codexHome, expected)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if report.State != "blocked" || !strings.Contains(strings.Join(report.Issues, " "), "effective "+setting.key) {
-			t.Fatalf("report = %+v", report)
-		}
-	}
-}
-
-func TestNativeRootMarkerLayers(t *testing.T) {
-	for _, tc := range []struct {
-		name, effective, layer, source string
-		disabled, configured, invalid  bool
-	}{
-		{name: "runtime default", effective: `[".git"]`, layer: `{}`, source: "user"},
-		{name: "null layer value", effective: `null`, layer: `{"project_root_markers":null}`, source: "user"},
-		{name: "explicit empty", effective: `[]`, layer: `{"project_root_markers":[]}`, source: "user", configured: true},
-		{name: "explicit default", effective: `[".git"]`, layer: `{"project_root_markers":[".git"]}`, source: "user", configured: true},
-		{name: "system override", effective: `[".example-root"]`, layer: `{"project_root_markers":[".example-root"]}`, source: "system", configured: true},
-		{name: "managed override", effective: `[]`, layer: `{"project_root_markers":[]}`, source: "enterpriseManaged", configured: true},
-		{name: "disabled project", effective: `[".git"]`, layer: `{"project_root_markers":[]}`, source: "project", disabled: true},
-		{name: "invalid marker type", effective: `[".git"]`, layer: `{"project_root_markers":false}`, source: "user", invalid: true},
-		{name: "missing layer config", effective: `[".git"]`, layer: `null`, source: "user", invalid: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			disabled := "null"
-			if tc.disabled {
-				disabled = `"project not trusted"`
-			}
-			raw := `{"config":{"project_doc_max_bytes":42,"project_doc_fallback_filenames":[],"project_root_markers":` + tc.effective + `},"layers":[{"name":{"type":"` + tc.source + `"},"config":` + tc.layer + `,"disabledReason":` + disabled + `}]}`
-			report := NativeReport{}
-			err := parseNativeConfig([]byte(raw), &report)
-			if (err != nil) != tc.invalid || report.ProjectRootMarkersConfigured != tc.configured {
-				t.Fatalf("configured=%t err=%v", report.ProjectRootMarkersConfigured, err)
-			}
-		})
 	}
 }
 
@@ -381,49 +277,26 @@ func TestNativeCodexIsolatedDiscovery(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte("project_doc_max_bytes = 12345\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := InspectNativeCodexForHome(context.Background(), repo, codexHome, map[string]string{"sessionStart": command})
+	report, err := InspectNativeCodexHooksForHome(context.Background(), repo, codexHome, map[string]string{"sessionStart": command})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.State != "needs-trust" || len(report.Hooks) != 1 || !report.Hooks[0].Matched || report.ProjectDocMaxBytes == nil || *report.ProjectDocMaxBytes != 12345 {
+	if report.State != "needs-trust" || len(report.Hooks) != 1 || !report.Hooks[0].Matched {
 		t.Fatalf("report = %+v", report)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("discovery executed an instruction hook")
 	}
-	if report.ProjectRootMarkersConfigured || len(report.ProjectRootMarkers) != 1 || report.ProjectRootMarkers[0] != ".git" {
-		t.Fatalf("unexpected default root markers: %+v", report)
-	}
-	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte("project_doc_max_bytes = 12345\nproject_root_markers = []\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	report, err = InspectNativeCodexForHome(context.Background(), repo, codexHome, map[string]string{"sessionStart": command})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if report.State != "blocked" || !report.ProjectRootMarkersConfigured || len(report.ProjectRootMarkers) != 0 {
-		t.Fatalf("explicit root markers: %+v", report)
-	}
 	mergedConfig := "project_doc_max_bytes = 12345\n[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = 'command'\ncommand = " + strconv.Quote(command) + "\n"
 	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(mergedConfig), 0600); err != nil {
 		t.Fatal(err)
 	}
-	report, err = InspectNativeCodexForHome(context.Background(), repo, codexHome, map[string]string{"sessionStart": command})
+	report, err = InspectNativeCodexHooksForHome(context.Background(), repo, codexHome, map[string]string{"sessionStart": command})
 	if err != nil {
 		t.Fatalf("merged discovery: %v; report: %+v", err, report)
 	}
 	if report.State != "blocked" || len(report.Hooks) != 2 {
 		t.Fatalf("merged report = %+v", report)
-	}
-	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte("project_doc_max_bytes = 12345\n[features]\nhooks = false\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	report, err = InspectNativeCodexForHome(context.Background(), repo, codexHome, map[string]string{"sessionStart": command})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if report.State != "blocked" || !strings.Contains(strings.Join(report.Issues, " "), "features.hooks") {
-		t.Fatalf("report = %+v", report)
 	}
 }
 
@@ -440,7 +313,7 @@ func TestNativeCodexTrustSyncApprovesManagedHook(t *testing.T) {
 	if _, err := i.Apply(plan); err != nil {
 		t.Fatal(err)
 	}
-	before, err := InspectNativeCodexForHome(context.Background(), repo, i.targets.CodexHome, i.ExpectedCodexHooks())
+	before, err := InspectNativeCodexHooksForHome(context.Background(), repo, i.targets.CodexHome, i.ExpectedCodexHooks())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -454,7 +327,7 @@ func TestNativeCodexTrustSyncApprovesManagedHook(t *testing.T) {
 	if !synced.Changed || synced.Key == "" {
 		t.Fatalf("sync result = %+v", synced)
 	}
-	after, err := InspectNativeCodexForHome(context.Background(), repo, i.targets.CodexHome, i.ExpectedCodexHooks())
+	after, err := InspectNativeCodexHooksForHome(context.Background(), repo, i.targets.CodexHome, i.ExpectedCodexHooks())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,39 +488,5 @@ func TestCodexQuotedKeySegmentEscapesTOMLString(t *testing.T) {
 	want := `"/tmp/a\"b\\c:session_start:1:0"`
 	if got != want {
 		t.Fatalf("quoted key = %q, want %q", got, want)
-	}
-}
-
-func TestNativeConfigInspectionIndependentOfHooks(t *testing.T) {
-	if _, err := exec.LookPath("codex"); err != nil {
-		t.Skip("Codex CLI is not installed")
-	}
-	root := t.TempDir()
-	home, repo := filepath.Join(root, "home"), filepath.Join(root, "repo")
-	codexHome := filepath.Join(home, ".codex")
-	for _, path := range []string{codexHome, repo} {
-		if err := os.MkdirAll(path, 0700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("HOME", home)
-	t.Setenv("CODEX_HOME", codexHome)
-	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte("project_doc_max_bytes = 12345\n[features]\nhooks = false\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	for _, hooks := range []string{
-		`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"quota-cli agent instructions _hook --agent=codex --event=SessionStart"}]}]}}`,
-		`{invalid`,
-	} {
-		if err := os.WriteFile(filepath.Join(codexHome, "hooks.json"), []byte(hooks), 0600); err != nil {
-			t.Fatal(err)
-		}
-		report, err := InspectNativeCodexConfigForHome(context.Background(), repo, codexHome)
-		if err != nil || report.State != "configured" || len(report.Hooks) != 0 || report.ProjectDocMaxBytes == nil || *report.ProjectDocMaxBytes != 12345 {
-			t.Fatalf("config inspection depended on hook readiness: %+v %v", report, err)
-		}
-		if body, err := os.ReadFile(filepath.Join(codexHome, "hooks.json")); err != nil || string(body) != hooks {
-			t.Fatalf("config inspection changed hooks: %q %v", body, err)
-		}
 	}
 }

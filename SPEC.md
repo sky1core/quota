@@ -1,8 +1,14 @@
-# quota — Claude Code & Codex CLI Quota Monitor
+# quota — 멀티 에이전트·멀티 계정 사용환경 관리
 
 ## 개요
 
-Go로 작성된 Claude Code와 Codex CLI의 사용량(quota) 조회 도구.
+quota는 Claude Code와 Codex CLI의 멀티 에이전트·멀티 계정 사용환경을 관리하는 Go 도구다.
+핵심 목표 중 하나는 에이전트나 계정을 전환해도 동일한 공통 지침·스킬·정책을 사용하는 환경을 구축하는 것이다.
+기본 계정과 등록된 추가 계정 모두 이 목표의 지원 대상이다.
+
+쿼터 조회·표시와 잔여량 기반 계정 선택·실행 위임도 이 목표의 일환이다.
+사용 가능한 에이전트·계정의 잔여량을 파악하고 작업을 배정할 때에도 공통 사용환경을 유지하는 것을 목표로 한다.
+
 두 개의 독립적인 바이너리를 제공한다:
 
 | 바이너리 | 설명 |
@@ -12,6 +18,19 @@ Go로 작성된 Claude Code와 Codex CLI의 사용량(quota) 조회 도구.
 
 - 둘은 **독립적인 프로그램**이다. 서로를 호출하지 않는다.
 - 둘 다 **동일한 internal 패키지를 직접 호출**하여 데이터를 가져온다.
+
+---
+
+## 멀티 에이전트·멀티 계정 공통 원칙
+
+공통 지침·스킬·정책, 쿼터 조회·표시, 계정 선택·실행 위임은 다음 원칙을 따른다.
+
+- **동일성**: 같은 프로젝트의 공통 원본·공통 설정이 같으면, 지원 에이전트나 기본·등록된 추가 계정 사이의 전환으로 공통 지침·스킬·정책의 적용 결과가 달라지지 않아야 한다. 런타임별 연결 방식은 달라도 공통 기능을 조용히 누락해서는 안 된다.
+- **비간섭**: 한 계정의 준비·실행이 다른 계정도 사용하는 공유 파일을 자기 계정에만 맞게 바꾸거나 다른 계정의 환경을 훼손해서는 안 된다. 공유 생성물의 선택과 내용은 공통 입력에 따라 결정하며, 마지막으로 실행한 계정이나 준비 순서에 따라 달라져서는 안 된다.
+- **계정별 상태 분리**: 인증·로그인 상태·쿼터 값·사용 가능한 모델은 계정별로 구분한다. 쿼터 조회·선택·위임은 동일한 계정 식별을 유지하며, 선택된 계정에도 공통 사용환경을 적용한다. 동일한 환경이 계정별 상태나 제공 기능까지 같은 값으로 만드는 것을 뜻하지는 않는다.
+- **지원 범위와 가용성 구분**: 기본 계정과 등록된 추가 계정은 모두 지원 대상이다. 특정 계정의 로그아웃·만료·미사용은 현재 가용성이나 검증 조건이며 지원 제외 사유가 아니다. 런타임 제약·설정 충돌로 공통 환경을 제공할 수 없거나 확인하지 못하면 대상과 이유를 명시하고, 부분 적용·확인 불가를 전체 성공으로 표시하지 않는다.
+- **전환 검증**: 기능별로 명시한 전달 범위와 제약 안에서 같은 프로젝트·공통 원본으로 기본 계정 → 추가 계정 → 기본 계정 및 에이전트 전환 후의 적용 결과와 공유 생성물 비간섭을 확인한다. 계정별 설치 성공만으로 동일한 사용환경이 검증됐다고 판단하지 않는다.
+- **설정 동일**: quota가 계정마다 설치하는 항목(hook·Codex trust)은 기본 계정과 등록된 추가 계정에 같은 명령·내용으로 설치하며, 계정 경로 인자만 그 계정의 것으로 채운다. quota는 계정 사이에 설정 차이를 만들거나 요구하지 않으며, 사용자 관리 옵션은 바꾸지 않고 각 계정의 유효 상태를 그대로 판정·보고한다.
 
 ---
 
@@ -294,22 +313,23 @@ home 미지정 시 quota 기본 계정(`~/.codex`)을 조회한다. 호출자 �
 `agent hooks` JSON 설치와 Claude overlay 설치는 대상 경로별 프로세스 간 잠금 안에서 최신 파일 읽기·수정·백업·고유 임시 파일 쓰기·rename·저장 결과 재읽기를 수행한다. 값이 동일하면 파일과 백업을 쓰지 않는다. 신규 파일은 0644에 프로세스 umask를 적용하고, 기존 파일의 권한은 보존한다. 기존 내용을 담는 임시 파일은 원본보다 넓은 접근 권한으로 생성하지 않는다. 기존 JSON 숫자와 다른 설정값을 보존하고 파싱/변환 오류면 원본을 덮어쓰지 않는다. 직렬화 보장은 이 저장 경로를 사용하는 quota 명령 사이에 한정되며 외부 편집기를 통제하지 않는다.
 
 **`agent instructions` 동작**:
-- 목적은 공용 `AGENTS.md`와 개인 `AGENTS.local.md`를 Claude Code와 Codex CLI가 native로 읽게 하는 것이다. 사용자는 `setup` 한 번으로 선택한 runtime의 quota 기본 계정과 quota 설정에 등록된 추가 계정에 연결을 설치하며 저장소별 준비 명령은 없다. 지침 원본 파일명은 고정이고 별도 스크립트·사용자 작성 hook 없이 동작한다.
-- `setup [--agent=all|claude|codex] [--dry-run] [--no-global-ignore]`는 선택한 runtime의 기본 계정과 quota 설정에 등록된 추가 계정 모두에 연결을 설치한다. 대상 산출에는 호출 환경의 `CLAUDE_CONFIG_DIR`/`CODEX_HOME`을 사용하지 않는다. Claude는 각 계정 `settings.json`의 SessionStart·WorktreeCreate·WorktreeRemove에 해당 계정의 `--claude-config-dir`를 명시한 고정 quota 준비 명령(`_prepare`)을 설치하며 Claude의 project instruction 옵션 값은 변경하지 않는다. Codex는 각 계정 `hooks.json`의 SessionStart에 해당 계정의 `--codex-home`을 명시한 고정 quota 준비 명령을 설치한다. Codex hook은 첫 세션 전달 본문이 preview로 잘리지 않도록 `additionalContextLimit = 0`을 포함한다. 이전 `_hook` 관리 항목과 정확히 식별된 이전 주입 hook은 교체·제거한다. Codex 대상이 있으면 설치한 quota hook의 현재 native hook hash만 각 계정 `config.toml`의 trust state에 동기화하고, 무관 hook·설정·주석·native 신뢰 상태는 보존한다. 전역 git ignore 파일(`core.excludesFile`, 미설정이면 `~/.config/git/ignore`)에 `AGENTS.override.md`, `.claude/AGENTS.md`, `.claude/CLAUDE.md`가 없으면 quota 관리 표식 주석 아래에 추가한다. 이미 있는 줄은 추가하지 않고 관리 대상으로 삼지 않는다. `--no-global-ignore`면 추가하지 않는다. 전역 ignore 파일은 읽은 내용을 기준으로 수정하고, 저장 직전에 다시 읽어 달라졌으면 저장하지 않고 실패한다(재읽기와 rename 사이의 경쟁은 보장 범위 밖이다). dry-run은 같은 사전 검사와 변경 계획만 출력한다.
-- `uninstall [--agent=all|claude|codex] [--dry-run] [--remove-global-ignore]`은 계정 연결을 제거한다. 전역 ignore의 quota 관리 블록은 남아 있는 생성물의 노출을 막기 위해 기본적으로 유지하며, `--remove-global-ignore`를 `--agent=all`과 함께 명시할 때만 관리 표식 아래의 줄을 제거한다. 사용자가 직접 쓴 같은 내용의 줄은 제거하지 않는다. 저장소의 생성물은 건드리지 않으며 `status`가 남은 생성물을 보고한다.
-- 저장소 준비는 준비 hook이 세션 시작 시 그 checkout에 대해 수행한다. Git 저장소가 아니면 아무것도 하지 않는다. primary(bare 저장소는 bare 루트)에 `AGENTS.local.md`가 있으면 (1) 세션 시작 디렉터리부터 상위 디렉터리까지 `CLAUDE.md`/`.claude/CLAUDE.md`/`CLAUDE.local.md`가 없을 때는 checkout에 `.claude/AGENTS.md`를 `@../AGENTS.local.md` 한 줄로 생성·갱신하고, 있으면 checkout에 `.claude/CLAUDE.md`를 `@../AGENTS.local.md` 한 줄로 생성·갱신하며, (2) `AGENTS.override.md`를 checkout의 `AGENTS.md`(있으면)와 primary `AGENTS.local.md`의 결정적 병합으로 생성·갱신하고, (3) linked worktree에는 primary `AGENTS.local.md`와 등록된 로컬 파일의 관리 복사본을 갱신한다. 세션 시작 디렉터리부터 상위 디렉터리까지의 기존 `CLAUDE.md`/`.claude/CLAUDE.md`는 checkout `AGENTS.md`를 직접 import할 때만 Claude 호환으로 본다. 사용자 전역 `~/.claude/CLAUDE.md`는 이 판단에서 제외한다. `AGENTS.local.md`가 없으면 quota 소유의 변경 없는 생성물과 관리 복사본을 제거한다. 생성·갱신·제거의 모든 경로는 같은 보호 검사(상위 디렉터리, Git 추적, 소유권 해시·권한, 원본 오류)를 먼저 통과해야 하며 제거가 이 검사를 건너뛰지 않는다. 상태에 생성물로 기록됐지만 더 이상 준비 계획에 없는 파일(등록 해제된 생성물 등)도 같은 소유권 조건으로 제거한다. 이전 버전이 기록한 `AGENTS.md` 공용 복사본은 예외로 두어 생성·삭제 대상에서 제외한다. 이전 버전이 만든 `CLAUDE.md`와 `CLAUDE.local.md`는 상태에 기록된 quota 소유 생성물이면 제거하되, 대체 Claude bridge를 준비하지 못한 경우에는 보존한다. 원본 읽기 실패는 제거 사유가 아니며 해당 파일을 보존하고 이유를 출력한다. 제거·쓰기 경로의 상위 디렉터리는 checkout 안의 실제 디렉터리여야 하며 symlink를 따라가지 않는다. 준비 결과가 변경 없음이면 파일을 다시 쓰지 않는다.
-- 첫 세션 전달: 이벤트 source가 새 세션(startup)이고 준비 hook이 그 호출에서 native 로딩이 이미 끝난 파일을 바꿨을 때, 그 세션에 한해 additionalContext로 1회 전달한다. Claude는 `.claude/AGENTS.md`, `.claude/CLAUDE.md`, 또는 linked worktree의 `AGENTS.local.md` 복사본을 그 startup에서 생성·갱신했을 때 native가 아직 읽지 못한 본문만 전달한다. 이전 로컬 bridge 제거처럼 개인 본문을 이미 native가 읽은 migration에서는 개인 본문을 다시 보내지 않고, 공용 `AGENTS.md`가 누락되는 경우 공용 본문만 전달한다. Codex는 `AGENTS.override.md`가 생성됐을 때 개인 본문을, 갱신됐을 때는 병합본 전체를 전달한다(Codex는 `AGENTS.override.md`가 있으면 `AGENTS.md`를 읽지 않으므로). 로컬 지침 제거로 quota 소유 `AGENTS.override.md`가 삭제된 startup에서는 현재 `AGENTS.md` 본문을 전달한다. 같은 checkout에서 준비 파일이 없던 첫 startup 여러 개를 동시에 시작해 각 세션의 native 로딩 시점과 준비 hook 실행 순서가 엇갈리는 경우는 전달 보장 범위 밖이며, 다음 새 세션부터 native 파일 상태를 따른다. resume·compact·clear, 준비 결과 변경 없음, 생성 실패에는 전달하지 않는다. 그 외에는 hook이나 매 턴 입력에 본문을 붙이지 않으며 SubagentStart로 native 전달을 중복하지 않는다.
-- Claude SessionStart hook이 실행되는 실제 Claude 런타임에서 `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`이면 native 지침 채널이 꺼진 상태이므로 notice를 출력하고 additionalContext로 본문을 우회 주입하지 않는다. `status`/`plan`/`apply` 같은 사용자 명령은 호출자 환경의 이 값을 대상 계정 상태로 취급하지 않는다.
-- Git: quota는 `.git/` 아래에 쓰지 않는다(exclude·상태·잠금 포함). 상태(생성물 소유권 해시·권한, 로컬 파일 등록)는 `~/.config/quota/instructions/<common-dir 경로 해시>.json`에 소유자 전용 권한·잠금·원자적 저장으로 둔다. 손상된 상태를 기본값으로 대신하지 않는다. 생성물은 쓰기 전에 git-ignored여야 하며, 아니면 그 파일을 만들지 않고 이유와 필요한 전역 ignore 줄을 출력한다. 이전 방식의 `.git/quota-instructions.json`은 새 상태가 없을 때 소유권과 로컬 파일 등록 목록을 읽어 승계하며 갱신·삭제하지 않는다.
-- 소유권: 생성물은 기록된 해시와 권한이 현재 파일과 일치할 때만 갱신·제거한다. 사용자 파일·수정된 생성물·출처 불명 파일은 내용이 같아 보여도 채택·덮어쓰기·삭제하지 않고 이유를 출력한다. private 파일의 Git 추적, 원본의 symlink·비정규 파일·잘못된 UTF-8·NUL은 오류다. 공용 `AGENTS.md`도 존재하면 symlink·비정규 파일·잘못된 UTF-8·NUL을 오류로 보고한다. 개인 생성물은 소유자 권한을 유지한다. Codex가 현재 읽는 `AGENTS.override.md` 또는 `AGENTS.md`가 유효 `project_doc_max_bytes`와 quota의 32767-byte Codex 지침 한도 중 더 작은 값을 넘거나, native 문서 탐색이 변경됐거나, 명시적 비신뢰이면 정상 전달로 인정하지 않으며 자동 준비 hook도 notice로 보고한다. `AGENTS.override.md`가 있을 때 한도를 넘은 비활성 `AGENTS.md`는 status 경고로 보고한다. `CLAUDE.local.md`가 현재 경로에 있으면 `AGENTS.local.md`와 경쟁하는 로컬 지침이므로 status와 준비 hook notice는 Claude를 차단됨으로 보고한다. Claude 설정이 AGENTS 로딩을 끄고 CLAUDE 경로가 checkout `AGENTS.md`를 가져오지 못하면 차단됨으로 보고한다. `CLAUDE.md`가 `@AGENTS.md`를 직접 import하는 기존 repo는 호환 상태로 취급한다.
-- Codex는 `AGENTS.override.md`가 있으면 그것을, 없으면 `AGENTS.md`를 native로 읽는다. 원본과 경로가 같으면 resume 때 추가 전달을 만들지 않는다. 원본 변경에 따른 이전 본문의 잔존은 다음 compact까지 허용하며 이전 지침만 선택 삭제하거나 자동 압축하지 않는다. 하위 디렉터리의 별도 지침은 CLI native 기능이며 검사 범위 밖이다. native memory를 생략하는 내장 subagent와 호출별 로딩 override는 전달 검증 범위 밖이다.
-- `local-file add|remove|list [dir] [PATH ...]`는 primary 기준 상대 경로를 linked worktree 복사 목록에 등록·해제·조회한다. 명시한 8MiB 이하의 ignored·untracked 정규 파일만 복사하며 소유자 실행 권한을 보존한다. 경로 이탈·symlink·생성물 경로·`.gitignore` 파일·대소문자와 Unicode 정규화 기준의 중복 경로는 거부하고 원본 파일명은 바꾸지 않는다. 등록만 하며 복사는 준비 hook과 WorktreeCreate가 수행한다.
-- 생성물은 쓰기 전뿐 아니라 존재하는 동안에도 git-ignored여야 한다. 이미 최신인 생성물이 ignore에서 빠지면 준비 hook과 status 모두 그 파일을 건너뜀으로 보고한다. 제거 대상에는 ignore 검사를 적용하지 않는다(제거가 노출을 없앤다). 평가와 쓰기·제거 사이에 외부에서 파일이 바뀌는 경쟁은 보장 범위 밖이다.
-- `status [dir] [--agent=all|claude|codex]`는 준비 함수와 같은 평가(원본 읽기 포함)를 쓰기 없이 수행해 준비가 생성·갱신·제거·건너뜀으로 판단할 파일(등록 해제된 생성물 포함)과 그 이유를 보고하고, 계정 연결·유효 native 설정을 검사한다. 소유권 해시·권한이 유지된 현존 생성물은 JSON `repository.generated`와 텍스트 `generated:` 줄에 나열한다. 생성·갱신·제거·건너뜀 대상은 이 목록이 아니라 문제 항목으로 보고한다. 모델을 실행하지 않으며 설정됨·차단됨·신뢰 대기·확인 불가를 구분한다. 일부만 준비됐거나 확인 불가이면 전체 성공으로 응답하지 않는다.
-- 사용자-facing `agent instructions` 검증은 `status`까지다. 모델 호출로 실제 지침 전달을 확인하는 live canary는 일반 사용자 명령으로 제공하지 않는다. 기본 기능 검증은 프로덕션 코드의 파일·설정 계약을 검사하는 로컬 테스트로 수행하고, 사용자 계정의 Claude/Codex quota를 소비하는 검증을 정상 사용 흐름에 넣지 않는다.
-- Claude WorktreeCreate는 primary 밖에 worktree를 만들고 준비 함수를 실행한 뒤 경로를 반환한다. WorktreeRemove는 관리한 worktree만 정리하며, 사용자 변경·추적되지 않은 사용자 파일·알 수 없는 ignored 파일·기록과 내용이나 권한이 달라진 생성물(이전 방식의 `CLAUDE.md` 포함)·변경 검사를 생략하는 index 플래그가 있으면 생성물을 지우기 전에 보존하고 실패한다. checkout 전체가 제거되므로 원본 오류 검사는 WorktreeRemove에 적용하지 않는다.
+- Claude 지침 로딩 전제: native 지침 채널이 켜져 있고 `project instruction` 모드가 managed-only가 아니면, Claude는 제외되지 않은 `CLAUDE.md`, `.claude/rules/*.md`와 그 `@import`를 읽는다. 기본 모드에서 프로젝트에 CLAUDE 파일이 없으면 `AGENTS.md`를 대신 읽고, 둘 다 읽는 모드에서는 함께 읽는다. Claude에는 `AGENTS.local.md`를 찾는 native 규칙이 없다. quota는 `project instruction` 옵션을 바꾸지 않으며, `status` 진단은 각 계정의 유효 옵션을 그대로 읽어 판정한다.
+- 목적: 공용 `AGENTS.md`는 루트·하위 모두 Claude Code와 Codex CLI가 native로 읽고, 개인 `AGENTS.local.md`는 quota가 세션 시작 hook으로 주입한다. 사용자는 `setup` 한 번으로 선택한 runtime의 quota 기본 계정과 quota 설정에 등록된 추가 계정에 hook을 설치하며, 저장소별 준비 명령과 저장소 생성 파일은 없다. 지침 원본 파일명은 고정이고 별도 스크립트·사용자 작성 hook 없이 동작한다.
+- `AGENTS.md` 불간섭: quota는 `AGENTS.md`를 import·복사·병합·주입하지 않으며, CLAUDE 파일을 만들거나 수정하지 않는다.
+- 지침 파일 배치 계약: 지침 원본은 공용 `AGENTS.md`와 개인 `AGENTS.local.md`뿐이다. 루트·하위 폴더 모두 `CLAUDE.md`·`.claude/CLAUDE.md`·`CLAUDE.local.md`를 두지 않는 것을 권장한다. Claude Code 기본 설정은 작업 위치부터 상위까지 이 파일이 하나라도 있으면(그 계정의 설정 디렉터리 안의 전역 `CLAUDE.md`는 제외) 하위 폴더 `AGENTS.md`를 읽지 않으며, `@AGENTS.md` 한 줄짜리 루트 `CLAUDE.md`도 같다. 다른 계정 설정 디렉터리의 `.claude/CLAUDE.md`가 상위 폴더에 있으면 Claude는 그것을 프로젝트 CLAUDE 파일로 분류한다. quota는 이를 `status` 진단에 반영하며, 그로 인한 `AGENTS.md` 로딩 차이는 quota 범위 밖이다.
+- 주입: 각 계정의 세션 시작 hook(`_prepare`)은 hook 입력 `cwd`가 속한 Git 저장소의 primary 루트(bare 저장소는 bare 루트)에 있는 `AGENTS.local.md` 전문을 additionalContext로 넣는다. linked worktree도 primary의 파일을 읽는다. 파일이 없거나 Git 저장소 밖이면 아무것도 넣지 않는다. Claude와 Codex 모두 source가 startup·clear·compact일 때 넣고 resume에는 넣지 않는다(이전 전달이 transcript에 남아 있다). source가 없거나 알 수 없는 값이면 넣지 않는다. SubagentStart와 매 턴 입력에는 붙이지 않는다.
+- 원본 검사: `AGENTS.local.md`는 symlink가 아닌 정규 파일이어야 하고, 유효한 UTF-8이며 NUL이 없고 8MiB 이하여야 한다. 위반이면 본문 대신 notice를 넣는다. 원본 오류를 부재로 취급하지 않는다.
+- 단일 출력: 각 런타임에는 지침을 주입하는 SessionStart hook 하나만 설치한다. quota는 `AGENTS.local.md` 본문을 분할하거나 잘라서 출력하지 않으며, 원본 검사와 전달 한도에 걸리지 않으면 하나의 additionalContext에 전문을 넣는다. Codex hook은 `additionalContextLimit = 0`으로 설정한다.
+- Claude 전달 한도: 머리줄·notice를 포함한 최종 additionalContext가 UTF-16 단위 10,000자를 넘으면, 전문 대신 짧은 오류를 맨 앞에 전달하고 기존 notice는 뒤에 보존한다. 오류는 지침 hook 출력의 한도 초과로 전체 context를 전달하지 못함을 사용자에게 알리고 정상 로드로 보고하지 말라고 에이전트에게 지시하며, 원본 파일이 없는 경우에도 맞는 표현을 사용한다. 이는 보고 지시이며 런타임 강제 중단은 아니다. `status`도 본문과 머리줄이 이 한도를 넘으면 문제로 보고한다. 본문을 줄이거나 나눠서 이 제약을 우회하지 않는다.
+- Claude 입력 검사: UserPromptSubmit hook 하나가 현재 primary `AGENTS.local.md`의 원본과 본문·머리줄의 10,000 UTF-16 단위 한도를 검사한다. 초과·원본 오류·검사 실패이면 실패 사실과 원인을 모델의 입력 context로 전달하고, 사용자에게 직접 설명하고 도구 호출과 요청 작업을 보류하며 문제 해결 뒤 새 세션이 필요함을 안내하도록 지시한다. 분할·잘라내기·한도 우회를 제안하거나 지침 파일을 임의 수정하지 않도록 지시한다. 제품의 보장 범위와 성공 기준은 오류·원인·설명 및 작업 보류 지시를 모델에 전달하는 것까지다. 모델의 지시 준수, 런타임 강제 차단, `-p`의 오류 종료는 보장하지 않는다. 정상 범위·빈 파일·파일 부재·Git 저장소 밖이면 통과한다. 본문 재주입·생성물 정리·상태 파일 저장은 하지 않는다. 대화형과 `claude -p` 모두 모델 context에 오류와 지시가 전달되는지를 검증하며, 터미널 경고나 종료 코드만으로 전달 성공을 판정하지 않는다. 이 검사는 과거 SessionStart 전달 성공이나 일회성 정리 notice까지 보증하지 않으며, 파일을 고친 뒤 지침을 다시 로드하려면 새 세션을 시작해야 한다.
+- `setup [--agent=all|claude|codex] [--dry-run]`는 선택한 runtime의 기본 계정과 quota 설정에 등록된 추가 계정 모두에 hook을 설치한다. 대상 산출에는 호출 환경의 `CLAUDE_CONFIG_DIR`/`CODEX_HOME`을 사용하지 않는다. hook 명령은 모든 계정에 동일하며 계정 경로 인자를 갖지 않는다. 이전 버전의 quota 지침 hook(분할 hook, WorktreeCreate·WorktreeRemove 항목, `_hook`, 계정 경로 인자가 있는 `_prepare`, 셸 스크립트 hook)은 교체·제거한다. Codex 대상이 있으면 설치한 quota hook의 현재 native hook hash만 각 계정 `config.toml`의 trust state에 동기화하고, 무관 hook·설정·주석·native 신뢰 상태는 보존한다. 전역 git ignore 파일은 더 이상 관리하지 않는다. dry-run은 같은 사전 검사와 변경 계획만 출력한다.
+- `uninstall [--agent=all|claude|codex] [--dry-run]`은 계정 hook을 제거한다. 저장소의 파일은 건드리지 않는다.
+- Claude 초기화: `setup`은 hook 설치 후 대상 Claude 계정마다 모델 대화 없는 초기화 명령을 실행하고 결과를 안내한다. 준비 범위는 저장소별이 아니라 계정 설정 환경별이며, 별도 준비 상태를 저장하거나 native 로딩을 성공 조건으로 검사하지 않는다. 초기화 실패는 경고만 하고 hook 설치 성공을 오류 종료로 바꾸지 않는다. `dry-run`은 실행 계획만 안내하며 `status`·`uninstall`은 초기화하지 않는다.
+- 이전 생성물 정리: 이전 버전이 저장소에 만든 `.claude/rules/quota-instructions.md`, `AGENTS.override.md`, `.claude/AGENTS.md`, `.claude/CLAUDE.md`, linked worktree 복사본은 `~/.config/quota/instructions/<common-dir 경로 해시>.json`에 기록된 해시와 현재 내용이 일치하는 것만 hook 실행 시 제거하고, 기록 파일을 삭제한다. 일치하지 않는 파일은 남기고 notice로 알린다. `status`는 남은 기록과 파일을 보고만 한다. quota는 `.git/` 아래에 쓰지 않는다.
+- `status [dir] [--agent=all|claude|codex]`는 모델을 실행하지 않고 다음을 보고한다. 계정별 hook 설치 상태(각 런타임 SessionStart 1개와 Claude UserPromptSubmit 1개의 고정 명령·실행 설정, `disableAllHooks`, Codex trust state), 저장소 primary의 `AGENTS.local.md` 존재·원본 검사, native `AGENTS.md` 읽기를 막는 조건(작업 위치부터 상위의 `CLAUDE.md`·`.claude/CLAUDE.md`·`CLAUDE.local.md`, `AGENTS.md`를 읽지 않는 유효 project instruction 모드)은 경고. 설정됨·차단됨·확인 불가를 구분하며 일부만 준비됐거나 확인 불가이면 전체 성공으로 응답하지 않는다.
+- 사용자-facing `agent instructions` 검증은 `status`까지다. 모델 호출로 실제 지침 전달을 확인하는 live canary는 일반 사용자 명령으로 제공하지 않는다. 기본 기능 검증은 프로덕션 코드의 파일·설정 계약을 검사하는 로컬 테스트로 수행한다. 사용자 계정의 Claude/Codex quota를 소비하는 검증을 정상 사용 흐름에 넣지 않는다.
 - 계정 설정의 최신 읽기·수정·백업·원자적 저장은 대상 잠금 안에서 처리하고, 사전 검사는 모든 대상에 대해 쓰기 전에 수행한다. 여러 파일 중 일부만 적용되면 적용 경로와 실패 경로를 보고하고 non-zero로 끝낸다. 재적용은 중복 hook·불필요한 백업·동일 파일 재쓰기를 만들지 않는다.
-- 내부 진입점 `_prepare`는 고정된 공급자/이벤트 조합(`claude`: SessionStart·WorktreeCreate·WorktreeRemove, `codex`: SessionStart)과 설치 시 확정한 계정 경로(`--claude-config-dir` 또는 `--codex-home`)만 받으며 임의 파일·명령 실행 입력은 받지 않는다.
+- 내부 진입점 `_prepare`는 고정된 공급자/이벤트 조합(`claude`·`codex`: SessionStart, `claude`: UserPromptSubmit)만 받으며 임의 파일·명령 실행 입력은 받지 않는다.
 
 **서브커맨드 (세션 로그 조회)**:
 | 명령 | 설명 |

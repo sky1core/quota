@@ -20,18 +20,10 @@ import (
 )
 
 type NativeReport struct {
-	config                       map[string]json.RawMessage
-	layers                       []nativeConfigLayerData
-	hookMetadata                 []nativeHookMetadata
-	State                        string              `json:"state"`
-	Hooks                        []NativeHook        `json:"hooks"`
-	Issues                       []string            `json:"issues,omitempty"`
-	ConfigLayers                 []NativeConfigLayer `json:"configLayers"`
-	ProjectDocMaxBytes           *int64              `json:"projectDocMaxBytes"`
-	ProjectDocFallbackFilenames  []string            `json:"projectDocFallbackFilenames"`
-	HooksEnabled                 *bool               `json:"hooksEnabled"`
-	ProjectRootMarkers           []string            `json:"projectRootMarkers"`
-	ProjectRootMarkersConfigured bool                `json:"projectRootMarkersConfigured"`
+	hookMetadata []nativeHookMetadata
+	State        string       `json:"state"`
+	Hooks        []NativeHook `json:"hooks"`
+	Issues       []string     `json:"issues,omitempty"`
 }
 
 type CodexTrustSyncResult struct {
@@ -56,16 +48,6 @@ type NativeHook struct {
 	State                  string  `json:"state"`
 }
 
-type NativeConfigLayer struct {
-	Name struct {
-		Type           string  `json:"type"`
-		File           string  `json:"file,omitempty"`
-		DotCodexFolder string  `json:"dotCodexFolder,omitempty"`
-		Profile        *string `json:"profile,omitempty"`
-	} `json:"name"`
-	DisabledReason *string `json:"disabledReason,omitempty"`
-}
-
 type nativeHookMetadata struct {
 	NativeHook
 	Key         *string         `json:"key"`
@@ -74,37 +56,13 @@ type nativeHookMetadata struct {
 	AsyncValue  json.RawMessage `json:"async"`
 }
 
-type nativeConfigLayerData struct {
-	NativeConfigLayer
-	Config map[string]json.RawMessage `json:"config"`
-}
-
-type nativeProjectTrust struct {
-	TrustLevel string `json:"trust_level"`
-}
-
-func InspectNativeCodex(ctx context.Context, cwd string, expected map[string]string) (NativeReport, error) {
-	home, err := config.DefaultAccountDirectory("codex")
-	if err != nil {
-		return NativeReport{}, err
+func InspectNativeCodexHooksForHome(ctx context.Context, cwd, home string, expected map[string]string) (NativeReport, error) {
+	for event, command := range expected {
+		if (event != "sessionStart" && event != "subagentStart") || command == "" {
+			return NativeReport{State: "unknown", Hooks: []NativeHook{}}, fmt.Errorf("invalid expected instruction hook event or command: %s", event)
+		}
 	}
-	return InspectNativeCodexForHome(ctx, cwd, home, expected)
-}
-
-func InspectNativeCodexConfig(ctx context.Context, cwd string) (NativeReport, error) {
-	home, err := config.DefaultAccountDirectory("codex")
-	if err != nil {
-		return NativeReport{}, err
-	}
-	return InspectNativeCodexConfigForHome(ctx, cwd, home)
-}
-
-func InspectNativeCodexForHome(ctx context.Context, cwd, home string, expected map[string]string) (NativeReport, error) {
-	return inspectNativeCodex(ctx, cwd, home, expected, true)
-}
-
-func InspectNativeCodexConfigForHome(ctx context.Context, cwd, home string) (NativeReport, error) {
-	return inspectNativeCodex(ctx, cwd, home, nil, false)
+	return inspectNativeCodexHooks(ctx, cwd, home, expected)
 }
 
 func (i *Installation) SyncCodexHookTrust(ctx context.Context, cwd string) (CodexTrustSyncResult, error) {
@@ -142,9 +100,6 @@ func (i *Installation) PlanCodexHookTrust(ctx context.Context, cwd string, insta
 		return nil, err
 	}
 	if installHookChanged {
-		if _, err := InspectNativeCodexConfigForHome(ctx, cwd, i.targets.CodexHome); err != nil {
-			return nil, err
-		}
 		if _, err := inspectNativeCodexHooks(ctx, cwd, i.targets.CodexHome, nil); err != nil {
 			return nil, err
 		}
@@ -211,143 +166,6 @@ func sameNativeCodexHookSource(actual, expected string) bool {
 		}
 	}
 	return false
-}
-
-func inspectNativeCodex(ctx context.Context, cwd, home string, expected map[string]string, inspectHooks bool) (NativeReport, error) {
-	report := NativeReport{State: "unknown", Hooks: []NativeHook{}, ConfigLayers: []NativeConfigLayer{}}
-	cwd, err := filepath.Abs(cwd)
-	if err != nil {
-		return report, err
-	}
-	home, err = config.CanonicalAccountDirectory(home)
-	if err != nil {
-		return report, err
-	}
-	for event, command := range expected {
-		if (event != "sessionStart" && event != "subagentStart") || command == "" {
-			return report, fmt.Errorf("invalid expected instruction hook event or command: %s", event)
-		}
-	}
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	cmd := childprocess.CommandContext(ctx, "codex", "app-server")
-	cmd.Dir = cwd
-	cmd.Env = codexprovider.EnvForHome(os.Environ(), home)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return report, err
-	}
-	defer stdin.Close()
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return report, err
-	}
-	if err := cmd.Start(); err != nil {
-		return report, fmt.Errorf("start Codex native inspection: %w", err)
-	}
-	defer func() {
-		_ = stdin.Close()
-		done := make(chan error, 1)
-		go func() { done <- cmd.Wait() }()
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			cancel()
-			<-done
-		}
-	}()
-	reader := bufio.NewScanner(stdout)
-	reader.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	writer := json.NewEncoder(stdin)
-	request := func(id int, method string, params any) (json.RawMessage, error) {
-		if err := writer.Encode(map[string]any{"id": id, "method": method, "params": params}); err != nil {
-			return nil, err
-		}
-		for reader.Scan() {
-			var response struct {
-				ID     *int            `json:"id"`
-				Result json.RawMessage `json:"result"`
-				Error  json.RawMessage `json:"error"`
-			}
-			if err := json.Unmarshal(reader.Bytes(), &response); err != nil {
-				return nil, fmt.Errorf("decode %s response: %w", method, err)
-			}
-			if response.ID == nil || *response.ID != id {
-				continue
-			}
-			if len(response.Error) != 0 && string(response.Error) != "null" {
-				var rpcError struct {
-					Code int `json:"code"`
-				}
-				_ = json.Unmarshal(response.Error, &rpcError)
-				return nil, fmt.Errorf("%s unavailable (RPC error %d)", method, rpcError.Code)
-			}
-			if len(response.Result) == 0 || string(response.Result) == "null" {
-				return nil, fmt.Errorf("%s returned no result", method)
-			}
-			return response.Result, nil
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if err := reader.Err(); err != nil {
-			return nil, err
-		}
-		return nil, io.ErrUnexpectedEOF
-	}
-	if _, err = request(1, "initialize", map[string]any{
-		"clientInfo":   map[string]string{"name": "quota-cli", "version": "0.1.0"},
-		"capabilities": map[string]bool{"experimentalApi": true},
-	}); err != nil {
-		return report, fmt.Errorf("initialize native inspection: %w", err)
-	}
-	if err := writer.Encode(map[string]any{"method": "initialized"}); err != nil {
-		return report, err
-	}
-	config, configErr := request(2, "config/read", map[string]any{"cwd": cwd, "includeLayers": true})
-	if configErr == nil {
-		configErr = parseNativeConfig(config, &report)
-	}
-	var hooksErr error
-	if inspectHooks {
-		var hooks json.RawMessage
-		hooks, hooksErr = request(3, "hooks/list", map[string]any{"cwds": []string{cwd}})
-		if hooksErr == nil {
-			hooksErr = parseNativeHooks(hooks, cwd, expected, &report)
-		}
-	} else {
-		report.State = "configured"
-	}
-	for _, err := range []error{configErr, hooksErr} {
-		if err != nil {
-			report.Issues = append(report.Issues, err.Error())
-		}
-	}
-	if err := errors.Join(configErr, hooksErr); err != nil {
-		report.State = "unknown"
-		return report, err
-	}
-	if len(expected) > 0 && report.HooksEnabled != nil && !*report.HooksEnabled {
-		report.State = "blocked"
-		report.Issues = append(report.Issues, "effective features.hooks is false")
-	}
-	if report.ProjectDocMaxBytes != nil && *report.ProjectDocMaxBytes <= 0 {
-		report.State = "blocked"
-		report.Issues = append(report.Issues, "effective project_doc_max_bytes must be positive")
-	}
-	if len(report.ProjectDocFallbackFilenames) != 0 {
-		report.State = "blocked"
-		report.Issues = append(report.Issues, "effective project_doc_fallback_filenames changes project document discovery")
-	}
-	if report.ProjectRootMarkersConfigured {
-		report.State = "blocked"
-		report.Issues = append(report.Issues, "effective config explicitly sets project_root_markers and changes project document discovery")
-	}
-	if issue := nativeCodexTrustIssue(report, cwd); issue != "" {
-		report.State = "blocked"
-		report.Issues = append(report.Issues, issue)
-	}
-	return report, nil
 }
 
 func inspectNativeCodexHooks(ctx context.Context, cwd, home string, expected map[string]string) (NativeReport, error) {
@@ -467,103 +285,6 @@ func codexQuotedKeySegment(key string) string {
 	}
 	b.WriteByte('"')
 	return b.String()
-}
-
-func parseNativeConfig(raw json.RawMessage, report *NativeReport) error {
-	var result struct {
-		Config map[string]json.RawMessage `json:"config"`
-		Layers *[]nativeConfigLayerData   `json:"layers"`
-	}
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return fmt.Errorf("config/read: %w", err)
-	}
-	if result.Config == nil || result.Layers == nil {
-		return errors.New("config/read omitted effective config or layers")
-	}
-	report.config, report.layers = result.Config, *result.Layers
-	for _, layer := range *result.Layers {
-		report.ConfigLayers = append(report.ConfigLayers, layer.NativeConfigLayer)
-		if layer.Name.Type == "" {
-			return errors.New("config/read returned an unidentified config layer")
-		}
-		if layer.Config == nil {
-			return errors.New("config/read omitted layer config")
-		}
-		if layer.DisabledReason != nil && *layer.DisabledReason != "" {
-			report.Issues = append(report.Issues, fmt.Sprintf("config layer %s disabled: %s", layer.Name.Type, *layer.DisabledReason))
-			continue
-		}
-		if raw, present := layer.Config["project_root_markers"]; present && string(raw) != "null" {
-			var markers []string
-			if err := json.Unmarshal(raw, &markers); err != nil {
-				return errors.New("config/read returned invalid layer project_root_markers")
-			}
-			report.ProjectRootMarkersConfigured = true
-		}
-	}
-	if raw, present := result.Config["project_root_markers"]; !present {
-		return errors.New("config/read omitted effective project_root_markers")
-	} else if err := json.Unmarshal(raw, &report.ProjectRootMarkers); err != nil {
-		return errors.New("config/read returned invalid project_root_markers")
-	}
-	if err := json.Unmarshal(result.Config["project_doc_max_bytes"], &report.ProjectDocMaxBytes); err != nil || report.ProjectDocMaxBytes == nil || *report.ProjectDocMaxBytes < 0 {
-		return errors.New("config/read did not report a valid project_doc_max_bytes")
-	}
-	if raw, ok := result.Config["project_doc_fallback_filenames"]; !ok || string(raw) == "null" {
-		return errors.New("config/read omitted project_doc_fallback_filenames")
-	} else if err := json.Unmarshal(raw, &report.ProjectDocFallbackFilenames); err != nil {
-		return errors.New("config/read returned invalid project_doc_fallback_filenames")
-	}
-	if raw, ok := result.Config["features"]; ok && string(raw) != "null" {
-		var features map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &features); err != nil {
-			return errors.New("config/read returned invalid features")
-		}
-		if raw, ok := features["hooks"]; ok {
-			if err := json.Unmarshal(raw, &report.HooksEnabled); err != nil || report.HooksEnabled == nil {
-				return errors.New("config/read returned invalid features.hooks")
-			}
-		}
-	}
-	return nil
-}
-
-func nativeCodexTrustIssue(report NativeReport, path string) string {
-	raw, ok := report.config["projects"]
-	if !ok || string(raw) == "null" {
-		return ""
-	}
-	var projects map[string]nativeProjectTrust
-	if err := json.Unmarshal(raw, &projects); err != nil {
-		return "config/read returned invalid project trust"
-	}
-	normalized := make(map[string]nativeProjectTrust, len(projects))
-	for path, project := range projects {
-		normalized[filepath.Clean(path)] = project
-	}
-	candidates := []string{filepath.Clean(path)}
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		candidates = append(candidates, resolved)
-	}
-	for _, candidate := range candidates {
-		matched, project, ok := nearestNativeProjectTrust(normalized, candidate)
-		if ok && project.TrustLevel == "untrusted" {
-			return matched + " is explicitly untrusted in effective Codex config"
-		}
-	}
-	return ""
-}
-
-func nearestNativeProjectTrust(projects map[string]nativeProjectTrust, path string) (string, nativeProjectTrust, bool) {
-	for candidate := filepath.Clean(path); ; candidate = filepath.Dir(candidate) {
-		if project, ok := projects[candidate]; ok {
-			return candidate, project, true
-		}
-		parent := filepath.Dir(candidate)
-		if parent == candidate {
-			return "", nativeProjectTrust{}, false
-		}
-	}
 }
 
 func parseNativeHooks(raw json.RawMessage, cwd string, expected map[string]string, report *NativeReport) error {

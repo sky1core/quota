@@ -45,7 +45,7 @@ func runAgent(args []string) int {
 func printAgentUsage(output io.Writer) {
 	fmt.Fprint(output, `usage:
   quota-cli agent hooks <init|list|plan|apply|verify|doctor|eval> [options]
-  quota-cli agent instructions <setup|uninstall|status|local-file> [options]
+  quota-cli agent instructions <setup|uninstall|status> [options]
 `)
 }
 

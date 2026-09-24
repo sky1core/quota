@@ -13,6 +13,8 @@ import (
 	"github.com/sky1core/quota/internal/config"
 )
 
+const instructionEvent = "SessionStart"
+
 type InstallTargets struct {
 	ClaudeAccount   string `json:"claude_account,omitempty"`
 	ClaudeConfigDir string `json:"claude_config_dir,omitempty"`
@@ -142,36 +144,22 @@ func installAgents(agents []string) ([]string, error) {
 	}
 	return out, nil
 }
-func installEvents(agent string) []string {
-	if agent == "claude" {
-		return []string{"SessionStart", "WorktreeCreate", "WorktreeRemove"}
-	}
-	return []string{"SessionStart"}
-}
 func (i *Installation) command(agent, event string) string {
 	args := []string{i.executable, "agent", "instructions", "_prepare", "--agent=" + agent, "--event=" + event}
-	switch agent {
-	case "claude":
-		dir := i.targets.ClaudeConfigDir
-		if dir == "" && i.targets.ClaudeSettings != "" {
-			dir = filepath.Dir(i.targets.ClaudeSettings)
-		}
-		args = append(args, "--claude-config-dir", dir)
-	case "codex":
-		home := i.targets.CodexHome
-		if home == "" && i.targets.CodexHooks != "" {
-			home = filepath.Dir(i.targets.CodexHooks)
-		}
-		args = append(args, "--codex-home", home)
-	}
 	return agenthooks.ShellQuote(args)
 }
-func (i *Installation) desired(agent, event string) map[string]any {
+func instructionEvents(agent string) []string {
+	if agent == "claude" {
+		return []string{instructionEvent, "UserPromptSubmit"}
+	}
+	return []string{instructionEvent}
+}
+func (i *Installation) expectedHook(agent, event string) map[string]any {
 	hook := map[string]any{"type": "command", "command": i.command(agent, event)}
 	if agent == "codex" {
 		hook["additionalContextLimit"] = 0
 	}
-	return map[string]any{"hooks": []any{hook}}
+	return hook
 }
 func (i *Installation) owns(command, agent, event string) bool {
 	return agenthooks.OwnsInstructionCommand(command, i.executable, agent, event)
@@ -293,9 +281,9 @@ func (i *Installation) transformHooks(root map[string]any, agent string, uninsta
 		}
 	}
 	if !uninstall {
-		for _, event := range installEvents(agent) {
+		for _, event := range instructionEvents(agent) {
 			groups, _ := installArray(hooks[event])
-			hooks[event] = append(groups, i.desired(agent, event))
+			hooks[event] = append(groups, map[string]any{"hooks": []any{i.expectedHook(agent, event)}})
 		}
 	}
 	if len(hooks) > 0 {
@@ -491,12 +479,20 @@ func (i *Installation) Inspect(agents []string) ([]InstallStatus, error) {
 		if v, ok := root["disableAllHooks"]; agent == "claude" && ok && v != false {
 			problem("disableAllHooks blocks hook execution or is invalid")
 		}
+		events := instructionEvents(agent)
+		expected := map[string]map[string]any{}
+		for _, event := range events {
+			expected[event] = i.expectedHook(agent, event)
+		}
+		counts := map[string]int{}
 		hooks, _ := root["hooks"].(map[string]any)
-		for _, event := range installEvents(agent) {
-			count := 0
-			groups, _ := installArray(hooks[event])
-			for _, raw := range groups {
-				g, _ := raw.(map[string]any)
+		for event, raw := range hooks {
+			if agent == "codex" && event == "state" {
+				continue
+			}
+			groups, _ := installArray(raw)
+			for _, rawGroup := range groups {
+				g, _ := rawGroup.(map[string]any)
 				entries, _ := installArray(g["hooks"])
 				for _, e := range entries {
 					h, _ := e.(map[string]any)
@@ -504,20 +500,26 @@ func (i *Installation) Inspect(agents []string) ([]InstallStatus, error) {
 					if !i.owns(c, agent, event) {
 						continue
 					}
-					count++
-					expectedHook := i.desired(agent, event)["hooks"].([]any)[0]
-					if c != i.command(agent, event) || !installEqual(h, expectedHook) {
-						problem(event + ": managed hook differs from the fixed command or execution settings")
+					want, current := expected[event]
+					if !current || c != want["command"] {
+						problem(fmt.Sprintf("%s: obsolete managed hook; run setup again", event))
+						continue
+					}
+					counts[event]++
+					if !installEqual(h, want) {
+						problem(fmt.Sprintf("%s: managed hook differs from the fixed execution settings", event))
 					}
 					for k := range g {
 						if k != "hooks" {
-							problem(event + ": unsupported group fields or matcher")
+							problem(fmt.Sprintf("%s: unsupported group fields or matcher", event))
 							break
 						}
 					}
 				}
 			}
-			if count != 1 {
+		}
+		for _, event := range events {
+			if count := counts[event]; count != 1 {
 				problem(fmt.Sprintf("%s: expected one managed hook, found %d", event, count))
 			}
 		}
@@ -571,5 +573,5 @@ func uniqueInstallStrings(v []string) []string {
 }
 
 func (i *Installation) ExpectedCodexHooks() map[string]string {
-	return map[string]string{"sessionStart": i.command("codex", "SessionStart")}
+	return map[string]string{"sessionStart": i.command("codex", instructionEvent)}
 }

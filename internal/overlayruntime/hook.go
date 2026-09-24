@@ -6,22 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 )
 
-const noticePrefix = "[quota instructions] "
-
-type PrepareHookOptions struct {
-	ClaudeConfigDir         string
-	CodexHome               string
-	CodexProjectDocMaxBytes *int64
-	CodexNativeIssues       []string
-}
-
 func parseHook(reader io.Reader) (map[string]any, error) {
-	dec := json.NewDecoder(io.LimitReader(reader, 1<<20))
+	dec := json.NewDecoder(reader)
 	var h map[string]any
 	if e := dec.Decode(&h); e != nil {
 		return nil, fmt.Errorf("requires JSON hook input: %w", e)
@@ -34,6 +23,7 @@ func parseHook(reader io.Reader) (map[string]any, error) {
 	}
 	return h, nil
 }
+
 func hookString(h map[string]any, key string) (string, error) {
 	v, ok := h[key].(string)
 	if !ok || v == "" {
@@ -42,173 +32,133 @@ func hookString(h map[string]any, key string) (string, error) {
 	return v, nil
 }
 
-func ValidPrepareEvent(agent, event string) bool {
-	switch agent {
-	case "claude":
-		return event == "SessionStart" || event == "WorktreeCreate" || event == "WorktreeRemove"
-	case "codex":
-		return event == "SessionStart"
-	}
-	return false
+func deliversFor(source string) bool {
+	return source == "startup" || source == "clear" || source == "compact"
 }
 
-// RunPrepareHook is the fixed `_prepare` entry point. Notices never block the
-// session: they are delivered as context and the exit code stays 0.
-func RunPrepareHook(ctx context.Context, agent, event string, stdin io.Reader, stdout, stderr io.Writer) int {
-	return RunPrepareHookWithOptions(ctx, agent, event, stdin, stdout, stderr, PrepareHookOptions{})
-}
-
-func RunPrepareHookWithOptions(ctx context.Context, agent, event string, stdin io.Reader, stdout, stderr io.Writer, options PrepareHookOptions) int {
-	if !ValidPrepareEvent(agent, event) {
-		fmt.Fprintln(stderr, "unsupported instruction agent/event combination")
+func RunSessionStartHook(ctx context.Context, agent string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if agent != "claude" && agent != "codex" {
+		fmt.Fprintln(stderr, "unsupported instruction agent")
 		return 2
 	}
-	var err error
-	switch event {
-	case "WorktreeCreate":
-		err = createWorktree(ctx, stdin, stdout, stderr, options)
-	case "WorktreeRemove":
-		err = removeWorktree(ctx, stdin, stderr, options)
-	default:
-		err = sessionStart(ctx, agent, event, stdin, stdout, options)
-	}
-	if err != nil {
+	if err := sessionStart(ctx, agent, stdin, stdout); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cliName, err)
 		return 1
 	}
 	return 0
 }
 
-// firstSessionBody returns what a new session must still receive after this
-// call prepared native files too late for that session's first native scan.
-func firstSessionBody(agent string, result PrepareResult, claudeExcludePatterns []string) string {
-	switch agent {
-	case "claude":
-		return claudeFirstSessionBody(result, claudeExcludePatterns)
-	case "codex":
-		override := filepath.Join(result.Checkout, codexRule)
-		if contains(result.Created, override) {
-			return result.LocalBody
-		}
-		if contains(result.Updated, override) {
-			return result.OverrideBody
-		}
-		if contains(result.Removed, override) {
-			shared := filepath.Join(result.Checkout, sharedRule)
-			if exists(shared) {
-				if data, err := readRegular(shared); err == nil {
-					if text, err := decodeRule(data, shared); err == nil {
-						return text
-					}
-				}
-			}
+func RunClaudePromptHook(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) int {
+	if err := checkClaudePrompt(ctx, stdin); err != nil {
+		reason := fmt.Sprintf("%s: instruction check failed. Required local instructions cannot be treated as fully loaded. Do not perform the user's requested task or call tools. In your next response, explain this instruction-loading problem and its cause to the user. Ask the user to resolve the instruction or inspection error and start a new session before work continues. Do not suggest splitting, truncating, or bypassing the hook limit. Leave instruction files unchanged. Do not claim the instructions loaded successfully.\nCause: %v", cliName, err)
+		if err := json.NewEncoder(stdout).Encode(map[string]any{"hookSpecificOutput": map[string]string{"hookEventName": "UserPromptSubmit", "additionalContext": reason}}); err != nil {
+			fmt.Fprintf(stderr, "%s\nCannot write hook response: %v\n", reason, err)
+			return 2
 		}
 	}
-	return ""
+	return 0
 }
 
-func claudeFirstSessionBody(result PrepareResult, excludePatterns []string) string {
-	beforeShared := claudePathLoaded(result.ClaudeSharedBefore, excludePatterns)
-	beforeLocal := claudePathLoaded(result.ClaudeLocalBefore, excludePatterns)
-	afterShared := claudePathLoaded(result.ClaudeSharedAfter, excludePatterns)
-	afterLocal := claudePathLoaded(result.ClaudeLocalAfter, excludePatterns)
-	if containsSkippedPath(result.Skipped, filepath.Join(result.Checkout, localRule)) {
-		afterLocal = false
+func checkClaudePrompt(ctx context.Context, stdin io.Reader) error {
+	h, err := parseHook(stdin)
+	if err != nil {
+		return err
 	}
-	var parts []string
-	if afterShared && !beforeShared && result.SharedBody != "" {
-		parts = append(parts, result.SharedBody)
+	dir, err := hookString(h, "cwd")
+	if err != nil {
+		return err
 	}
-	if afterLocal && result.LocalBody != "" && (!beforeLocal || result.Changed(filepath.Join(result.Checkout, localRule))) {
-		parts = append(parts, result.LocalBody)
+	if err := ValidateGitEnvironment(ctx); err != nil {
+		return err
 	}
-	return strings.Join(parts, "\n\n")
+	r, err := resolveContext(ctx, dir)
+	if errors.Is(err, ErrOutsideRepository) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	body, notice, _, err := readLocalInstructions(r.localSource())
+	if err != nil {
+		return err
+	}
+	if notice != "" {
+		return errors.New(notice)
+	}
+	if exceedsClaudeHookLimit(sessionStartContext(body, nil)) {
+		return fmt.Errorf("%s and its header exceed Claude's %d UTF-16-unit hook limit", r.localSource(), claudeHookContextLimit)
+	}
+	return nil
 }
 
-func claudePathLoaded(paths []string, excludePatterns []string) bool {
-	for _, path := range paths {
-		if len(claudeExclusionFindings(excludePatterns, path)) == 0 {
-			return true
-		}
+func sessionStart(ctx context.Context, agent string, stdin io.Reader, stdout io.Writer) error {
+	h, err := parseHook(stdin)
+	if err != nil {
+		return err
 	}
-	return false
-}
-
-func containsSkippedPath(skips []PrepareSkip, path string) bool {
-	for _, skip := range skips {
-		if skip.Path == path {
-			return true
-		}
-	}
-	return false
-}
-
-func sessionStart(ctx context.Context, agent, event string, stdin io.Reader, stdout io.Writer, options PrepareHookOptions) error {
-	h, e := parseHook(stdin)
-	if e != nil {
-		return e
-	}
-	dir, e := hookString(h, "cwd")
-	if e != nil {
-		return e
+	dir, err := hookString(h, "cwd")
+	if err != nil {
+		return err
 	}
 	source, _ := h["source"].(string)
-	result, e := PrepareCheckoutWithOptions(ctx, dir, PrepareOptions{ClaudeConfigDir: options.ClaudeConfigDir, CodexHome: options.CodexHome})
-	if errors.Is(e, ErrOutsideRepository) {
+	if !deliversFor(source) {
 		return nil
 	}
-	if e != nil {
-		return e
+	if err := ValidateGitEnvironment(ctx); err != nil {
+		return err
 	}
-	var parts []string
-	var notices []string
-	nativeBlocked := false
-	var claudeExcludePatterns []string
-	if agent == "claude" && (result.LocalPresent || exists(filepath.Join(result.Checkout, sharedRule))) {
-		if notice := claudeHookRuntimeRefusal(os.Environ()); notice != "" {
-			notices = append(notices, notice)
-			nativeBlocked = true
-		}
+	r, err := resolveContext(ctx, dir)
+	if errors.Is(err, ErrOutsideRepository) {
+		return nil
 	}
-	paths := NativeAccountPaths{
-		ClaudeConfigDir: options.ClaudeConfigDir,
-		CodexHome:       options.CodexHome,
-		NeedClaude:      agent == "claude",
-		NeedCodex:       agent == "codex",
+	if err != nil {
+		return err
 	}
-	if r, e := resolveContextWithNativePaths(ctx, dir, paths); e == nil {
-		if problem := sharedRuleProblem(r.Top); problem != "" {
-			notices = append(notices, problem)
-			nativeBlocked = true
-		}
-		switch agent {
-		case "claude":
-			problems := claudeSettingsFindings(r)
-			notices = append(notices, problems...)
-			nativeBlocked = nativeBlocked || len(problems) > 0
-			claudeExcludePatterns = claudeEffectiveExclusionPatterns(r)
-		case "codex":
-			problems, _ := codexSettingsFindings(r, options.CodexProjectDocMaxBytes)
-			problems = append(problems, options.CodexNativeIssues...)
-			notices = append(notices, problems...)
-			nativeBlocked = nativeBlocked || len(problems) > 0
-		}
+	notices, err := r.cleanupLegacy()
+	if err != nil {
+		return err
 	}
-	if source == "startup" && !nativeBlocked {
-		if body := firstSessionBody(agent, result, claudeExcludePatterns); body != "" {
-			parts = append(parts, body)
-		}
+	body, notice, _, err := readLocalInstructions(r.localSource())
+	if err != nil {
+		return err
 	}
-	notices = uniqueStrings(notices...)
-	notices = append(notices, result.SkipReasons()...)
-	for i, n := range notices {
-		notices[i] = noticePrefix + n
+	if notice != "" {
+		notices = append([]string{notice}, notices...)
 	}
+	out := sessionStartContext(body, notices)
+	if agent == "claude" && exceedsClaudeHookLimit(out) {
+		notice := fmt.Sprintf("Instruction hook context was not delivered in full because Claude's instruction hook output exceeds %d UTF-16 units. Tell the user about this failure; do not claim the full instruction context was loaded successfully.", claudeHookContextLimit)
+		out = sessionStartContext("", append([]string{notice}, notices...))
+	}
+	if out == "" {
+		return nil
+	}
+	encoder := json.NewEncoder(stdout)
+	encoder.SetEscapeHTML(false)
+	return encoder.Encode(map[string]any{"hookSpecificOutput": map[string]string{"hookEventName": "SessionStart", "additionalContext": out}})
+}
+
+func sessionStartContext(body string, notices []string) string {
+	var sections []string
 	if len(notices) > 0 {
-		parts = append(parts, strings.Join(notices, "\n"))
+		lines := make([]string, len(notices))
+		for i, notice := range notices {
+			lines[i] = noticePrefix + notice
+		}
+		sections = append(sections, strings.Join(lines, "\n"))
 	}
-	if len(parts) == 0 {
-		return nil
+	if body != "" {
+		sections = append(sections, "AGENTS.local.md\n"+body)
 	}
-	return json.NewEncoder(stdout).Encode(map[string]any{"hookSpecificOutput": map[string]string{"hookEventName": event, "additionalContext": strings.Join(parts, "\n\n")}})
+	if len(sections) == 0 {
+		return ""
+	}
+	out := sections[0]
+	for _, section := range sections[1:] {
+		if !strings.HasSuffix(out, "\n") {
+			out += "\n"
+		}
+		out += "\n" + section
+	}
+	return out
 }

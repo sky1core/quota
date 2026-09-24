@@ -70,7 +70,7 @@ func TestInspectionCombinesTOMLAndJSON(t *testing.T) {
 	if _, err := i.Apply(InstallPlan{Agents: []string{"codex"}}); err != nil {
 		t.Fatal(err)
 	}
-	installWrite(t, i.targets.CodexConfig, fmt.Sprintf("[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = 'command'\ncommand = %q\n", i.command("codex", "SessionStart")))
+	installWrite(t, i.targets.CodexConfig, fmt.Sprintf("[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = 'command'\ncommand = %q\n", i.command("codex", instructionEvent)))
 	status, err := i.Inspect([]string{"codex"})
 	if err != nil {
 		t.Fatal(err)
@@ -90,7 +90,7 @@ func TestInspectionCombinesTOMLAndJSON(t *testing.T) {
 
 func TestManagedTOMLMigrationPreservesLargeInteger(t *testing.T) {
 	i := testInstallation(t)
-	before := "unrelated_counter = 9007199254740993\n[limits]\nmaximum = 9223372036854775807\n" + fmt.Sprintf("[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = 'command'\ncommand = %q\n", i.command("codex", "SessionStart"))
+	before := "unrelated_counter = 9007199254740993\n[limits]\nmaximum = 9223372036854775807\n" + fmt.Sprintf("[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = 'command'\ncommand = %q\n", i.command("codex", instructionEvent))
 	installWrite(t, i.targets.CodexConfig, before)
 	plan, err := i.Plan([]string{"codex"}, false)
 	if err != nil {
@@ -120,9 +120,9 @@ func TestCodexHookTrustStateSurvivesInstallationAndMigration(t *testing.T) {
 			before := state
 			switch layout {
 			case "table hooks":
-				before = fmt.Sprintf("[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = 'command'\ncommand = %q\n", i.command("codex", "SessionStart")) + state
+				before = fmt.Sprintf("[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = 'command'\ncommand = %q\n", i.command("codex", instructionEvent)) + state
 			case "inline hooks":
-				before = fmt.Sprintf("hooks = { state = { example_entry = { enabled = false, trusted_hash = 'placeholder-trust' } }, SessionStart = [{hooks = [{type = 'command', command = %q}]}] } # preserve trust metadata\n", i.command("codex", "SessionStart"))
+				before = fmt.Sprintf("hooks = { state = { example_entry = { enabled = false, trusted_hash = 'placeholder-trust' } }, SessionStart = [{hooks = [{type = 'command', command = %q}]}] } # preserve trust metadata\n", i.command("codex", instructionEvent))
 			}
 			installWrite(t, i.targets.CodexConfig, before)
 			original, err := parseInstallTOML([]byte(before))

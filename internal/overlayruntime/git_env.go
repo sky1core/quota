@@ -22,10 +22,11 @@ func ValidateGitEnvironment(ctx context.Context) error {
 		return nil
 	}
 	cmd := childprocess.CommandContext(ctx, "git", "rev-parse", "--local-env-vars")
-	var out bytes.Buffer
+	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
+	cmd.Stderr = &stderr
 	if err := childprocess.Run(cmd); err != nil {
-		return fmt.Errorf("inspect Git environment: %w", err)
+		return fmt.Errorf("inspect Git environment: %s: %w", strings.TrimSpace(stderr.String()), err)
 	}
 	var overrides []string
 	for _, name := range strings.Fields(out.String()) {

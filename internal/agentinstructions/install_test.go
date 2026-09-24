@@ -1,8 +1,8 @@
 package agentinstructions
 
 import (
-	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +27,46 @@ func testInstallation(t *testing.T) *Installation {
 		t.Fatal(err)
 	}
 	return i
+}
+
+func TestInstallationInspectsAndRepairsPromptGuard(t *testing.T) {
+	for _, mutation := range []string{"missing", "duplicate", "async", "conditional"} {
+		t.Run(mutation, func(t *testing.T) {
+			i := testInstallation(t)
+			plan := InstallPlan{Agents: []string{"claude"}}
+			if _, err := i.Apply(plan); err != nil {
+				t.Fatal(err)
+			}
+			root := installReadJSON(t, i.targets.ClaudeSettings)
+			hooks := root["hooks"].(map[string]any)
+			groups, _ := installArray(hooks["UserPromptSubmit"])
+			group := groups[0].(map[string]any)
+			entries, _ := installArray(group["hooks"])
+			switch mutation {
+			case "missing":
+				delete(hooks, "UserPromptSubmit")
+			case "duplicate":
+				group["hooks"] = append(entries, entries[0])
+			case "async":
+				entries[0].(map[string]any)["async"] = true
+			case "conditional":
+				group["matcher"] = "conditional"
+			}
+			b, _ := json.Marshal(root)
+			installWrite(t, i.targets.ClaudeSettings, string(b))
+			statuses, err := i.Inspect([]string{"claude"})
+			if err != nil || statuses[0].Configured || !strings.Contains(strings.Join(statuses[0].Problems, "\n"), "UserPromptSubmit") {
+				t.Fatalf("guard defect missed: %+v %v", statuses, err)
+			}
+			if _, err := i.Apply(plan); err != nil {
+				t.Fatal(err)
+			}
+			statuses, err = i.Inspect([]string{"claude"})
+			if err != nil || !statuses[0].Configured {
+				t.Fatalf("guard not repaired: %+v %v", statuses, err)
+			}
+		})
+	}
 }
 
 func installWrite(t *testing.T, path, content string) {
@@ -65,22 +105,67 @@ func installCommands(t *testing.T, root map[string]any, event string) []string {
 	return out
 }
 
-func TestInstallationLifecycleInstallsPrepareEntries(t *testing.T) {
+func installHookEntries(t *testing.T, root map[string]any, event string) []map[string]any {
+	t.Helper()
+	hooks, _ := root["hooks"].(map[string]any)
+	groups, _ := installArray(hooks[event])
+	var out []map[string]any
+	for _, raw := range groups {
+		group, _ := raw.(map[string]any)
+		entries, _ := installArray(group["hooks"])
+		for _, entry := range entries {
+			hook, _ := entry.(map[string]any)
+			out = append(out, hook)
+		}
+	}
+	return out
+}
+
+func TestInstallationLifecycleReplacesLegacyHooksWithOneHook(t *testing.T) {
 	i := testInstallation(t)
 	unrelated := map[string]any{"type": "command", "command": "echo 'agent instructions _prepare'", "timeout": 12}
-	legacyHook := func(agent, event string) string {
-		return agenthooks.ShellQuote([]string{i.executable, "agent", "instructions", "_hook", "--agent=" + agent, "--event=" + event})
+	quota := func(args ...string) string {
+		return agenthooks.ShellQuote(append([]string{i.executable, "agent", "instructions"}, args...))
 	}
-	legacyClaude := map[string]any{"type": "command", "command": legacyHook("claude", "SessionStart")}
-	legacyCodex := map[string]any{"type": "command", "command": legacyHook("codex", "SessionStart"), "additionalContextLimit": 0}
-	legacySubagent := map[string]any{"type": "command", "command": legacyHook("codex", "SubagentStart"), "additionalContextLimit": 0}
-	overlayLegacy := map[string]any{"type": "command", "command": `sh "$HOME/.local/bin/agents-overlay-context" json SessionStart AGENTS.md - . codex-session`}
-	overlayCommandLegacy := map[string]any{"type": "command", "command": agenthooks.ShellQuote([]string{i.executable, "agent", "overlay", "hook", "--runtime=codex", "--event=SessionStart"})}
-	claudeRoot := map[string]any{"model": "opus", "hooks": map[string]any{"SessionStart": []any{map[string]any{"hooks": []any{unrelated, legacyClaude}}}, "PreToolUse": []any{map[string]any{"matcher": "Bash", "hooks": []any{unrelated}}}}}
-	codexRoot := map[string]any{"description": "keep", "hooks": map[string]any{"SessionStart": []any{map[string]any{"hooks": []any{legacyCodex, overlayLegacy, overlayCommandLegacy, unrelated}}}, "SubagentStart": []any{map[string]any{"hooks": []any{legacySubagent}}}, "state": map[string]any{"abc": map[string]any{"enabled": true, "trusted_hash": "x"}}}}
+	legacyClaude := []any{
+		map[string]any{"type": "command", "command": quota("_hook", "--agent=claude", "--event=SessionStart")},
+		map[string]any{"type": "command", "command": quota("_prepare", "--agent=claude", "--event=SessionStart", "--claude-config-dir", i.targets.ClaudeConfigDir)},
+	}
+	for part := 1; part <= 8; part++ {
+		legacyClaude = append(legacyClaude, map[string]any{"type": "command", "command": quota("_prepare", "--agent=claude", "--event=SessionStart", fmt.Sprintf("--part=%d", part))})
+	}
+	legacyWorktree := map[string]any{"type": "command", "command": quota("_prepare", "--agent=claude", "--event=WorktreeCreate", "--claude-config-dir", i.targets.ClaudeConfigDir)}
+	legacyWorktreeRemove := map[string]any{"type": "command", "command": quota("_hook", "--agent=claude", "--event=WorktreeRemove")}
+	legacyCodex := []any{
+		map[string]any{"type": "command", "command": quota("_hook", "--agent=codex", "--event=SessionStart"), "additionalContextLimit": 0},
+		map[string]any{"type": "command", "command": quota("_prepare", "--agent=codex", "--event=SessionStart", "--codex-home", i.targets.CodexHome), "additionalContextLimit": 0},
+		map[string]any{"type": "command", "command": `sh "$HOME/.local/bin/agents-overlay-context" json SessionStart AGENTS.md - . codex-session`},
+		map[string]any{"type": "command", "command": agenthooks.ShellQuote([]string{i.executable, "agent", "overlay", "hook", "--runtime=codex", "--event=SessionStart"})},
+	}
+	legacySubagent := map[string]any{"type": "command", "command": quota("_hook", "--agent=codex", "--event=SubagentStart"), "additionalContextLimit": 0}
+	claudeRoot := map[string]any{"model": "opus", "hooks": map[string]any{
+		"SessionStart":   []any{map[string]any{"hooks": append([]any{unrelated}, legacyClaude...)}},
+		"WorktreeCreate": []any{map[string]any{"hooks": []any{legacyWorktree}}},
+		"WorktreeRemove": []any{map[string]any{"hooks": []any{legacyWorktreeRemove}}},
+		"PreToolUse":     []any{map[string]any{"matcher": "Bash", "hooks": []any{unrelated}}},
+	}}
+	codexRoot := map[string]any{"description": "keep", "hooks": map[string]any{
+		"SessionStart":  []any{map[string]any{"hooks": append(legacyCodex, unrelated)}},
+		"SubagentStart": []any{map[string]any{"hooks": []any{legacySubagent}}},
+		"state":         map[string]any{"abc": map[string]any{"enabled": true, "trusted_hash": "x"}},
+	}}
 	for path, root := range map[string]map[string]any{i.targets.ClaudeSettings: claudeRoot, i.targets.CodexHooks: codexRoot} {
 		b, _ := json.Marshal(root)
 		installWrite(t, path, string(b))
+	}
+	statuses, err := i.Inspect([]string{"claude", "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range statuses {
+		if s.Configured || !strings.Contains(strings.Join(s.Problems, "\n"), "obsolete managed hook") {
+			t.Fatalf("%s legacy hooks were not reported: %+v", s.Agent, s)
+		}
 	}
 	plan, err := i.Plan([]string{"claude", "codex"}, false)
 	if err != nil {
@@ -102,32 +187,33 @@ func TestInstallationLifecycleInstallsPrepareEntries(t *testing.T) {
 	if claude["model"] != "opus" {
 		t.Fatal("unrelated Claude settings lost")
 	}
-	for _, event := range []string{"SessionStart", "WorktreeCreate", "WorktreeRemove"} {
-		commands := installCommands(t, claude, event)
-		want := i.command("claude", event)
-		count := 0
-		for _, c := range commands {
-			if c == want {
-				count++
-			}
-			if strings.Contains(c, "_hook") {
-				t.Fatalf("legacy _hook entry survived in %s: %q", event, c)
-			}
-		}
-		if count != 1 {
-			t.Fatalf("%s: managed entries = %d in %v", event, count, commands)
-		}
-		if !strings.Contains(want, "_prepare '--agent=claude' '--event="+event+"' --claude-config-dir ") {
-			t.Fatalf("unexpected command %q", want)
+	for _, event := range []string{"WorktreeCreate", "WorktreeRemove"} {
+		if _, ok := claude["hooks"].(map[string]any)[event]; ok {
+			t.Fatalf("legacy %s hook survived", event)
 		}
 	}
-	if commands := installCommands(t, claude, "SessionStart"); len(commands) != 2 || commands[0] != unrelated["command"] {
-		t.Fatalf("unrelated SessionStart hook not preserved: %v", commands)
+	commands := installCommands(t, claude, "SessionStart")
+	if len(commands) != 2 || commands[0] != unrelated["command"] {
+		t.Fatalf("Claude SessionStart hooks = %v", commands)
+	}
+	if want := quota("_prepare", "--agent=claude", "--event=SessionStart"); commands[1] != want {
+		t.Fatalf("Claude command = %q; want %q", commands[1], want)
+	}
+	if commands := installCommands(t, claude, "UserPromptSubmit"); len(commands) != 1 || commands[0] != quota("_prepare", "--agent=claude", "--event=UserPromptSubmit") {
+		t.Fatalf("Claude prompt guard = %v", commands)
+	}
+	for _, c := range commands {
+		if strings.Contains(c, "_hook") || strings.Contains(c, "--claude-config-dir") {
+			t.Fatalf("legacy entry survived: %q", c)
+		}
 	}
 	if commands := installCommands(t, claude, "PreToolUse"); len(commands) != 1 {
 		t.Fatalf("unrelated PreToolUse hook changed: %v", commands)
 	}
 	codex := installReadJSON(t, i.targets.CodexHooks)
+	if commands := installCommands(t, codex, "UserPromptSubmit"); len(commands) != 0 {
+		t.Fatalf("unexpected Codex prompt guard = %v", commands)
+	}
 	if codex["description"] != "keep" {
 		t.Fatal("unrelated Codex settings lost")
 	}
@@ -135,25 +221,16 @@ func TestInstallationLifecycleInstallsPrepareEntries(t *testing.T) {
 		t.Fatal("Codex trust state lost")
 	}
 	if _, ok := codex["hooks"].(map[string]any)["SubagentStart"]; ok {
-		t.Fatal("legacy SubagentStart injection hook survived")
+		t.Fatal("legacy SubagentStart hook survived")
 	}
-	commands := installCommands(t, codex, "SessionStart")
-	if len(commands) != 2 || commands[0] != unrelated["command"] || commands[1] != i.command("codex", "SessionStart") {
-		t.Fatalf("Codex SessionStart hooks = %v", commands)
+	entries := installHookEntries(t, codex, "SessionStart")
+	if len(entries) != 2 || entries[0]["command"] != unrelated["command"] || entries[1]["command"] != i.command("codex", instructionEvent) || entries[1]["additionalContextLimit"] != json.Number("0") {
+		t.Fatalf("Codex SessionStart hooks = %v", entries)
 	}
-	groups, _ := installArray(codex["hooks"].(map[string]any)["SessionStart"])
-	managedGroup, _ := groups[1].(map[string]any)
-	managedHooks, _ := installArray(managedGroup["hooks"])
-	managedHook, _ := managedHooks[0].(map[string]any)
-	if managedHook["additionalContextLimit"] != json.Number("0") {
-		t.Fatalf("Codex instruction hook must pass complete first-session context: %#v", managedHook)
+	if c := entries[1]["command"].(string); strings.Contains(c, "--codex-home") || strings.Contains(c, "--part") {
+		t.Fatalf("Codex command carries removed arguments: %q", c)
 	}
-	for _, c := range commands {
-		if strings.Contains(c, "_hook") || strings.Contains(c, "agents-overlay-context") || strings.Contains(c, "agent overlay hook") {
-			t.Fatalf("legacy Codex hook survived: %q", c)
-		}
-	}
-	statuses, err := i.Inspect([]string{"claude", "codex"})
+	statuses, err = i.Inspect([]string{"claude", "codex"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,11 +264,11 @@ func TestInstallationLifecycleInstallsPrepareEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	claude = installReadJSON(t, i.targets.ClaudeSettings)
+	if commands := installCommands(t, claude, "UserPromptSubmit"); len(commands) != 0 {
+		t.Fatalf("uninstall left prompt guard: %v", commands)
+	}
 	if commands := installCommands(t, claude, "SessionStart"); len(commands) != 1 || commands[0] != unrelated["command"] {
 		t.Fatalf("uninstall changed unrelated hooks: %v", commands)
-	}
-	if _, ok := claude["hooks"].(map[string]any)["WorktreeCreate"]; ok {
-		t.Fatal("uninstall left WorktreeCreate")
 	}
 	codex = installReadJSON(t, i.targets.CodexHooks)
 	if commands := installCommands(t, codex, "SessionStart"); len(commands) != 1 || commands[0] != unrelated["command"] {
@@ -205,6 +282,59 @@ func TestInstallationLifecycleInstallsPrepareEntries(t *testing.T) {
 		if s.Configured {
 			t.Fatalf("%s still configured after uninstall", s.Agent)
 		}
+	}
+}
+
+func TestInspectReportsMissingDuplicateAndAlteredHooks(t *testing.T) {
+	i := testInstallation(t)
+	if _, err := i.Apply(InstallPlan{Agents: []string{"claude"}}); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := os.ReadFile(i.targets.ClaudeSettings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate := func(t *testing.T, change func(hooks []any) []any) []string {
+		t.Helper()
+		installWrite(t, i.targets.ClaudeSettings, string(installed))
+		root := installReadJSON(t, i.targets.ClaudeSettings)
+		groups, _ := installArray(root["hooks"].(map[string]any)["SessionStart"])
+		group := groups[0].(map[string]any)
+		entries, _ := installArray(group["hooks"])
+		group["hooks"] = change(entries)
+		b, _ := json.Marshal(root)
+		installWrite(t, i.targets.ClaudeSettings, string(b))
+		statuses, err := i.Inspect([]string{"claude"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if statuses[0].Configured {
+			t.Fatal("problem was not reported")
+		}
+		return statuses[0].Problems
+	}
+	problems := mutate(t, func(hooks []any) []any { return hooks[:0] })
+	if !strings.Contains(strings.Join(problems, "\n"), "expected one managed hook, found 0") {
+		t.Fatalf("missing hook not reported: %v", problems)
+	}
+	problems = mutate(t, func(hooks []any) []any { return append(hooks, hooks[0]) })
+	if !strings.Contains(strings.Join(problems, "\n"), "expected one managed hook, found 2") {
+		t.Fatalf("duplicate hook not reported: %v", problems)
+	}
+	problems = mutate(t, func(hooks []any) []any {
+		hooks[0].(map[string]any)["timeout"] = 30
+		return hooks
+	})
+	if !strings.Contains(strings.Join(problems, "\n"), "differs from the fixed execution settings") {
+		t.Fatalf("changed settings not reported: %v", problems)
+	}
+	root := installReadJSON(t, i.targets.ClaudeSettings)
+	root["disableAllHooks"] = true
+	b, _ := json.Marshal(root)
+	installWrite(t, i.targets.ClaudeSettings, string(b))
+	statuses, err := i.Inspect([]string{"claude"})
+	if err != nil || statuses[0].Configured || !strings.Contains(strings.Join(statuses[0].Problems, "\n"), "disableAllHooks") {
+		t.Fatalf("disableAllHooks not reported: %+v %v", statuses, err)
 	}
 }
 
@@ -283,192 +413,5 @@ func TestSuspiciousInstructionCommandRecognizesPrepareAndHook(t *testing.T) {
 	}
 	if suspiciousInstructionCommand("/example/custom-binary agent instructions _prepare --agent=codex --event=SessionStart") {
 		t.Fatal("unknown executable treated as quota")
-	}
-}
-
-func applyGlobalIgnore(t *testing.T, path string, uninstall bool) GlobalIgnorePlan {
-	t.Helper()
-	plan, err := PlanGlobalIgnore(path, uninstall)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := plan.Apply(); err != nil {
-		t.Fatal(err)
-	}
-	return plan
-}
-
-func TestGlobalIgnoreManagesOnlyItsMarkedBlock(t *testing.T) {
-	testInstallation(t)
-	ctx := context.Background()
-	path, err := GlobalIgnorePath(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "git", "ignore"); path != want {
-		t.Fatalf("path = %s, want %s", path, want)
-	}
-	installWrite(t, path, "# user rules\n*.log\nCLAUDE.local.md\nCLAUDE.local.md.bak")
-	plan := applyGlobalIgnore(t, path, false)
-	if !plan.Changed || strings.Join(plan.Add, ",") != strings.Join(GlobalIgnoreLines, ",") {
-		t.Fatalf("plan = %+v", plan)
-	}
-	want := "# user rules\n*.log\nCLAUDE.local.md\nCLAUDE.local.md.bak\n" + GlobalIgnoreMarker + "\n" + strings.Join(GlobalIgnoreLines, "\n") + "\n"
-	if got, _ := os.ReadFile(path); string(got) != want {
-		t.Fatalf("ignore file = %q", got)
-	}
-	if plan = applyGlobalIgnore(t, path, false); plan.Changed {
-		t.Fatalf("second apply changed the file: %+v", plan)
-	}
-	if plan = applyGlobalIgnore(t, path, true); !plan.Changed || strings.Join(plan.Remove, ",") != strings.Join(GlobalIgnoreLines, ",") {
-		t.Fatalf("removal plan = %+v", plan)
-	}
-	if got, _ := os.ReadFile(path); string(got) != "# user rules\n*.log\nCLAUDE.local.md\nCLAUDE.local.md.bak\n" {
-		t.Fatalf("ignore file after removal = %q", got)
-	}
-	if plan = applyGlobalIgnore(t, path, true); plan.Changed {
-		t.Fatalf("second removal changed the file: %+v", plan)
-	}
-}
-
-func TestGlobalIgnoreExtendsExistingBlockAndKeepsUserLinesAfterIt(t *testing.T) {
-	testInstallation(t)
-	path := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "git", "ignore")
-	installWrite(t, path, GlobalIgnoreMarker+"\nCLAUDE.local.md\n*.tmp\n")
-	plan := applyGlobalIgnore(t, path, false)
-	if strings.Join(plan.Add, ",") != strings.Join(GlobalIgnoreLines, ",") || len(plan.Remove) != 0 {
-		t.Fatalf("plan = %+v", plan)
-	}
-	if got, _ := os.ReadFile(path); string(got) != GlobalIgnoreMarker+"\nCLAUDE.local.md\n"+strings.Join(GlobalIgnoreLines, "\n")+"\n*.tmp\n" {
-		t.Fatalf("ignore file = %q", got)
-	}
-	plan = applyGlobalIgnore(t, path, true)
-	if strings.Join(plan.Remove, ",") != "CLAUDE.local.md,"+strings.Join(GlobalIgnoreLines, ",") {
-		t.Fatalf("removal plan = %+v", plan)
-	}
-	if got, _ := os.ReadFile(path); string(got) != "*.tmp\n" {
-		t.Fatalf("ignore file after removal = %q", got)
-	}
-}
-
-func TestGlobalIgnoreApplyFailsWhenFileChangedSincePlan(t *testing.T) {
-	testInstallation(t)
-	path := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "git", "ignore")
-	installWrite(t, path, "*.log\n")
-	plan, err := PlanGlobalIgnore(path, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	installWrite(t, path, "*.log\n*.tmp\n")
-	if err := plan.Apply(); err == nil || !strings.Contains(err.Error(), "changed since it was planned") {
-		t.Fatalf("apply error = %v", err)
-	}
-	if got, _ := os.ReadFile(path); string(got) != "*.log\n*.tmp\n" {
-		t.Fatalf("concurrent edit was overwritten: %q", got)
-	}
-}
-
-func TestGlobalIgnorePathHonorsExcludesFile(t *testing.T) {
-	testInstallation(t)
-	custom := filepath.Join(os.Getenv("HOME"), "custom-ignore")
-	installWrite(t, filepath.Join(os.Getenv("HOME"), ".gitconfig"), "[core]\n\texcludesFile = ~/custom-ignore\n")
-	path, err := GlobalIgnorePath(context.Background())
-	if err != nil || path != custom {
-		t.Fatalf("path = %s, err = %v", path, err)
-	}
-	if plan := applyGlobalIgnore(t, path, false); !plan.Changed {
-		t.Fatalf("plan = %+v", plan)
-	}
-	got, _ := os.ReadFile(custom)
-	if string(got) != GlobalIgnoreMarker+"\n"+strings.Join(GlobalIgnoreLines, "\n")+"\n" {
-		t.Fatalf("new ignore file = %q", got)
-	}
-}
-
-func TestGlobalIgnorePathHonorsIncludedExcludesFile(t *testing.T) {
-	testInstallation(t)
-	custom := filepath.Join(os.Getenv("HOME"), "included-ignore")
-	include := filepath.Join(os.Getenv("HOME"), "included.gitconfig")
-	installWrite(t, include, "[core]\n\texcludesFile = ~/included-ignore\n")
-	installWrite(t, filepath.Join(os.Getenv("HOME"), ".gitconfig"), "[include]\n\tpath = "+include+"\n")
-	path, err := GlobalIgnorePath(context.Background())
-	if err != nil || path != custom {
-		t.Fatalf("path = %s, err = %v", path, err)
-	}
-}
-
-func TestGlobalIgnorePathFallsBackToSystemExcludesFile(t *testing.T) {
-	testInstallation(t)
-	home := os.Getenv("HOME")
-	system := filepath.Join(home, "system.gitconfig")
-	global := filepath.Join(home, "global.gitconfig")
-	custom := filepath.Join(home, "system-ignore")
-	installWrite(t, global, "")
-	installWrite(t, system, "[core]\n\texcludesFile = "+custom+"\n")
-	t.Setenv("GIT_CONFIG_SYSTEM", system)
-	t.Setenv("GIT_CONFIG_GLOBAL", global)
-	path, err := GlobalIgnorePath(context.Background())
-	if err != nil || path != custom {
-		t.Fatalf("path = %s, err = %v", path, err)
-	}
-}
-
-func TestGlobalIgnorePathRespectsNoSystemConfig(t *testing.T) {
-	testInstallation(t)
-	home := os.Getenv("HOME")
-	system := filepath.Join(home, "system.gitconfig")
-	global := filepath.Join(home, "global.gitconfig")
-	installWrite(t, global, "")
-	installWrite(t, system, "[core]\n\texcludesFile = "+filepath.Join(home, "system-ignore")+"\n")
-	t.Setenv("GIT_CONFIG_SYSTEM", system)
-	t.Setenv("GIT_CONFIG_GLOBAL", global)
-	t.Setenv("GIT_CONFIG_NOSYSTEM", "true")
-	path, err := GlobalIgnorePath(context.Background())
-	want := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "git", "ignore")
-	if err != nil || path != want {
-		t.Fatalf("path = %s, want %s, err = %v", path, want, err)
-	}
-	for _, value := range []string{"1", "2", "-1", "01", "1k", "True", "Yes", "ON"} {
-		t.Run(value, func(t *testing.T) {
-			t.Setenv("GIT_CONFIG_NOSYSTEM", value)
-			path, err := GlobalIgnorePath(context.Background())
-			if err != nil || path != want {
-				t.Fatalf("path = %s, want %s, err = %v", path, want, err)
-			}
-		})
-	}
-}
-
-func TestGlobalIgnorePathHonorsFalseNoSystemConfig(t *testing.T) {
-	testInstallation(t)
-	home := os.Getenv("HOME")
-	system := filepath.Join(home, "system.gitconfig")
-	global := filepath.Join(home, "global.gitconfig")
-	custom := filepath.Join(home, "system-ignore")
-	installWrite(t, global, "")
-	installWrite(t, system, "[core]\n\texcludesFile = "+custom+"\n")
-	t.Setenv("GIT_CONFIG_SYSTEM", system)
-	t.Setenv("GIT_CONFIG_GLOBAL", global)
-	t.Setenv("GIT_CONFIG_NOSYSTEM", "false")
-	path, err := GlobalIgnorePath(context.Background())
-	if err != nil || path != custom {
-		t.Fatalf("path = %s, want %s, err = %v", path, custom, err)
-	}
-	for _, value := range []string{"0", "00", "+0", "0k", "False", "No", "OFF"} {
-		t.Run(value, func(t *testing.T) {
-			t.Setenv("GIT_CONFIG_NOSYSTEM", value)
-			path, err := GlobalIgnorePath(context.Background())
-			if err != nil || path != custom {
-				t.Fatalf("path = %s, want %s, err = %v", path, custom, err)
-			}
-		})
-	}
-}
-
-func TestGlobalIgnorePathRejectsInvalidNoSystemConfig(t *testing.T) {
-	testInstallation(t)
-	t.Setenv("GIT_CONFIG_NOSYSTEM", "definitely")
-	if _, err := GlobalIgnorePath(context.Background()); err == nil || !strings.Contains(err.Error(), "GIT_CONFIG_NOSYSTEM") {
-		t.Fatalf("invalid no-system value accepted: %v", err)
 	}
 }

@@ -4,13 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
-
-type InstructionHook struct {
-	Event string
-	Owned bool
-}
 
 func OwnsInstructionCommand(command, executable, agent, event string) bool {
 	if ownsCurrentInstructionCommand(command, executable, agent, event) {
@@ -49,6 +45,10 @@ func ownsInstructionPrepareArgs(args []string, agent, event string) bool {
 			seenAgent = true
 		case arg == "--event="+event:
 			seenEvent = true
+		case strings.HasPrefix(arg, "--part="):
+			if part, err := strconv.Atoi(strings.TrimPrefix(arg, "--part=")); err != nil || part < 1 {
+				return false
+			}
 		case strings.HasPrefix(arg, "--claude-config-dir="), strings.HasPrefix(arg, "--codex-home="):
 		case arg == "--claude-config-dir", arg == "--codex-home":
 			i++
@@ -106,71 +106,6 @@ func SuspiciousInstructionCommand(command string, knownExecutables ...string) bo
 		}
 	}
 	return false
-}
-func instructionHookArray(v any) ([]any, bool) {
-	switch a := v.(type) {
-	case []any:
-		return a, true
-	case []map[string]any:
-		r := make([]any, len(a))
-		for n := range a {
-			r[n] = a[n]
-		}
-		return r, true
-	default:
-		return nil, false
-	}
-}
-func ClaudeInstructionHooks(root map[string]any, executable string) ([]InstructionHook, error) {
-	return instructionHooks(root, executable, "claude")
-}
-func CodexInstructionHooks(root map[string]any, executable string) ([]InstructionHook, error) {
-	return instructionHooks(root, executable, "codex")
-}
-func instructionHooks(root map[string]any, executable, agent string) ([]InstructionHook, error) {
-	raw, exists := root["hooks"]
-	if !exists {
-		return nil, nil
-	}
-	hooks, valid := raw.(map[string]any)
-	if !valid {
-		return nil, fmt.Errorf("hooks must be an object")
-	}
-	entries := []InstructionHook{}
-	for event, raw := range hooks {
-		if agent == "codex" && event == "state" {
-			if err := ValidateCodexHookState(raw); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		groups, valid := instructionHookArray(raw)
-		if !valid {
-			return nil, fmt.Errorf("hooks.%s must be an array", event)
-		}
-		for _, rawGroup := range groups {
-			group, valid := rawGroup.(map[string]any)
-			if !valid {
-				return nil, fmt.Errorf("hooks.%s group must be an object", event)
-			}
-			commands, valid := instructionHookArray(group["hooks"])
-			if !valid {
-				return nil, fmt.Errorf("hooks.%s group hooks must be an array", event)
-			}
-			for _, rawHook := range commands {
-				hook, valid := rawHook.(map[string]any)
-				if !valid {
-					return nil, fmt.Errorf("hooks.%s hook must be an object", event)
-				}
-				command, _ := hook["command"].(string)
-				owned := OwnsInstructionCommand(command, executable, agent, event)
-				if owned || SuspiciousInstructionCommand(command, executable) {
-					entries = append(entries, InstructionHook{Event: event, Owned: owned})
-				}
-			}
-		}
-	}
-	return entries, nil
 }
 func ValidateCodexHookState(raw any) error {
 	states, ok := raw.(map[string]any)

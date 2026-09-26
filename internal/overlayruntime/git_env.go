@@ -35,7 +35,7 @@ func ValidateGitEnvironment(ctx context.Context) error {
 		}
 	}
 	if len(overrides) > 0 {
-		return fmt.Errorf("instruction preparation refuses repository-local Git environment variables: %s; unset them before running", strings.Join(overrides, ", "))
+		return fmt.Errorf("repository-local Git environment variables are not supported: %s; unset them before running", strings.Join(overrides, ", "))
 	}
 	return nil
 }

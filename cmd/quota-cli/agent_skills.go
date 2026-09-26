@@ -11,9 +11,11 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 
 	"github.com/sky1core/quota/internal/agentskills"
 	"github.com/sky1core/quota/internal/config"
+	"github.com/sky1core/quota/internal/overlayruntime"
 )
 
 type skillsReport struct {
@@ -147,13 +149,21 @@ func runAgentSkills(args []string, stdout, stderr io.Writer) int {
 			return finish(err)
 		}
 	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 	repoRoot := ""
 	if *scope == "repo" {
-		output, repoErr := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+		if err := overlayruntime.ValidateGitEnvironment(ctx); err != nil {
+			return finish(err)
+		}
+		output, repoErr := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel").Output()
 		if repoErr != nil {
 			return finish(fmt.Errorf("find repository root: %w", repoErr))
 		}
-		repoRoot, err = filepath.Abs(strings.TrimSpace(string(output)))
+		if len(output) == 0 || output[len(output)-1] != '\n' || !utf8.Valid(output) {
+			return finish(fmt.Errorf("Git did not return a newline-terminated UTF-8 path"))
+		}
+		repoRoot, err = filepath.Abs(string(output[:len(output)-1]))
 		if err != nil {
 			return finish(err)
 		}
@@ -162,8 +172,6 @@ func runAgentSkills(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return finish(err)
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 	var results []agentskills.Result
 	switch operation {
 	case "install":

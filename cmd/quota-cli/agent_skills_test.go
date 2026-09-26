@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -172,4 +174,74 @@ func TestAgentSkillsReportsUnreadableSkill(t *testing.T) {
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Fatalf("removed directory remains: %v", err)
 	}
+}
+
+func TestAgentSkillsRepoRejectsGitOverrides(t *testing.T) {
+	home := skillsCLIHome(t)
+	current := skillsTestRepo(t, filepath.Join(home, "current"))
+	other := skillsTestRepo(t, filepath.Join(home, "other"))
+	t.Chdir(current)
+	for _, repo := range []string{current, other} {
+		instructionsWrite(t, filepath.Join(repo, ".agents/skills", "example", "SKILL.md"), "Synthetic skill.\n")
+	}
+	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
+	t.Setenv("GIT_WORK_TREE", other)
+	for _, args := range [][]string{
+		{"list"}, {"link", "example"}, {"remove", "example"}, {"install", "./source"},
+	} {
+		code, report, output := runSkills(t, append(args, "--scope=repo", "--json")...)
+		if code != 1 || !strings.Contains(report.Error, "GIT_DIR") || !strings.Contains(report.Error, "GIT_WORK_TREE") || len(report.Results) != 0 {
+			t.Errorf("%v did not reject repository override: %d %s", args, code, output)
+		}
+	}
+	for _, repo := range []string{current, other} {
+		if content, err := os.ReadFile(filepath.Join(repo, ".agents/skills", "example", "SKILL.md")); err != nil || string(content) != "Synthetic skill.\n" {
+			t.Errorf("skill changed in %q: %q %v", repo, content, err)
+		}
+		if _, err := os.Lstat(filepath.Join(repo, ".claude", "skills", "example")); !os.IsNotExist(err) {
+			t.Errorf("link created in %q: %v", repo, err)
+		}
+	}
+}
+
+func TestAgentSkillsRepoPreservesPathWhitespace(t *testing.T) {
+	for _, suffix := range []string{"", " ", "\t", "\n"} {
+		t.Run(fmt.Sprintf("suffix_%q", suffix), func(t *testing.T) {
+			home := skillsCLIHome(t)
+			neighbor := filepath.Join(home, "repo")
+			repo := skillsTestRepo(t, neighbor+suffix)
+			t.Chdir(repo)
+			path := filepath.Join(repo, ".agents/skills", "example", "SKILL.md")
+			instructionsWrite(t, path, "Selected repository.\n")
+			if suffix != "" {
+				instructionsWrite(t, filepath.Join(neighbor, ".agents/skills", "example", "SKILL.md"), "Neighbor.\n")
+			}
+			for _, args := range [][]string{{"list"}, {"link", "example"}, {"remove", "example"}} {
+				code, report, output := runSkills(t, append(args, "--scope=repo", "--json")...)
+				if code != 0 || len(report.Results) == 0 || report.Results[0].Path != filepath.Dir(path) {
+					t.Fatalf("%v selected the wrong repository: %d %s", args, code, output)
+				}
+			}
+			if _, err := os.Lstat(filepath.Dir(path)); !os.IsNotExist(err) {
+				t.Fatalf("selected skill was not removed: %v", err)
+			}
+			if suffix != "" {
+				if content, err := os.ReadFile(filepath.Join(neighbor, ".agents/skills", "example", "SKILL.md")); err != nil || string(content) != "Neighbor.\n" {
+					t.Fatalf("neighbor changed: %q %v", content, err)
+				}
+			}
+		})
+	}
+}
+
+func skillsTestRepo(t *testing.T, path string) string {
+	t.Helper()
+	if output, err := exec.Command("git", "init", "-q", path).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, output)
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
 }

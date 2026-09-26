@@ -147,12 +147,12 @@ func TestAutoPromptCatalogFailuresAbort(t *testing.T) {
 		{valid, {Account: "codex-2", Provider: "codex", Error: "catalog unavailable"}},
 		{{Account: "codex", Provider: "codex", Catalog: valid.Catalog, Error: "refresh failed"}},
 	} {
-		if _, err := selectAutoPromptAccount(context.Background(), config.Config{}, autoPromptTestOptions(), catalogs, time.Now()); err == nil || !strings.Contains(err.Error(), "catalog") {
+		if _, err := selectAutoPromptAccount(context.Background(), config.Config{}, autoPromptTestOptions(), catalogs); err == nil || !strings.Contains(err.Error(), "catalog") {
 			t.Fatalf("catalog failure did not abort: %v", err)
 		}
 	}
 	cfg := config.Config{CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: "~/extra-codex"}}}
-	if _, err := selectAutoPromptAccount(context.Background(), cfg, autoPromptTestOptions(), []accountModels{valid}, time.Now()); err == nil || !strings.Contains(err.Error(), "codex-2: missing") {
+	if _, err := selectAutoPromptAccount(context.Background(), cfg, autoPromptTestOptions(), []accountModels{valid}); err == nil || !strings.Contains(err.Error(), "codex-2: missing") {
 		t.Fatalf("missing configured catalog error = %v", err)
 	}
 	catalogs, err := loadAutoPromptCatalogs(context.Background(), cfg)
@@ -218,7 +218,7 @@ func TestAutoPromptAccountMembershipAndEligibility(t *testing.T) {
 	putAutoPromptQuota(t, "claude", filepath.Join(home, ".claude"), "Current week (all models): 70% used")
 	putAutoPromptQuota(t, "claude", accounts[1].dir, "Current week (all models): 50% used")
 	putAutoPromptQuota(t, "codex", accounts[2].dir, autoPromptCodexQuota(80, -1))
-	selected, err := selectAutoPromptAccount(context.Background(), cfg, autoPromptTestOptions(), catalogs, time.Now())
+	selected, err := selectAutoPromptAccount(context.Background(), cfg, autoPromptTestOptions(), catalogs)
 	if err != nil || selected != accounts[2] {
 		t.Fatalf("selection = %+v, %v; want %+v", selected, err, accounts[2])
 	}
@@ -271,7 +271,7 @@ func TestAutoPromptQuotaScoresAndOrder(t *testing.T) {
 			catalogs := []accountModels{autoPromptTestCatalog("codex", autoPromptTestModel("code-model", "high"))}
 			opts := autoPromptTestOptions()
 			for range 2 {
-				selected, err := selectAutoPromptAccount(context.Background(), cfg, opts, catalogs, time.Now())
+				selected, err := selectAutoPromptAccount(context.Background(), cfg, opts, catalogs)
 				if tc.selected == "" {
 					if err == nil || !strings.Contains(err.Error(), "no account has usable quota") {
 						t.Fatalf("expected no usable quota, got %+v, %v", selected, err)
@@ -290,7 +290,7 @@ func TestAutoPromptRejectsIncomparablePeriods(t *testing.T) {
 	putAutoPromptQuota(t, "claude", filepath.Join(home, ".claude"), "Current week (all models): 10% used")
 	putAutoPromptQuota(t, "codex", filepath.Join(home, ".codex"), `{"rateLimits":{"primary":{"windowDurationMins":300,"usedPercent":10}}}`)
 	catalogs := []accountModels{autoPromptTestCatalog("codex", autoPromptTestModel("code-model", "high"))}
-	_, err := selectAutoPromptAccount(context.Background(), config.Config{}, autoPromptTestOptions(), catalogs, time.Now())
+	_, err := selectAutoPromptAccount(context.Background(), config.Config{}, autoPromptTestOptions(), catalogs)
 	if err == nil || !strings.Contains(err.Error(), "no common quota window") {
 		t.Fatalf("incomparable periods accepted: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestAutoPromptQuotaResetRatesAndReserves(t *testing.T) {
 			catalogs := []accountModels{autoPromptTestCatalog("codex", autoPromptTestModel("code-model", "high"))}
 			opts := autoPromptTestOptions()
 			for range 2 {
-				selected, err := selectAutoPromptAccount(context.Background(), cfg, opts, catalogs, now)
+				selected, err := selectAutoPromptAccount(context.Background(), cfg, opts, catalogs)
 				if err != nil || selected.key != tc.selected {
 					t.Fatalf("selection = %+v, %v; want %s", selected, err, tc.selected)
 				}
@@ -378,7 +378,7 @@ func TestAutoPromptCommonSessionAcrossAllEligibleAccounts(t *testing.T) {
 			if eligible {
 				want = "claude"
 			}
-			selected, err := selectAutoPromptAccount(context.Background(), cfg, autoPromptTestOptions(), catalogs, time.Now())
+			selected, err := selectAutoPromptAccount(context.Background(), cfg, autoPromptTestOptions(), catalogs)
 			if err != nil || selected.key != want {
 				t.Fatalf("selection = %+v, %v; want %s", selected, err, want)
 			}
@@ -408,7 +408,7 @@ func TestAutoPromptAccountTieUsesConfigOrder(t *testing.T) {
 			}
 			opts := autoPromptTestOptions()
 			for range 2 {
-				selected, err := selectAutoPromptAccount(context.Background(), cfg, opts, catalogs, time.Now())
+				selected, err := selectAutoPromptAccount(context.Background(), cfg, opts, catalogs)
 				if err != nil || selected.key != provider+"-9" {
 					t.Fatalf("selection = %+v, %v; want first configured account", selected, err)
 				}

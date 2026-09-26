@@ -35,27 +35,32 @@ func GetQuota(ctx context.Context, timeout time.Duration) (map[string]any, error
 // probe's result is written back. A non-positive maxAge skips the cache read but
 // still refreshes it on success.
 func GetQuotaForConfigDir(ctx context.Context, timeout time.Duration, configDir string, maxAge time.Duration) (map[string]any, error) {
+	quota, _, err := GetQuotaForConfigDirWithValidity(ctx, timeout, configDir, maxAge)
+	return quota, err
+}
+
+func GetQuotaForConfigDirWithValidity(ctx context.Context, timeout time.Duration, configDir string, maxAge time.Duration) (map[string]any, quotacache.Validity, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	configDir, err := resolveConfigDir(configDir)
 	if err != nil {
-		return nil, err
+		return nil, quotacache.Validity{}, err
 	}
 	key := claudeCacheKey(configDir)
 	unlock, err := quotacache.AcquireProbe(ctx, key)
 	if err != nil {
-		return nil, fmt.Errorf("Claude quota query lock: %w", err)
+		return nil, quotacache.Validity{}, fmt.Errorf("Claude quota query lock: %w", err)
 	}
 	defer unlock()
-	if raw, ok := quotacache.Get(key, maxAge); ok {
+	if raw, validity, ok := quotacache.GetWithValidity(key, maxAge); ok {
 		if res, err := parseUsage(raw); err == nil {
-			return res, nil
+			return res, validity, nil
 		}
 	}
 
 	claudeBin, err := FindBinary()
 	if err != nil {
-		return nil, err
+		return nil, quotacache.Validity{}, err
 	}
 
 	home, _ := os.UserHomeDir()
@@ -77,7 +82,7 @@ func GetQuotaForConfigDir(ctx context.Context, timeout time.Duration, configDir 
 
 	if runErr := childprocess.Run(cmd); runErr != nil {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("claude /usage: %w", ctx.Err())
+			return nil, quotacache.Validity{}, fmt.Errorf("claude /usage: %w", ctx.Err())
 		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
@@ -87,15 +92,15 @@ func GetQuotaForConfigDir(ctx context.Context, timeout time.Duration, configDir 
 			msg = msg[:500]
 		}
 		if msg != "" {
-			return nil, fmt.Errorf("claude /usage failed: %w: %s", runErr, msg)
+			return nil, quotacache.Validity{}, fmt.Errorf("claude /usage failed: %w: %s", runErr, msg)
 		}
-		return nil, fmt.Errorf("claude /usage failed: %w", runErr)
+		return nil, quotacache.Validity{}, fmt.Errorf("claude /usage failed: %w", runErr)
 	}
 	fetchedAt := time.Now()
 
 	text, err := usageText(stdout.Bytes())
 	if err != nil {
-		return nil, err
+		return nil, quotacache.Validity{}, err
 	}
 	result, err := parseUsage(text)
 	if err != nil {
@@ -103,12 +108,13 @@ func GetQuotaForConfigDir(ctx context.Context, timeout time.Duration, configDir 
 		if len(preview) > 500 {
 			preview = preview[:500]
 		}
-		return nil, fmt.Errorf("%w\n--- output ---\n%s", err, preview)
+		return nil, quotacache.Validity{}, fmt.Errorf("%w\n--- output ---\n%s", err, preview)
 	}
 	// Cache the raw report (parseable, so a success) for other consumers, bounded
 	// by the soonest window reset so it is never served past that instant.
-	quotacache.PutWithContext(ctx, key, text, fetchedAt, earliestReset(result))
-	return result, nil
+	validity := quotacache.Validity{FetchedAt: fetchedAt, ValidUntil: earliestReset(result)}
+	quotacache.PutWithContext(ctx, key, text, fetchedAt, validity.ValidUntil)
+	return result, validity, nil
 }
 
 // earliestReset returns the soonest reset instant among a parsed result's

@@ -194,3 +194,35 @@ func TestPutWithContextStopsWaitingForBusyLock(t *testing.T) {
 		}
 	}
 }
+
+func TestValidityBoundaryAndOriginalObservationTime(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now()
+	fetched := now.Add(-30 * time.Second)
+	boundary := now.Add(10 * time.Second)
+	PutWithContext(context.Background(), "example", "raw", fetched, boundary)
+	raw, validity, ok := GetWithValidity("example", time.Minute)
+	if !ok || raw != "raw" || !validity.FetchedAt.Equal(fetched) || !validity.ValidUntil.Equal(boundary) {
+		t.Fatalf("observation changed on read: %q %+v %v", raw, validity, ok)
+	}
+	for _, tc := range []struct {
+		name string
+		v    Validity
+		at   time.Time
+		want bool
+	}{
+		{"before reset", validity, boundary.Add(-time.Nanosecond), true},
+		{"at reset", validity, boundary, false},
+		{"after reset", validity, boundary.Add(time.Nanosecond), false},
+		{"freshness boundary", Validity{FetchedAt: fetched}, fetched.Add(time.Minute), true},
+		{"past freshness", Validity{FetchedAt: fetched}, fetched.Add(time.Minute + time.Nanosecond), false},
+		{"future observation", Validity{FetchedAt: now.Add(time.Second)}, now, false},
+		{"missing observation", Validity{}, now, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.v.ValidAt(tc.at, time.Minute); got != tc.want {
+				t.Fatalf("valid=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}

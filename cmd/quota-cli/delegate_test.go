@@ -464,7 +464,7 @@ func TestSelectClaudeAccountUsesSharedCache(t *testing.T) {
 	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-2")), extraRaw, validUntil)
 
 	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}}}
-	selected, err := selectClaudeAccount(context.Background(), cfg, nil, time.Now())
+	selected, err := selectClaudeAccount(context.Background(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -492,7 +492,7 @@ func TestSelectClaudeAccountScoresSurplusOverConfiguredFloor(t *testing.T) {
 			"claude-2": {MinLeftPct: floatPtr(5)},
 		}},
 	}
-	selected, err := selectClaudeAccount(context.Background(), cfg, nil, time.Now())
+	selected, err := selectClaudeAccount(context.Background(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +514,7 @@ func TestSelectClaudeAccountRejectsWindowBelowConfiguredFloor(t *testing.T) {
 	cfg := config.Config{ExecPrompt: &config.ExecPromptConfig{AccountSettings: map[string]config.ExecPromptAccountSettings{
 		"claude": {MinLeftPct: floatPtr(40)},
 	}}}
-	if _, err := selectClaudeAccount(context.Background(), cfg, nil, time.Now()); err == nil {
+	if _, err := selectClaudeAccount(context.Background(), cfg, nil); err == nil {
 		t.Fatal("selection should fail when a configured floor is above an applicable window")
 	}
 }
@@ -532,7 +532,7 @@ func TestSelectClaudeAccountSkipsBelowPromptFloor(t *testing.T) {
 	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-2")), extraRaw, validUntil)
 
 	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}}}
-	selected, err := selectClaudeAccount(context.Background(), cfg, nil, time.Now())
+	selected, err := selectClaudeAccount(context.Background(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,7 +554,7 @@ func TestSelectClaudeAccountFailsWhenAllAccountsBelowPromptFloor(t *testing.T) {
 	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-2")), extraRaw, validUntil)
 
 	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}}}
-	if _, err := selectClaudeAccount(context.Background(), cfg, nil, time.Now()); err == nil {
+	if _, err := selectClaudeAccount(context.Background(), cfg, nil); err == nil {
 		t.Fatal("selection should fail when every Claude account is below the prompt floor")
 	}
 }
@@ -580,7 +580,7 @@ func TestSelectClaudeAccountRejectsInvalidExecPromptSettings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.Config{ExecPrompt: &config.ExecPromptConfig{AccountSettings: tt.settings}}
-			if _, err := selectClaudeAccount(context.Background(), cfg, nil, time.Now()); err == nil {
+			if _, err := selectClaudeAccount(context.Background(), cfg, nil); err == nil {
 				t.Fatal("expected invalid execPrompt.accountSettings to fail")
 			}
 		})
@@ -590,7 +590,7 @@ func TestSelectClaudeAccountRejectsInvalidExecPromptSettings(t *testing.T) {
 func TestSelectClaudeAccountFailsOnInvalidConfiguredAccount(t *testing.T) {
 	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "work", ConfigDir: "~/.claude-work"}}}
 
-	_, err := selectClaudeAccount(context.Background(), cfg, nil, time.Now())
+	_, err := selectClaudeAccount(context.Background(), cfg, nil)
 	if err == nil {
 		t.Fatal("invalid Claude account config should fail before delegation")
 	}
@@ -609,7 +609,7 @@ func TestSelectClaudeAccountModelFailureMessage(t *testing.T) {
 	validUntil := time.Now().Add(time.Hour)
 	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), raw, validUntil)
 
-	_, err := selectClaudeAccount(context.Background(), config.Config{}, []string{"--model", "fable"}, time.Now())
+	_, err := selectClaudeAccount(context.Background(), config.Config{}, []string{"--model", "fable"})
 	if err == nil {
 		t.Fatal("selection should fail when requested model quota is not usable")
 	}
@@ -631,7 +631,7 @@ func TestSelectClaudeAccountUsesModelWindowWhenEveryUsableAccountHasIt(t *testin
 	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-2")), extraRaw, validUntil)
 
 	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}}}
-	selected, err := selectClaudeAccount(context.Background(), cfg, []string{"--model", "fable"}, time.Now())
+	selected, err := selectClaudeAccount(context.Background(), cfg, []string{"--model", "fable"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,7 +663,7 @@ func TestSelectClaudeAccountModelWindowMixIsOrderIndependent(t *testing.T) {
 		{Key: "claude-2", ConfigDir: "~/.claude-2"},
 	}}
 	for _, cfg := range []config.Config{firstOrder, secondOrder} {
-		selected, err := selectClaudeAccount(context.Background(), cfg, []string{"--model", "fable"}, time.Now())
+		selected, err := selectClaudeAccount(context.Background(), cfg, []string{"--model", "fable"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -696,7 +696,7 @@ func TestSelectClaudeAccountResetUnknownMixIsOrderIndependent(t *testing.T) {
 		{Key: "claude-2", ConfigDir: "~/.claude-2"},
 	}}
 	for _, cfg := range []config.Config{firstOrder, secondOrder} {
-		selected, err := selectClaudeAccount(context.Background(), cfg, nil, time.Now())
+		selected, err := selectClaudeAccount(context.Background(), cfg, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -719,7 +719,7 @@ func TestSelectCodexAccountUsesSharedCache(t *testing.T) {
 	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex-2")), extraRaw, validUntil)
 
 	cfg := config.Config{CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: "~/.codex-2"}}}
-	selected, err := selectCodexAccount(context.Background(), cfg, time.Now())
+	selected, err := selectCodexAccount(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -747,7 +747,7 @@ func TestSelectCodexAccountScoresSurplusOverConfiguredFloor(t *testing.T) {
 			"codex-2": {MinLeftPct: floatPtr(5)},
 		}},
 	}
-	selected, err := selectCodexAccount(context.Background(), cfg, time.Now())
+	selected, err := selectCodexAccount(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -771,7 +771,7 @@ func TestSelectCodexAccountRejectsInvalidExecPromptSettings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.Config{ExecPrompt: &config.ExecPromptConfig{AccountSettings: tt.settings}}
-			if _, err := selectCodexAccount(context.Background(), cfg, time.Now()); err == nil {
+			if _, err := selectCodexAccount(context.Background(), cfg); err == nil {
 				t.Fatal("expected invalid execPrompt.accountSettings to fail")
 			}
 		})
@@ -815,7 +815,7 @@ func TestSelectCodexAccountRanksWeeklyOnlyByWeeklyQuota(t *testing.T) {
 	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex-2")), extraRaw, validUntil)
 
 	cfg := config.Config{CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: "~/.codex-2"}}}
-	selected, err := selectCodexAccount(context.Background(), cfg, time.Now())
+	selected, err := selectCodexAccount(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -837,7 +837,7 @@ func TestSelectCodexAccountSkipsBelowPromptFloor(t *testing.T) {
 	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex-2")), extraRaw, validUntil)
 
 	cfg := config.Config{CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: "~/.codex-2"}}}
-	selected, err := selectCodexAccount(context.Background(), cfg, time.Now())
+	selected, err := selectCodexAccount(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -859,7 +859,7 @@ func TestSelectCodexAccountFailsWhenAllAccountsBelowPromptFloor(t *testing.T) {
 	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex-2")), extraRaw, validUntil)
 
 	cfg := config.Config{CodexAccounts: []config.CodexAccount{{Key: "codex-2", Home: "~/.codex-2"}}}
-	if _, err := selectCodexAccount(context.Background(), cfg, time.Now()); err == nil {
+	if _, err := selectCodexAccount(context.Background(), cfg); err == nil {
 		t.Fatal("selection should fail when every Codex account is below the prompt floor")
 	}
 }
@@ -867,7 +867,7 @@ func TestSelectCodexAccountFailsWhenAllAccountsBelowPromptFloor(t *testing.T) {
 func TestSelectCodexAccountFailsOnInvalidConfiguredAccount(t *testing.T) {
 	cfg := config.Config{CodexAccounts: []config.CodexAccount{{Key: "work", Home: "~/.codex-work"}}}
 
-	_, err := selectCodexAccount(context.Background(), cfg, time.Now())
+	_, err := selectCodexAccount(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("invalid Codex account config should fail before delegation")
 	}

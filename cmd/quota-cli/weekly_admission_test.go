@@ -109,7 +109,7 @@ func TestSelectAgentRanksWeeklyOnlyAndSkipsIncompleteCandidate(t *testing.T) {
 			until := time.Now().Add(time.Hour)
 			quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), "Current week (all models): 50% used", until)
 			quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), fmt.Sprintf(`{"rateLimits":{"primary":{"windowDurationMins":10080,"usedPercent":10},"secondary":%s}}`, tc.short), until)
-			result, err := buildSelectAgentResult(context.Background(), config.Config{}, selectAgentOptions{agent: selectAgentAll}, time.Now())
+			result, err := buildSelectAgentResult(context.Background(), config.Config{}, selectAgentOptions{agent: selectAgentAll})
 			if err != nil || result.Selected == nil || result.Selected.Key != tc.selected {
 				t.Fatalf("result = %+v, error = %v, want %s", result, err, tc.selected)
 			}
@@ -130,14 +130,14 @@ func checkAdmissionThroughParser(t *testing.T, provider, raw string, floor float
 	}}}
 	var err error
 	if provider == "claude" {
-		_, err = selectClaudeAccount(context.Background(), cfg, nil, time.Now())
+		_, err = selectClaudeAccount(context.Background(), cfg, nil)
 	} else {
-		_, err = selectCodexAccount(context.Background(), cfg, time.Now())
+		_, err = selectCodexAccount(context.Background(), cfg)
 	}
 	if (err == nil) != allow {
 		t.Errorf("exec-prompt selection error = %v, want allowed = %v", err, allow)
 	}
-	result, err := buildSelectAgentResult(context.Background(), cfg, selectAgentOptions{agent: provider}, time.Now())
+	result, err := buildSelectAgentResult(context.Background(), cfg, selectAgentOptions{agent: provider})
 	if (err == nil) != allow || (result.Selected != nil) != allow {
 		t.Errorf("select-agent result = %+v, error = %v, want allowed = %v", result, err, allow)
 	}

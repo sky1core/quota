@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/sky1core/quota/internal/claude"
@@ -98,7 +97,7 @@ func runSelectAgentWithIO(ctx context.Context, args []string, stdout, stderr io.
 		fmt.Fprintln(stderr, "config load error:", err)
 		return 1
 	}
-	result, err := buildSelectAgentResult(ctx, cfg, opts, now)
+	result, err := buildSelectAgentResult(ctx, cfg, opts)
 	if err == nil && result.Selected != nil {
 		selected := result.Selected
 		var binary string
@@ -190,28 +189,47 @@ func printSelectAgentUsage(output io.Writer) {
 `)
 }
 
-func buildSelectAgentResult(ctx context.Context, cfg config.Config, opts selectAgentOptions, now time.Time) (selectAgentResult, error) {
-	result := selectAgentResult{Candidates: []selectAgentCandidate{}, Generated: now}
-	var scores []accountScore
-	var usable []bool
+func buildSelectAgentResult(ctx context.Context, cfg config.Config, opts selectAgentOptions) (selectAgentResult, error) {
+	result := selectAgentResult{Candidates: []selectAgentCandidate{}, Generated: time.Now()}
+	var claudeAccounts []config.ResolvedAccount
+	var codexAccounts []config.ResolvedCodexAccount
+	var claudeFloors, codexFloors []float64
+	var claudeResults, codexResults []quotaProbeResult
+	var err error
 	if opts.agent == selectAgentAll || opts.agent == selectAgentClaude {
-		candidates, providerScores, providerUsable, err := collectClaudeSelectAgentCandidates(ctx, cfg, opts.model, now)
+		claudeAccounts, claudeFloors, claudeResults, err = probeClaudeAccounts(ctx, cfg)
 		if err != nil {
 			return result, err
 		}
-		result.Candidates = append(result.Candidates, candidates...)
-		scores = append(scores, providerScores...)
-		usable = append(usable, providerUsable...)
 	}
 	if opts.agent == selectAgentAll || opts.agent == selectAgentCodex {
-		candidates, providerScores, providerUsable, err := collectCodexSelectAgentCandidates(ctx, cfg, now)
+		codexAccounts, codexFloors, codexResults, err = probeCodexAccounts(ctx, cfg)
 		if err != nil {
 			return result, err
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	now := time.Now()
+	result.Generated = now
+	rejectExpiredQuotaResults(claudeResults, now)
+	rejectExpiredQuotaResults(codexResults, now)
+	var scores []accountScore
+	var usable []bool
+	if len(claudeAccounts) > 0 {
+		candidates, providerScores, providerUsable := scoreClaudeSelectAgentCandidates(claudeAccounts, claudeFloors, claudeResults, opts.model, now)
 		result.Candidates = append(result.Candidates, candidates...)
 		scores = append(scores, providerScores...)
 		usable = append(usable, providerUsable...)
 	}
+	if len(codexAccounts) > 0 {
+		candidates, providerScores, providerUsable := scoreCodexSelectAgentCandidates(codexAccounts, codexFloors, codexResults, now)
+		result.Candidates = append(result.Candidates, candidates...)
+		scores = append(scores, providerScores...)
+		usable = append(usable, providerUsable...)
+	}
+
 	if opts.agent == selectAgentAll {
 		windows := make([]map[int]map[string]any, len(result.Candidates))
 		floors := make([]float64, len(result.Candidates))
@@ -231,33 +249,11 @@ func buildSelectAgentResult(ctx context.Context, cfg config.Config, opts selectA
 		result.Selected = &selected
 		return result, nil
 	}
-	err := fmt.Errorf("no account has usable quota%s", selectAgentFailureSuffix(result.Candidates))
+	err = fmt.Errorf("no account has usable quota%s", selectAgentFailureSuffix(result.Candidates))
 	return result, err
 }
 
-func collectClaudeSelectAgentCandidates(ctx context.Context, cfg config.Config, requestedModel string, now time.Time) ([]selectAgentCandidate, []accountScore, []bool, error) {
-	accounts, skipped := cfg.ResolveAccounts()
-	if len(skipped) > 0 {
-		return nil, nil, nil, fmt.Errorf("invalid Claude account config: %s", strings.Join(skipped, "; "))
-	}
-	minLeftPcts, err := execPromptMinLeftPctByAccount(cfg, claudeAccountKeys(accounts), selectAgentClaude)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	results := make([]quotaProbeResult, len(accounts))
-	var wg sync.WaitGroup
-	for i, account := range accounts {
-		wg.Add(1)
-		go func(i int, account config.ResolvedAccount) {
-			defer wg.Done()
-			results[i].quota, results[i].err = claude.GetQuotaForConfigDir(ctx, delegateProbeTimeout, account.ConfigDir, cliCacheMaxAge)
-		}(i, account)
-	}
-	wg.Wait()
-	if err := ctx.Err(); err != nil {
-		return nil, nil, nil, err
-	}
-
+func scoreClaudeSelectAgentCandidates(accounts []config.ResolvedAccount, minLeftPcts []float64, results []quotaProbeResult, requestedModel string, now time.Time) ([]selectAgentCandidate, []accountScore, []bool) {
 	compareModel := shouldCompareClaudeModelWindow(results, requestedModel, minLeftPcts, now)
 	candidates := make([]selectAgentCandidate, len(accounts))
 	scores := make([]accountScore, len(accounts))
@@ -298,32 +294,10 @@ func collectClaudeSelectAgentCandidates(ctx context.Context, cfg config.Config, 
 		usable[i] = true
 		candidates[i] = candidate
 	}
-	return candidates, scores, usable, nil
+	return candidates, scores, usable
 }
 
-func collectCodexSelectAgentCandidates(ctx context.Context, cfg config.Config, now time.Time) ([]selectAgentCandidate, []accountScore, []bool, error) {
-	accounts, skipped := cfg.ResolveCodexAccounts()
-	if len(skipped) > 0 {
-		return nil, nil, nil, fmt.Errorf("invalid Codex account config: %s", strings.Join(skipped, "; "))
-	}
-	minLeftPcts, err := execPromptMinLeftPctByAccount(cfg, codexAccountKeys(accounts), selectAgentCodex)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	results := make([]quotaProbeResult, len(accounts))
-	var wg sync.WaitGroup
-	for i, account := range accounts {
-		wg.Add(1)
-		go func(i int, account config.ResolvedCodexAccount) {
-			defer wg.Done()
-			results[i].quota, results[i].err = codex.GetQuotaForHome(ctx, delegateProbeTimeout, account.Home, cliCacheMaxAge)
-		}(i, account)
-	}
-	wg.Wait()
-	if err := ctx.Err(); err != nil {
-		return nil, nil, nil, err
-	}
-
+func scoreCodexSelectAgentCandidates(accounts []config.ResolvedCodexAccount, minLeftPcts []float64, results []quotaProbeResult, now time.Time) ([]selectAgentCandidate, []accountScore, []bool) {
 	compareShortest := shouldCompareCodexShortestWindow(results, minLeftPcts, now)
 	candidates := make([]selectAgentCandidate, len(accounts))
 	scores := make([]accountScore, len(accounts))
@@ -361,7 +335,7 @@ func collectCodexSelectAgentCandidates(ctx context.Context, cfg config.Config, n
 		usable[i] = true
 		candidates[i] = candidate
 	}
-	return candidates, scores, usable, nil
+	return candidates, scores, usable
 }
 
 func claudeSelectAgentWindows(quota map[string]any, requestedModel string, minLeftPct float64, now time.Time) []selectAgentWindow {

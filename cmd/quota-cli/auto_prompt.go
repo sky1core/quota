@@ -209,7 +209,7 @@ func autoPromptAccounts(cfg config.Config, opts autoPromptOptions, catalogs []ac
 	return candidates, nil
 }
 
-func selectAutoPromptAccount(ctx context.Context, cfg config.Config, opts autoPromptOptions, catalogs []accountModels, now time.Time) (autoPromptAccount, error) {
+func selectAutoPromptAccount(ctx context.Context, cfg config.Config, opts autoPromptOptions, catalogs []accountModels) (autoPromptAccount, error) {
 	accounts, err := autoPromptAccounts(cfg, opts, catalogs)
 	if err != nil {
 		return autoPromptAccount{}, err
@@ -221,9 +221,9 @@ func selectAutoPromptAccount(ctx context.Context, cfg config.Config, opts autoPr
 		go func(i int, account autoPromptAccount) {
 			defer wg.Done()
 			if account.provider == "claude" {
-				results[i].quota, results[i].err = claude.GetQuotaForConfigDir(ctx, delegateProbeTimeout, account.dir, cliCacheMaxAge)
+				results[i].quota, results[i].validity, results[i].err = claude.GetQuotaForConfigDirWithValidity(ctx, delegateProbeTimeout, account.dir, cliCacheMaxAge)
 			} else {
-				results[i].quota, results[i].err = codex.GetQuotaForHome(ctx, delegateProbeTimeout, account.dir, cliCacheMaxAge)
+				results[i].quota, results[i].validity, results[i].err = codex.GetQuotaForHomeWithValidity(ctx, delegateProbeTimeout, account.dir, cliCacheMaxAge)
 			}
 		}(i, account)
 	}
@@ -231,6 +231,8 @@ func selectAutoPromptAccount(ctx context.Context, cfg config.Config, opts autoPr
 	if err := ctx.Err(); err != nil {
 		return autoPromptAccount{}, err
 	}
+	now := time.Now()
+	rejectExpiredQuotaResults(results, now)
 	scores := make([]accountScore, len(accounts))
 	usable := make([]bool, len(accounts))
 	minLeftPcts := make([]float64, len(accounts))
@@ -349,7 +351,7 @@ func runAutoPrompt(ctx context.Context, opts autoPromptOptions) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	account, err := selectAutoPromptAccount(ctx, cfg, opts, catalogs, time.Now())
+	account, err := selectAutoPromptAccount(ctx, cfg, opts, catalogs)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		if errors.Is(err, errAutoPromptModels) {

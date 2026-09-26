@@ -85,21 +85,26 @@ func GetQuota(ctx context.Context, timeout time.Duration) (map[string]any, error
 // instead of starting app-server; a live probe's response is written back. A
 // non-positive maxAge skips the cache read but still refreshes it on success.
 func GetQuotaForHome(ctx context.Context, timeout time.Duration, codexHome string, maxAge time.Duration) (map[string]any, error) {
+	quota, _, err := GetQuotaForHomeWithValidity(ctx, timeout, codexHome, maxAge)
+	return quota, err
+}
+
+func GetQuotaForHomeWithValidity(ctx context.Context, timeout time.Duration, codexHome string, maxAge time.Duration) (map[string]any, quotacache.Validity, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	codexHome, err := resolveHome(codexHome)
 	if err != nil {
-		return nil, err
+		return nil, quotacache.Validity{}, err
 	}
 	key := codexCacheKey(codexHome)
 	unlock, err := quotacache.AcquireProbe(ctx, key)
 	if err != nil {
-		return nil, fmt.Errorf("Codex quota query lock: %w", err)
+		return nil, quotacache.Validity{}, fmt.Errorf("Codex quota query lock: %w", err)
 	}
 	defer unlock()
-	if raw, ok := quotacache.Get(key, maxAge); ok {
+	if raw, validity, ok := quotacache.GetWithValidity(key, maxAge); ok {
 		if out, err := parseCachedQuota(raw); err == nil {
-			return out, nil
+			return out, validity, nil
 		}
 	}
 
@@ -113,16 +118,16 @@ func GetQuotaForHome(ctx context.Context, timeout time.Duration, codexHome strin
 	cmd.Env = EnvForHome(os.Environ(), codexHome)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, err
+		return nil, quotacache.Validity{}, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, err
+		return nil, quotacache.Validity{}, err
 	}
 	cmd.Stderr = nil
 
 	if err := cmd.Start(); err != nil {
-		return nil, err
+		return nil, quotacache.Validity{}, err
 	}
 	defer func() {
 		_ = stdin.Close()
@@ -194,34 +199,35 @@ func GetQuotaForHome(ctx context.Context, timeout time.Duration, codexHome strin
 		"clientInfo":   map[string]any{"name": "quota-cli", "version": "0.1.0"},
 		"capabilities": nil,
 	}}); err != nil {
-		return nil, err
+		return nil, quotacache.Validity{}, err
 	}
 	if _, err := readUntil(1); err != nil {
-		return nil, err
+		return nil, quotacache.Validity{}, err
 	}
 
 	// rate limits
 	if err := send(rpcReq{JSONRPC: "2.0", ID: 2, Method: "account/rateLimits/read", Params: nil}); err != nil {
-		return nil, err
+		return nil, quotacache.Validity{}, err
 	}
 	resRaw, err := readUntil(2)
 	if err != nil {
-		return nil, err
+		return nil, quotacache.Validity{}, err
 	}
 	fetchedAt := time.Now()
 
 	var rr rateLimitsResponse
 	if err := json.Unmarshal(resRaw, &rr); err != nil {
-		return nil, err
+		return nil, quotacache.Validity{}, err
 	}
 
 	out, err := buildOutput(rr)
 	if err != nil {
-		return nil, err
+		return nil, quotacache.Validity{}, err
 	}
 	// Cache the raw rate-limits response only until its first data-change boundary.
-	quotacache.PutWithContext(ctx, key, string(resRaw), fetchedAt, cacheValidUntil(rr))
-	return out, nil
+	validity := quotacache.Validity{FetchedAt: fetchedAt, ValidUntil: cacheValidUntil(rr)}
+	quotacache.PutWithContext(ctx, key, string(resRaw), fetchedAt, validity.ValidUntil)
+	return out, validity, nil
 }
 
 func parseCachedQuota(raw string) (map[string]any, error) {

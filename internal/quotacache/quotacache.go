@@ -28,6 +28,17 @@ type entry struct {
 	Raw        string    `json:"raw"`
 }
 
+type Validity struct {
+	FetchedAt  time.Time
+	ValidUntil time.Time
+}
+
+func (v Validity) ValidAt(now time.Time, maxAge time.Duration) bool {
+	return !v.FetchedAt.IsZero() && !v.FetchedAt.After(now) &&
+		now.Sub(v.FetchedAt) <= maxAge &&
+		(v.ValidUntil.IsZero() || now.Before(v.ValidUntil))
+}
+
 const contextLockMaxWait = 100 * time.Millisecond
 
 func path() string {
@@ -41,19 +52,20 @@ func path() string {
 // file atomically, so a reader always sees a whole file, old or new, never a
 // partial one.
 func Get(key string, maxAge time.Duration) (string, bool) {
+	raw, _, ok := GetWithValidity(key, maxAge)
+	return raw, ok
+}
+
+func GetWithValidity(key string, maxAge time.Duration) (string, Validity, bool) {
 	if maxAge <= 0 {
-		return "", false
+		return "", Validity{}, false
 	}
 	e, ok := load()[key]
-	now := time.Now()
-	if !ok || e.FetchedAt.After(now) || now.Sub(e.FetchedAt) > maxAge {
-		return "", false
+	validity := Validity{FetchedAt: e.FetchedAt, ValidUntil: e.ValidUntil}
+	if !ok || !validity.ValidAt(time.Now(), maxAge) {
+		return "", Validity{}, false
 	}
-	// Expire at the provider's first recorded data-change boundary.
-	if !e.ValidUntil.IsZero() && !now.Before(e.ValidUntil) {
-		return "", false
-	}
-	return e.Raw, true
+	return e.Raw, validity, true
 }
 
 // Put stores raw under key with the current time, merging into the existing file

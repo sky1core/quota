@@ -16,6 +16,7 @@ import (
 	"github.com/sky1core/quota/internal/claude"
 	"github.com/sky1core/quota/internal/codex"
 	"github.com/sky1core/quota/internal/config"
+	"github.com/sky1core/quota/internal/quotacache"
 )
 
 const (
@@ -40,8 +41,9 @@ type accountScore struct {
 }
 
 type quotaProbeResult struct {
-	quota map[string]any
-	err   error
+	quota    map[string]any
+	validity quotacache.Validity
+	err      error
 }
 
 func runClaudePrompt(ctx context.Context, args []string) int {
@@ -50,7 +52,7 @@ func runClaudePrompt(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "config load error:", err)
 		return 1
 	}
-	account, err := selectClaudeAccount(ctx, cfg, args, time.Now())
+	account, err := selectClaudeAccount(ctx, cfg, args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "claude account selection error:", err)
 		return 1
@@ -77,7 +79,7 @@ func runCodexPrompt(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "config load error:", err)
 		return 1
 	}
-	account, err := selectCodexAccount(ctx, cfg, time.Now())
+	account, err := selectCodexAccount(ctx, cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "codex account selection error:", err)
 		return 1
@@ -98,14 +100,14 @@ func runCodexPrompt(ctx context.Context, args []string) int {
 	return 0
 }
 
-func selectClaudeAccount(ctx context.Context, cfg config.Config, args []string, now time.Time) (config.ResolvedAccount, error) {
+func probeClaudeAccounts(ctx context.Context, cfg config.Config) ([]config.ResolvedAccount, []float64, []quotaProbeResult, error) {
 	accounts, skipped := cfg.ResolveAccounts()
 	if len(skipped) > 0 {
-		return config.ResolvedAccount{}, fmt.Errorf("invalid Claude account config: %s", strings.Join(skipped, "; "))
+		return nil, nil, nil, fmt.Errorf("invalid Claude account config: %s", strings.Join(skipped, "; "))
 	}
 	minLeftPcts, err := execPromptMinLeftPctByAccount(cfg, claudeAccountKeys(accounts), "claude")
 	if err != nil {
-		return config.ResolvedAccount{}, err
+		return nil, nil, nil, err
 	}
 	results := make([]quotaProbeResult, len(accounts))
 	var wg sync.WaitGroup
@@ -113,13 +115,24 @@ func selectClaudeAccount(ctx context.Context, cfg config.Config, args []string, 
 		wg.Add(1)
 		go func(i int, account config.ResolvedAccount) {
 			defer wg.Done()
-			results[i].quota, results[i].err = claude.GetQuotaForConfigDir(ctx, delegateProbeTimeout, account.ConfigDir, cliCacheMaxAge)
+			results[i].quota, results[i].validity, results[i].err = claude.GetQuotaForConfigDirWithValidity(ctx, delegateProbeTimeout, account.ConfigDir, cliCacheMaxAge)
 		}(i, account)
 	}
 	wg.Wait()
 	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+
+	return accounts, minLeftPcts, results, nil
+}
+
+func selectClaudeAccount(ctx context.Context, cfg config.Config, args []string) (config.ResolvedAccount, error) {
+	accounts, minLeftPcts, results, err := probeClaudeAccounts(ctx, cfg)
+	if err != nil {
 		return config.ResolvedAccount{}, err
 	}
+	now := time.Now()
+	rejectExpiredQuotaResults(results, now)
 
 	requestedModel := claudeRequestedModel(args)
 	compareModel := shouldCompareClaudeModelWindow(results, requestedModel, minLeftPcts, now)
@@ -149,14 +162,14 @@ func selectClaudeAccount(ctx context.Context, cfg config.Config, args []string, 
 	return config.ResolvedAccount{}, fmt.Errorf("no account has usable quota%s", quotaFailureSuffix(failures))
 }
 
-func selectCodexAccount(ctx context.Context, cfg config.Config, now time.Time) (config.ResolvedCodexAccount, error) {
+func probeCodexAccounts(ctx context.Context, cfg config.Config) ([]config.ResolvedCodexAccount, []float64, []quotaProbeResult, error) {
 	accounts, skipped := cfg.ResolveCodexAccounts()
 	if len(skipped) > 0 {
-		return config.ResolvedCodexAccount{}, fmt.Errorf("invalid Codex account config: %s", strings.Join(skipped, "; "))
+		return nil, nil, nil, fmt.Errorf("invalid Codex account config: %s", strings.Join(skipped, "; "))
 	}
 	minLeftPcts, err := execPromptMinLeftPctByAccount(cfg, codexAccountKeys(accounts), "codex")
 	if err != nil {
-		return config.ResolvedCodexAccount{}, err
+		return nil, nil, nil, err
 	}
 	results := make([]quotaProbeResult, len(accounts))
 	var wg sync.WaitGroup
@@ -164,13 +177,24 @@ func selectCodexAccount(ctx context.Context, cfg config.Config, now time.Time) (
 		wg.Add(1)
 		go func(i int, account config.ResolvedCodexAccount) {
 			defer wg.Done()
-			results[i].quota, results[i].err = codex.GetQuotaForHome(ctx, delegateProbeTimeout, account.Home, cliCacheMaxAge)
+			results[i].quota, results[i].validity, results[i].err = codex.GetQuotaForHomeWithValidity(ctx, delegateProbeTimeout, account.Home, cliCacheMaxAge)
 		}(i, account)
 	}
 	wg.Wait()
 	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+
+	return accounts, minLeftPcts, results, nil
+}
+
+func selectCodexAccount(ctx context.Context, cfg config.Config) (config.ResolvedCodexAccount, error) {
+	accounts, minLeftPcts, results, err := probeCodexAccounts(ctx, cfg)
+	if err != nil {
 		return config.ResolvedCodexAccount{}, err
 	}
+	now := time.Now()
+	rejectExpiredQuotaResults(results, now)
 
 	compareShortest := shouldCompareCodexShortestWindow(results, minLeftPcts, now)
 	var failures []string
@@ -196,8 +220,25 @@ func selectCodexAccount(ctx context.Context, cfg config.Config, now time.Time) (
 	return config.ResolvedCodexAccount{}, fmt.Errorf("no account has usable quota%s", quotaFailureSuffix(failures))
 }
 
+func rejectExpiredQuotaResults(results []quotaProbeResult, now time.Time) {
+	for i := range results {
+		if results[i].err == nil && !results[i].validity.ValidAt(now, cliCacheMaxAge) {
+			results[i].err = fmt.Errorf("quota observation expired or has an invalid timestamp at account selection")
+		}
+	}
+}
+
+func quotaResetExpired(quota map[string]any, now time.Time) bool {
+	for _, window := range quotaWindows(quota) {
+		if at, ok := window["resetsAt"].(time.Time); ok && !at.IsZero() && !now.Before(at) {
+			return true
+		}
+	}
+	return false
+}
+
 func scoreClaudeQuota(quota map[string]any, requestedModel string, compareModel bool, minLeftPct float64, now time.Time) (accountScore, bool) {
-	if quotaAdmissionRejection(quota, "claude") != "" || claudeModelQuotaRejection(quota, requestedModel) != "" {
+	if quotaResetExpired(quota, now) || quotaAdmissionRejection(quota, "claude") != "" || claudeModelQuotaRejection(quota, requestedModel) != "" {
 		return accountScore{}, false
 	}
 	windows := quotaWindows(quota)
@@ -265,7 +306,7 @@ func shouldCompareClaudeModelWindow(results []quotaProbeResult, requestedModel s
 }
 
 func scoreCodexQuota(quota map[string]any, compareShortest bool, minLeftPct float64, now time.Time) (accountScore, bool) {
-	if quotaAdmissionRejection(quota, "codex") != "" {
+	if quotaResetExpired(quota, now) || quotaAdmissionRejection(quota, "codex") != "" {
 		return accountScore{}, false
 	}
 	windows := quotaWindows(quota)

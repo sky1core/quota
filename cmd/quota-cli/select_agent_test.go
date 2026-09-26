@@ -77,7 +77,7 @@ func TestSelectAgentSelectsAcrossProviders(t *testing.T) {
 		ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}},
 		CodexAccounts:  []config.CodexAccount{{Key: "codex-2", Home: "~/.codex-2"}},
 	}
-	result, err := buildSelectAgentResult(context.Background(), cfg, selectAgentOptions{agent: selectAgentAll}, time.Now())
+	result, err := buildSelectAgentResult(context.Background(), cfg, selectAgentOptions{agent: selectAgentAll})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestSelectAgentDefaultDoesNotUseClaudeModelRows(t *testing.T) {
 	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), "Current session: 10% used - resets in 4h\nCurrent week (all models): 90% used - resets in 1d\nCurrent week (Fable): 0% used - resets in 1d", validUntil)
 	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), `{"rateLimits":{"primary":{"usedPercent":40,"windowDurationMins":300},"secondary":{"usedPercent":40,"windowDurationMins":10080}}}`, validUntil)
 
-	result, err := buildSelectAgentResult(context.Background(), config.Config{}, selectAgentOptions{agent: selectAgentAll}, time.Now())
+	result, err := buildSelectAgentResult(context.Background(), config.Config{}, selectAgentOptions{agent: selectAgentAll})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestSelectAgentAllModeComparesSharedFiveHours(t *testing.T) {
 	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), "Current session: 10% used - resets in 4h", validUntil)
 	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), `{"rateLimits":{"primary":{"usedPercent":70,"windowDurationMins":300},"secondary":{"usedPercent":70,"windowDurationMins":10080}}}`, validUntil)
 
-	result, err := buildSelectAgentResult(context.Background(), config.Config{}, selectAgentOptions{agent: selectAgentAll}, time.Now())
+	result, err := buildSelectAgentResult(context.Background(), config.Config{}, selectAgentOptions{agent: selectAgentAll})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestSelectAgentClaudeModelUsesRequestedModelRow(t *testing.T) {
 	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-2")), "Current session: 20% used - resets in 4h\nCurrent week (all models): 80% used - resets in 1d\nCurrent week (Fable): 10% used - resets in 1d", validUntil)
 
 	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}}}
-	result, err := buildSelectAgentResult(context.Background(), cfg, selectAgentOptions{agent: selectAgentClaude, model: "fable"}, time.Now())
+	result, err := buildSelectAgentResult(context.Background(), cfg, selectAgentOptions{agent: selectAgentClaude, model: "fable"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestSelectAgentReturnsCandidatesWhenNoUsableAccount(t *testing.T) {
 	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), "Current session: 99% used - resets in 1m\nCurrent week (all models): 99% used - resets in 1m", validUntil)
 	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), `{"rateLimits":{"primary":{"usedPercent":99,"windowDurationMins":300},"secondary":{"usedPercent":99,"windowDurationMins":10080}}}`, validUntil)
 
-	result, err := buildSelectAgentResult(context.Background(), config.Config{}, selectAgentOptions{agent: selectAgentAll}, time.Now())
+	result, err := buildSelectAgentResult(context.Background(), config.Config{}, selectAgentOptions{agent: selectAgentAll})
 	if err == nil {
 		t.Fatal("expected no usable account error")
 	}
@@ -200,10 +200,9 @@ func TestSelectAgentReturnsCandidatesWhenNoUsableAccount(t *testing.T) {
 }
 
 func TestSelectAgentConfigErrorKeepsEmptyCandidatesArray(t *testing.T) {
-	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "bad", ConfigDir: "/tmp/claude"}}}
 
-	result, err := buildSelectAgentResult(context.Background(), cfg, selectAgentOptions{agent: selectAgentClaude}, now)
+	result, err := buildSelectAgentResult(context.Background(), cfg, selectAgentOptions{agent: selectAgentClaude})
 	if err == nil {
 		t.Fatal("expected config error")
 	}
@@ -225,7 +224,7 @@ func TestSelectAgentKeepsPartialProbeFailures(t *testing.T) {
 
 	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), `{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":10,"windowDurationMins":10080}}}`, validUntil)
 
-	result, err := buildSelectAgentResult(context.Background(), config.Config{}, selectAgentOptions{agent: selectAgentAll}, time.Now())
+	result, err := buildSelectAgentResult(context.Background(), config.Config{}, selectAgentOptions{agent: selectAgentAll})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +393,7 @@ func TestSelectAgentCommonQuotaPeriods(t *testing.T) {
 			cfg := config.Config{ExecPrompt: &config.ExecPromptConfig{AccountSettings: map[string]config.ExecPromptAccountSettings{
 				"claude": {MinLeftPct: &tc.floor}, "codex": {MinLeftPct: &tc.floor},
 			}}}
-			got, err := buildSelectAgentResult(context.Background(), cfg, selectAgentOptions{agent: selectAgentAll}, time.Now())
+			got, err := buildSelectAgentResult(context.Background(), cfg, selectAgentOptions{agent: selectAgentAll})
 			if tc.want == "" {
 				if err == nil || !strings.Contains(err.Error(), "no common quota window duration") || got.Selected != nil || len(got.Candidates) != 2 {
 					t.Fatalf("incomparable: %+v %v", got, err)

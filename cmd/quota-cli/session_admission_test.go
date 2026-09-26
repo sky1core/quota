@@ -67,11 +67,11 @@ func TestCodexAdmissionRequiresReportedUsage(t *testing.T) {
 			t.Setenv("CODEX_HOME", "")
 			raw := fmt.Sprintf(`{"rateLimits":{"primary":{"windowDurationMins":300%s},"secondary":{"usedPercent":10,"windowDurationMins":10080}}}`, tc.field)
 			quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), raw, time.Now().Add(time.Hour))
-			_, err := selectCodexAccount(context.Background(), config.Config{}, time.Now())
+			_, err := selectCodexAccount(context.Background(), config.Config{})
 			if (err == nil) != tc.allow {
 				t.Fatalf("exec-prompt selection error = %v, want allowed = %v", err, tc.allow)
 			}
-			result, err := buildSelectAgentResult(context.Background(), config.Config{}, selectAgentOptions{agent: selectAgentCodex}, time.Now())
+			result, err := buildSelectAgentResult(context.Background(), config.Config{}, selectAgentOptions{agent: selectAgentCodex})
 			if (err == nil) != tc.allow || (result.Selected != nil) != tc.allow {
 				t.Fatalf("select-agent result = %+v, error = %v, want allowed = %v", result, err, tc.allow)
 			}
@@ -221,7 +221,7 @@ func TestAdmissionPreservesRankingAmongPassingCandidates(t *testing.T) {
 	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude-2")), "Current session: 40% used - resets in 4h\nCurrent week (all models): 20% used - resets in 1d", validUntil)
 
 	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}}}
-	selected, err := selectClaudeAccount(context.Background(), cfg, nil, time.Now())
+	selected, err := selectClaudeAccount(context.Background(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestSelectAgentSkipReasonReportsSessionAdmissionFloor(t *testing.T) {
 	quotacache.Put(quotaTestCacheKey(t, "claude", filepath.Join(home, ".claude")), "Current session: 80% used - resets in 4h\nCurrent week (all models): 10% used - resets in 3d", validUntil)
 	quotacache.Put(quotaTestCacheKey(t, "codex", filepath.Join(home, ".codex")), `{"rateLimits":{"primary":{"usedPercent":80,"windowDurationMins":300},"secondary":{"usedPercent":10,"windowDurationMins":10080}}}`, validUntil)
 
-	result, err := buildSelectAgentResult(context.Background(), config.Config{}, selectAgentOptions{agent: selectAgentAll}, time.Now())
+	result, err := buildSelectAgentResult(context.Background(), config.Config{}, selectAgentOptions{agent: selectAgentAll})
 	if err == nil {
 		t.Fatal("expected no usable account when every session/5h window is below the 25% floor")
 	}

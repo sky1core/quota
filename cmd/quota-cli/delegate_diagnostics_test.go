@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sky1core/quota/internal/config"
 )
@@ -51,18 +50,18 @@ func TestClaudeWeeklyModelAdmissionThroughParsers(t *testing.T) {
 				if strings.Contains(model, "fable") {
 					allow = tc.allowFable
 				}
-				_, err := selectClaudeAccount(context.Background(), config.Config{}, []string{"--model", model}, time.Now())
+				_, err := selectClaudeAccount(context.Background(), config.Config{}, []string{"--model", model})
 				if (err == nil) != allow {
 					t.Errorf("direct selection error=%v, want allowed=%t", err, allow)
 				}
-				result, err := buildSelectAgentResult(context.Background(), config.Config{}, selectAgentOptions{agent: "claude", model: model}, time.Now())
+				result, err := buildSelectAgentResult(context.Background(), config.Config{}, selectAgentOptions{agent: "claude", model: model})
 				if (err == nil) != allow || (result.Selected != nil) != allow {
 					t.Errorf("select-agent error=%v selected=%v, want allowed=%t", err, result.Selected, allow)
 				}
 				opts := autoPromptTestOptions()
 				opts.models[0].model = model
 				catalogs := []accountModels{autoPromptTestCatalog("codex", autoPromptTestModel("code-model", "high"))}
-				_, err = selectAutoPromptAccount(context.Background(), config.Config{}, opts, catalogs, time.Now())
+				_, err = selectAutoPromptAccount(context.Background(), config.Config{}, opts, catalogs)
 				if (err == nil) != allow {
 					t.Errorf("automatic selection error=%v, want allowed=%t", err, allow)
 				}
@@ -90,7 +89,7 @@ func TestClaudeWeeklyModelUsesConfiguredFloor(t *testing.T) {
 			cfg := config.Config{ExecPrompt: &config.ExecPromptConfig{AccountSettings: map[string]config.ExecPromptAccountSettings{
 				"claude": {MinLeftPct: floatPtr(40)},
 			}}}
-			_, err := selectClaudeAccount(context.Background(), cfg, []string{"--model", tc.model}, time.Now())
+			_, err := selectClaudeAccount(context.Background(), cfg, []string{"--model", tc.model})
 			if (err == nil) != tc.allow {
 				t.Fatalf("selection error=%v, want allowed=%t", err, tc.allow)
 			}
@@ -116,7 +115,7 @@ func TestClaudeSelectionUsesModelOptionOutsideOtherOptionValues(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			home := autoPromptTestHome(t)
 			putAutoPromptQuota(t, "claude", filepath.Join(home, ".claude"), "Current session: 10% used\nCurrent week (all models): 10% used\nCurrent week (Opus): 100% used\nCurrent week (Sonnet): 10% used")
-			_, err := selectClaudeAccount(context.Background(), config.Config{}, tc.args, time.Now())
+			_, err := selectClaudeAccount(context.Background(), config.Config{}, tc.args)
 			if (err == nil) != tc.allow {
 				t.Fatalf("selection error=%v, want allowed=%t", err, tc.allow)
 			}
@@ -202,7 +201,7 @@ func TestQuotaFailureListsEveryAccount(t *testing.T) {
 	putAutoPromptQuota(t, "claude", filepath.Join(home, ".claude"), "Current session: 80% used\nCurrent week (all models): 10% used")
 	putAutoPromptQuota(t, "claude", filepath.Join(home, ".claude-2"), "Current week (all models): 96% used\nCurrent week (Fable): 10% used")
 	cfg := config.Config{ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/.claude-2"}}}
-	_, err := selectClaudeAccount(context.Background(), cfg, []string{"--model", "fable"}, time.Now())
+	_, err := selectClaudeAccount(context.Background(), cfg, []string{"--model", "fable"})
 	if err == nil {
 		t.Fatal("expected quota rejection")
 	}

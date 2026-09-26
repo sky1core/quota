@@ -41,6 +41,104 @@ func TestKeepaliveTicks_QuiesceAwaitsCleanup(t *testing.T) {
 	}
 }
 
+func TestKeepaliveNeedsAwakeOnlyBeforeScheduledAttempt(t *testing.T) {
+	cfg := keepalive.DefaultConfig()
+	cfg.Enabled = true
+	scheduled := time.Date(2026, 9, 23, 12, 30, 0, 0, time.FixedZone("local", 9*3600))
+	for _, tc := range []struct {
+		name    string
+		at      time.Time
+		running bool
+		want    bool
+	}{
+		{"before activity window", scheduled.Add(-51 * time.Minute), false, false},
+		{"activity window starts", scheduled.Add(-50 * time.Minute), false, true},
+		{"before schedule", scheduled.Add(-time.Second), false, true},
+		{"scheduled attempt", scheduled, true, true},
+		{"long attempt", scheduled.Add(6 * time.Minute), true, true},
+		{"attempt completed", scheduled, false, false},
+		{"after schedule", scheduled.Add(time.Minute), false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			attemptedDay := ""
+			if tc.name == "attempt completed" {
+				attemptedDay = scheduled.Format("2006-01-02")
+			}
+			if got := keepaliveNeedsAwake(cfg, tc.at, tc.running, attemptedDay); got != tc.want {
+				t.Fatalf("want %v, got %v", tc.want, got)
+			}
+		})
+	}
+	cfg.Enabled = false
+	if keepaliveNeedsAwake(cfg, scheduled.Add(-time.Minute), false, "") {
+		t.Fatal("disabled feature requested wakefulness")
+	}
+	cfg.Enabled = true
+	cfg.Weekdays = []string{"Tue"}
+	if keepaliveNeedsAwake(cfg, scheduled.Add(-time.Minute), false, "") {
+		t.Fatal("unscheduled weekday requested wakefulness")
+	}
+	if keepaliveAttemptStarting(cfg, scheduled) {
+		t.Fatal("unscheduled weekday started an attempt")
+	}
+	cfg.Weekdays = []string{"Wed"}
+	if !keepaliveAttemptStarting(cfg, scheduled) || keepaliveAttemptStarting(cfg, scheduled.Add(31*time.Second)) {
+		t.Fatal("scheduled attempt window is incorrect")
+	}
+}
+
+func TestKeepaliveAwakeWindowCoversPendingTickAndMidnight(t *testing.T) {
+	cfg := keepalive.DefaultConfig()
+	cfg.Enabled = true
+	scheduled := time.Date(2030, 1, 2, 12, 30, 0, 0, time.UTC)
+	if !keepaliveNeedsAwake(cfg, scheduled.Add(10*time.Second), false, "") {
+		t.Error("sleep protection ended before the scheduled tick could start")
+	}
+	cfg.Time, cfg.Weekdays = "00:20", []string{"Wed"}
+	if !keepaliveNeedsAwake(cfg, time.Date(2030, 1, 1, 23, 30, 0, 0, time.UTC), false, "2030-01-01") {
+		t.Error("sleep protection missed the activity window before midnight")
+	}
+}
+
+func TestKeepaliveSleepProtectionUsesPersistedAttempt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	service := keepalive.NewService(nil, path, func() float64 { return 0 })
+	cfg := keepalive.DefaultConfig()
+	cfg.Enabled = true
+	scheduled := time.Date(2030, 1, 2, 12, 30, 0, 0, time.UTC)
+	if err := service.Configure(cfg, scheduled.Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if result := service.Tick(context.Background(), scheduled); result.Error != nil || result.Status != "Skipped: PC active or idle time unavailable" {
+		t.Fatalf("schedule was not claimed: %+v", result)
+	}
+	cfg.Time = "13:00"
+	before := scheduled.Add(10 * time.Minute)
+	if err := service.Configure(cfg, before); err != nil {
+		t.Fatal(err)
+	}
+	for name, s := range map[string]*keepalive.Service{
+		"reconfigured": service,
+		"restarted":    keepalive.NewService(nil, path, nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			day, err := s.LastAttemptDay()
+			if err != nil || day != "2030-01-02" {
+				t.Fatalf("persisted attempt lost: %q %v", day, err)
+			}
+			if keepaliveNeedsAwake(cfg, before, false, day) {
+				t.Fatal("completed schedule requested sleep protection after settings change or restart")
+			}
+			if keepaliveNeedsAwake(cfg, before.AddDate(0, 0, -1), false, day) {
+				t.Fatal("clock moving backwards revived a consumed schedule")
+			}
+			if !keepaliveNeedsAwake(cfg, before.AddDate(0, 0, 1), false, day) {
+				t.Fatal("previous attempt suppressed the next day's protection")
+			}
+		})
+	}
+}
+
 func TestKeepaliveTicks_TimeoutAbortsAndResumes(t *testing.T) {
 	kt := newKeepaliveTicks(context.Background())
 	_, done, ok := kt.begin()

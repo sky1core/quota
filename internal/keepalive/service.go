@@ -94,6 +94,29 @@ type ledger struct {
 	Ignored map[string]ignoredActivity `json:"ignored"`
 }
 
+func readLedger(path string) (ledger, error) {
+	l := ledger{Ignored: map[string]ignoredActivity{}}
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return l, err
+	}
+	if err == nil {
+		if err = json.Unmarshal(b, &l); err != nil {
+			return l, fmt.Errorf("keepalive state: %w", err)
+		}
+		if l.Day == "" {
+			return l, errors.New("keepalive state date is missing")
+		}
+		if _, err = time.Parse("2006-01-02", l.Day); err != nil {
+			return l, fmt.Errorf("keepalive state date: %w", err)
+		}
+	}
+	if l.Ignored == nil {
+		l.Ignored = map[string]ignoredActivity{}
+	}
+	return l, nil
+}
+
 func updateLedger(path string, fn func(*ledger) error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
@@ -107,31 +130,14 @@ func updateLedger(path string, fn func(*ledger) error) error {
 		return err
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	l := ledger{Ignored: map[string]ignoredActivity{}}
-	b, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
+	l, err := readLedger(path)
+	if err != nil {
 		return err
-	}
-	if err == nil {
-		if err = json.Unmarshal(b, &l); err != nil {
-			return fmt.Errorf("keepalive state: %w", err)
-		}
-		if l.Day == "" {
-			return errors.New("keepalive state date is missing")
-		}
-		if l.Day != "" {
-			if _, err = time.Parse("2006-01-02", l.Day); err != nil {
-				return fmt.Errorf("keepalive state date: %w", err)
-			}
-		}
-	}
-	if l.Ignored == nil {
-		l.Ignored = map[string]ignoredActivity{}
 	}
 	if err = fn(&l); err != nil {
 		return err
 	}
-	b, err = json.Marshal(l)
+	b, err := json.Marshal(l)
 	if err != nil {
 		return err
 	}
@@ -214,6 +220,14 @@ type Service struct {
 
 func NewService(runtime *Runtime, statePath string, idleSeconds func() float64) *Service {
 	return &Service{runtime: runtime, statePath: statePath, idleSeconds: idleSeconds}
+}
+
+func (s *Service) LastAttemptDay() (string, error) {
+	l, err := readLedger(s.statePath)
+	if err != nil {
+		return "", err
+	}
+	return l.Day, nil
 }
 
 func (s *Service) Configure(c Config, now time.Time) error {

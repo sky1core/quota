@@ -122,6 +122,9 @@ func TestInvalidLedgerIsPreserved(t *testing.T) {
 	for _, raw := range []string{"{", "null", "{}", `{"day":"invalid"}`} {
 		p := filepath.Join(t.TempDir(), "state.json")
 		os.WriteFile(p, []byte(raw), 0600)
+		if _, err := NewService(nil, p, nil).LastAttemptDay(); err == nil {
+			t.Fatalf("sleep protection accepted invalid state %s", raw)
+		}
 		if _, err := claimDay(p, time.Now()); err == nil {
 			t.Fatalf("accepted %s", raw)
 		}
@@ -129,6 +132,24 @@ func TestInvalidLedgerIsPreserved(t *testing.T) {
 		if string(b) != raw {
 			t.Fatal("damaged state overwritten")
 		}
+	}
+}
+
+func TestLastAttemptDayIsReadOnlyAndReportsReadErrors(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "missing")
+	path := filepath.Join(parent, "state.json")
+	s := NewService(nil, path, nil)
+	if day, err := s.LastAttemptDay(); err != nil || day != "" {
+		t.Fatalf("initial state: %q %v", day, err)
+	}
+	if _, err := os.Stat(parent); !os.IsNotExist(err) {
+		t.Fatalf("reading absent state created files: %v", err)
+	}
+	if err := os.MkdirAll(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LastAttemptDay(); err == nil {
+		t.Fatal("unreadable ledger was treated as an unclaimed schedule")
 	}
 }
 

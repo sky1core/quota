@@ -900,14 +900,20 @@ func onReady() {
 	miKeepalive := systray.AddMenuItemCheckbox("Keep session caches warm", "기본: 평일 12:30 · PC 무입력 5분 · 최근 50분 활동한 대기 세션 (Settings에서 일정 변경)", keepaliveConfig.Enabled)
 	miKeepaliveStatus := systray.AddMenuItem("Keepalive: off", "잠자기·앱 종료로 놓친 일정은 건너뜁니다. 캐시 유지 효과는 모델에 따라 다릅니다.")
 	miKeepaliveStatus.Disable()
+	miSleepStatus := systray.AddMenuItem("Sleep protection: off", "예약 전 활동 시간부터 처리 완료까지 · 외부 전원에서만 유효")
+	miSleepStatus.Disable()
 	keepaliveService := newKeepaliveService(accounts, codexAccounts)
+	keepaliveConfigured := false
 	if err := keepaliveService.Configure(keepaliveConfig, time.Now()); err != nil {
 		miKeepalive.Uncheck()
 		miKeepalive.Disable()
 		miKeepaliveStatus.SetTitle("Keepalive: invalid settings — see log")
 		log.Printf("keepalive config: %v", err)
-	} else if keepaliveConfig.Enabled {
-		miKeepaliveStatus.SetTitle("Keepalive: on (" + keepaliveConfig.Time + ")")
+	} else {
+		keepaliveConfigured = true
+		if keepaliveConfig.Enabled {
+			miKeepaliveStatus.SetTitle("Keepalive: on (" + keepaliveConfig.Time + ")")
+		}
 	}
 	keepaliveContext, cancelKeepalive := context.WithCancel(context.Background())
 	kaTicks := newKeepaliveTicks(keepaliveContext)
@@ -1247,6 +1253,31 @@ func onReady() {
 	}
 	keepaliveResults := make(chan keepaliveResult, 1)
 	keepaliveRunning := false
+	sleepAttemptRunning := false
+	sleepGuard := &systemSleepGuard{}
+	lastSleepStatus := ""
+	syncSleepGuard := func() {
+		want := false
+		var stateErr error
+		if keepaliveConfigured && !settingsBlocked && keepaliveConfig.Enabled {
+			var attemptedDay string
+			attemptedDay, stateErr = keepaliveService.LastAttemptDay()
+			want = stateErr == nil && keepaliveNeedsAwake(keepaliveConfig, time.Now(), sleepAttemptRunning, attemptedDay)
+		}
+		status, err := sleepGuard.sync(want)
+		if stateErr != nil {
+			status = "unavailable"
+			err = errors.Join(stateErr, err)
+		}
+		if status != lastSleepStatus {
+			miSleepStatus.SetTitle("Sleep protection: " + status)
+			lastSleepStatus = status
+			if err != nil {
+				log.Printf("keepalive sleep protection: %v", err)
+			}
+		}
+	}
+	syncSleepGuard()
 	repaint := func() {
 		for _, mi := range allItems {
 			if cfg.isSelected(mi.key) {
@@ -1282,10 +1313,12 @@ func onReady() {
 	}
 	keepaliveStoppedWithoutSave := false
 	apply := func(snap liveSettingsSnapshot, draft liveSettingsDraft) (applyErr error) {
+		defer syncSleepGuard()
 		stopping := keepaliveConfig.Enabled && !draft.Keepalive.Enabled
 		if stopping {
 			cfg = stopKeepalive(keepaliveService, cfg)
 			keepaliveConfig = *cfg.Keepalive
+			sleepAttemptRunning = false
 			keepaliveGeneration++
 			miKeepalive.Uncheck()
 			miKeepaliveStatus.SetTitle("Keepalive: off")
@@ -1344,11 +1377,14 @@ func onReady() {
 		if accountsChanged || !reflect.DeepEqual(keepaliveConfig, *cfg.Keepalive) {
 			keepaliveGeneration++
 			keepaliveService.Stop()
+			sleepAttemptRunning = false
+			keepaliveConfigured = false
 			keepaliveService = newKeepaliveService(accounts, codexAccounts)
 			keepaliveConfig = *cfg.Keepalive
 			if err := keepaliveService.Configure(keepaliveConfig, time.Now()); err != nil {
 				return err
 			}
+			keepaliveConfigured = true
 		}
 		if accountsChanged {
 			refreshGeneration++
@@ -1377,6 +1413,11 @@ func onReady() {
 		}
 	}
 	go func() {
+		defer func() {
+			if err := sleepGuard.close(); err != nil {
+				log.Printf("keepalive sleep protection: %v", err)
+			}
+		}()
 		refreshTicker := time.NewTicker(30 * time.Second)
 		keepaliveTicker := time.NewTicker(10 * time.Second)
 		defer refreshTicker.Stop()
@@ -1409,6 +1450,8 @@ func onReady() {
 			case 2:
 				result := value.Interface().(keepaliveResult)
 				keepaliveRunning = false
+				sleepAttemptRunning = false
+				syncSleepGuard()
 				if result.generation != keepaliveGeneration || !keepaliveConfig.Enabled || result.result.Status == "" {
 					continue
 				}
@@ -1432,16 +1475,24 @@ func onReady() {
 				}
 			case 4:
 				if keepaliveRunning || settingsBlocked {
+					syncSleepGuard()
 					continue
 				}
 				tickCtx, tickDone, ok := kaTicks.begin()
 				if !ok {
+					syncSleepGuard()
 					continue
 				}
 				service, gen := keepaliveService, keepaliveGeneration
 				keepaliveRunning = true
+				now := time.Now()
+				if keepaliveAttemptStarting(keepaliveConfig, now) {
+					attemptedDay, err := service.LastAttemptDay()
+					sleepAttemptRunning = err == nil && attemptedDay < now.Format("2006-01-02")
+				}
+				syncSleepGuard()
 				go func() {
-					r := service.Tick(tickCtx, time.Now())
+					r := service.Tick(tickCtx, now)
 					tickDone()
 					keepaliveResults <- keepaliveResult{gen, r}
 				}()
@@ -1479,6 +1530,7 @@ func onReady() {
 				if keepaliveConfig.Enabled {
 					cfg = stopKeepalive(keepaliveService, cfg)
 					keepaliveConfig = *cfg.Keepalive
+					sleepAttemptRunning = false
 					keepaliveGeneration++
 					generation++
 					miKeepalive.Uncheck()
@@ -1498,6 +1550,7 @@ func onReady() {
 				} else {
 					editCurrent(func(d *liveSettingsDraft) { d.Keepalive.Enabled = true })
 				}
+				syncSleepGuard()
 			case 7:
 				editCurrent(func(d *liveSettingsDraft) { d.ShowResetTime = !d.ShowResetTime })
 			case 8:

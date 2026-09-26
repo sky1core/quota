@@ -16,6 +16,50 @@ import (
 
 const keepaliveQuiesceTimeout = 30 * time.Second
 
+func keepaliveScheduledAt(c keepalive.Config, now time.Time) (time.Time, bool) {
+	if !c.Enabled {
+		return time.Time{}, false
+	}
+	allowed := false
+	for _, weekday := range c.Weekdays {
+		allowed = allowed || weekday == now.Weekday().String()[:3]
+	}
+	if !allowed {
+		return time.Time{}, false
+	}
+	at, err := time.Parse("15:04", c.Time)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Date(now.Year(), now.Month(), now.Day(), at.Hour(), at.Minute(), 0, 0, now.Location()), true
+}
+
+func keepaliveNeedsAwake(c keepalive.Config, now time.Time, running bool, attemptedDay string) bool {
+	if !c.Enabled {
+		return false
+	}
+	if running {
+		return true
+	}
+	window := time.Duration(c.ActivityMinutes) * time.Minute
+	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	for ; !day.After(now.Add(window)); day = day.AddDate(0, 0, 1) {
+		if day.Format("2006-01-02") <= attemptedDay {
+			continue
+		}
+		scheduled, ok := keepaliveScheduledAt(c, day)
+		if ok && !now.Before(scheduled.Add(-window)) && now.Sub(scheduled) <= 30*time.Second {
+			return true
+		}
+	}
+	return false
+}
+
+func keepaliveAttemptStarting(c keepalive.Config, now time.Time) bool {
+	scheduled, ok := keepaliveScheduledAt(c, now)
+	return ok && !now.Before(scheduled) && now.Sub(scheduled) <= 30*time.Second
+}
+
 type keepaliveTicks struct {
 	mu      sync.Mutex
 	active  int

@@ -26,7 +26,7 @@ func CheckRepository(ctx context.Context, dir, agent string, options CheckOption
 	if agent != "claude" && agent != "codex" {
 		return status, fmt.Errorf("invalid agent %q", agent)
 	}
-	if err := ValidateGitEnvironment(ctx); err != nil {
+	if err := ValidateGitEnvironment(ctx, dir); err != nil {
 		return status, err
 	}
 	r, err := resolveContext(ctx, dir)

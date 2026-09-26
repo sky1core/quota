@@ -68,7 +68,7 @@ func checkClaudePrompt(ctx context.Context, stdin io.Reader) error {
 	if err != nil {
 		return err
 	}
-	if err := ValidateGitEnvironment(ctx); err != nil {
+	if err := ValidateGitEnvironment(ctx, dir); err != nil {
 		return err
 	}
 	r, err := resolveContext(ctx, dir)
@@ -104,7 +104,7 @@ func sessionStart(ctx context.Context, agent string, stdin io.Reader, stdout io.
 	if !deliversFor(source) {
 		return nil
 	}
-	if err := ValidateGitEnvironment(ctx); err != nil {
+	if err := ValidateGitEnvironment(ctx, dir); err != nil {
 		return err
 	}
 	r, err := resolveContext(ctx, dir)

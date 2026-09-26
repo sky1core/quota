@@ -153,7 +153,7 @@ func runAgentSkills(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 	repoRoot := ""
 	if *scope == "repo" {
-		if err := overlayruntime.ValidateGitEnvironment(ctx); err != nil {
+		if err := overlayruntime.ValidateGitEnvironment(ctx, ""); err != nil {
 			return finish(err)
 		}
 		output, repoErr := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel").Output()

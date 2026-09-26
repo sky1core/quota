@@ -204,6 +204,50 @@ func TestAgentSkillsRepoRejectsGitOverrides(t *testing.T) {
 	}
 }
 
+func TestAgentSkillsRepoGitConfigBoundary(t *testing.T) {
+	for _, override := range []bool{false, true} {
+		t.Run(fmt.Sprintf("repository_override=%t", override), func(t *testing.T) {
+			home := skillsCLIHome(t)
+			current := skillsTestRepo(t, filepath.Join(home, "current"))
+			other := skillsTestRepo(t, filepath.Join(home, "other"))
+			t.Chdir(current)
+			for _, repo := range []string{current, other} {
+				instructionsWrite(t, filepath.Join(repo, ".agents/skills", "example", "SKILL.md"), "Synthetic skill.\n")
+			}
+			t.Setenv("GIT_CONFIG_COUNT", "1")
+			t.Setenv("GIT_CONFIG_KEY_0", "credential.interactive")
+			t.Setenv("GIT_CONFIG_VALUE_0", "false")
+			if override {
+				t.Setenv("GIT_CONFIG_KEY_0", "core.worktree")
+				t.Setenv("GIT_CONFIG_VALUE_0", other)
+			}
+			code, report, output := runSkills(t, "link", "example", "--scope=repo", "--json")
+			if override {
+				if code != 1 || !strings.Contains(report.Error, "core.worktree") || len(report.Results) != 0 {
+					t.Fatalf("repository override not rejected: %d %s", code, output)
+				}
+			} else if code != 0 {
+				t.Fatalf("authentication setting prevented linking: %d %s", code, output)
+			}
+			for _, repo := range []string{current, other} {
+				if body, err := os.ReadFile(filepath.Join(repo, ".agents/skills", "example", "SKILL.md")); err != nil || string(body) != "Synthetic skill.\n" {
+					t.Fatalf("source changed in %s: %q %v", repo, body, err)
+				}
+				link := filepath.Join(repo, ".claude", "skills", "example")
+				if !override && repo == current {
+					got, err := filepath.EvalSymlinks(link)
+					want, wantErr := filepath.EvalSymlinks(filepath.Join(current, ".agents/skills", "example"))
+					if err != nil || wantErr != nil || got != want {
+						t.Fatalf("wrong link: %q want=%q errors=%v %v", got, want, err, wantErr)
+					}
+				} else if _, err := os.Lstat(link); !os.IsNotExist(err) {
+					t.Fatalf("unexpected link at %s: %v", link, err)
+				}
+			}
+		})
+	}
+}
+
 func TestAgentSkillsRepoPreservesPathWhitespace(t *testing.T) {
 	for _, suffix := range []string{"", " ", "\t", "\n"} {
 		t.Run(fmt.Sprintf("suffix_%q", suffix), func(t *testing.T) {

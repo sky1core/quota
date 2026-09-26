@@ -167,7 +167,7 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 		printAgentInstructionsUsage(stderr)
 		return 2
 	}
-	if err := overlayruntime.ValidateGitEnvironment(ctx); err != nil {
+	if err := overlayruntime.ValidateGitEnvironment(ctx, dir); err != nil {
 		return finish(err, true)
 	}
 	executable, err := os.Executable()

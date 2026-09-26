@@ -11,7 +11,9 @@ package quotacache
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -62,22 +64,30 @@ func Get(key string, maxAge time.Duration) (string, bool) {
 // optimization, never a source of truth, so a lost write just means the next
 // reader probes live.
 func Put(key, raw string, validUntil time.Time) {
-	putWithLock(key, raw, validUntil, lock)
+	putWithLock(key, raw, time.Now(), validUntil, lock)
 }
 
-// PutWithContext is Put with lock acquisition bounded by ctx and a cache budget.
-func PutWithContext(ctx context.Context, key, raw string, validUntil time.Time) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+// PutWithContext stores a timestamped observation with bounded lock acquisition.
+func PutWithContext(ctx context.Context, key, raw string, fetchedAt, validUntil time.Time) {
 	lockCtx, cancel := context.WithTimeout(ctx, contextLockMaxWait)
 	defer cancel()
-	putWithLock(key, raw, validUntil, func(lockPath string) (func(), error) {
+	putWithLock(key, raw, fetchedAt, validUntil, func(lockPath string) (func(), error) {
 		return lockContext(lockCtx, lockPath)
 	})
 }
 
-func putWithLock(key, raw string, validUntil time.Time, takeLock func(string) (func(), error)) {
+func AcquireProbe(ctx context.Context, key string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(filepath.Dir(path()), "quota-probes")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	return lockContext(ctx, filepath.Join(dir, fmt.Sprintf("%x.lock", sha256.Sum256([]byte(key)))))
+}
+
+func putWithLock(key, raw string, fetchedAt, validUntil time.Time, takeLock func(string) (func(), error)) {
 	p := path()
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return
@@ -88,7 +98,10 @@ func putWithLock(key, raw string, validUntil time.Time, takeLock func(string) (f
 	}
 	defer unlock()
 	m := load()
-	m[key] = entry{FetchedAt: time.Now(), ValidUntil: validUntil, Raw: raw}
+	if previous, ok := m[key]; ok && !previous.FetchedAt.After(time.Now()) && !fetchedAt.After(previous.FetchedAt) {
+		return
+	}
+	m[key] = entry{FetchedAt: fetchedAt, ValidUntil: validUntil, Raw: raw}
 	save(m)
 }
 

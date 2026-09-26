@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -30,8 +31,7 @@ func ensureDir(path string) error {
 func TestQueryEntryPointCallerEnvironmentDoesNotChangeProbeTargets(t *testing.T) {
 	if os.Getenv("QUOTA_QUERY_ENV_CHILD") == "1" {
 		os.Args = []string{"quota-cli", "-json", "-timeout", "2"}
-		runQuery()
-		os.Exit(0)
+		os.Exit(runQuery(context.Background()))
 		return
 	}
 

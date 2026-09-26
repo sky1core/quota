@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -30,7 +31,7 @@ func TestGetQuotaForHomeUsesSharedCache(t *testing.T) {
 	}
 	quotacache.Put(codexCacheKey(canonicalHome), string(raw), time.Now().Add(time.Hour))
 
-	result, err := GetQuotaForHome(time.Second, codexHome, time.Minute)
+	result, err := GetQuotaForHome(context.Background(), time.Second, codexHome, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +75,7 @@ done
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 
-	result, err := GetQuotaForHome(5*time.Second, t.TempDir(), 0)
+	result, err := GetQuotaForHome(context.Background(), 5*time.Second, t.TempDir(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +112,7 @@ done
 	}
 	t.Setenv("PATH", binDir)
 
-	result, err := GetQuotaForHome(5*time.Second, "", 0)
+	result, err := GetQuotaForHome(context.Background(), 5*time.Second, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

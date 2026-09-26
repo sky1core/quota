@@ -23,8 +23,8 @@ import (
 
 // GetQuota fetches Claude Code quota for the default quota account, always
 // probing live (maxAge 0 disables the shared cache read).
-func GetQuota(timeout time.Duration) (map[string]any, error) {
-	return GetQuotaForConfigDir(timeout, "", 0)
+func GetQuota(ctx context.Context, timeout time.Duration) (map[string]any, error) {
+	return GetQuotaForConfigDir(ctx, timeout, "", 0)
 }
 
 // GetQuotaForConfigDir fetches Claude Code quota for the account identified by
@@ -34,12 +34,19 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 // output is re-parsed and returned instead of spawning a new probe; a live
 // probe's result is written back. A non-positive maxAge skips the cache read but
 // still refreshes it on success.
-func GetQuotaForConfigDir(timeout time.Duration, configDir string, maxAge time.Duration) (map[string]any, error) {
+func GetQuotaForConfigDir(ctx context.Context, timeout time.Duration, configDir string, maxAge time.Duration) (map[string]any, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	configDir, err := resolveConfigDir(configDir)
 	if err != nil {
 		return nil, err
 	}
 	key := claudeCacheKey(configDir)
+	unlock, err := quotacache.AcquireProbe(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("Claude quota query lock: %w", err)
+	}
+	defer unlock()
 	if raw, ok := quotacache.Get(key, maxAge); ok {
 		if res, err := parseUsage(raw); err == nil {
 			return res, nil
@@ -50,9 +57,6 @@ func GetQuotaForConfigDir(timeout time.Duration, configDir string, maxAge time.D
 	if err != nil {
 		return nil, err
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 
 	home, _ := os.UserHomeDir()
 	// Run in ~/.config/quota rather than ~/: the Claude CLI treats its CWD as a
@@ -73,7 +77,7 @@ func GetQuotaForConfigDir(timeout time.Duration, configDir string, maxAge time.D
 
 	if runErr := childprocess.Run(cmd); runErr != nil {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("claude /usage timed out after %s", timeout)
+			return nil, fmt.Errorf("claude /usage: %w", ctx.Err())
 		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
@@ -87,6 +91,7 @@ func GetQuotaForConfigDir(timeout time.Duration, configDir string, maxAge time.D
 		}
 		return nil, fmt.Errorf("claude /usage failed: %w", runErr)
 	}
+	fetchedAt := time.Now()
 
 	text, err := usageText(stdout.Bytes())
 	if err != nil {
@@ -102,7 +107,7 @@ func GetQuotaForConfigDir(timeout time.Duration, configDir string, maxAge time.D
 	}
 	// Cache the raw report (parseable, so a success) for other consumers, bounded
 	// by the soonest window reset so it is never served past that instant.
-	quotacache.PutWithContext(ctx, key, text, earliestReset(result))
+	quotacache.PutWithContext(ctx, key, text, fetchedAt, earliestReset(result))
 	return result, nil
 }
 

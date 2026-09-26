@@ -7,12 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/sky1core/quota/internal/childprocess"
 	"github.com/sky1core/quota/internal/config"
 	"github.com/sky1core/quota/internal/quotacache"
 )
@@ -74,8 +74,8 @@ type rpcResp struct {
 
 // GetQuota fetches Codex quota for the default quota account, always probing
 // live (maxAge 0 disables the shared cache read).
-func GetQuota(timeout time.Duration) (map[string]any, error) {
-	return GetQuotaForHome(timeout, "", 0)
+func GetQuota(ctx context.Context, timeout time.Duration) (map[string]any, error) {
+	return GetQuotaForHome(ctx, timeout, "", 0)
 }
 
 // GetQuotaForHome fetches Codex quota for the account identified by codexHome
@@ -84,22 +84,26 @@ func GetQuota(timeout time.Duration) (map[string]any, error) {
 // last probe no older than maxAge, that raw response is re-decoded and returned
 // instead of starting app-server; a live probe's response is written back. A
 // non-positive maxAge skips the cache read but still refreshes it on success.
-func GetQuotaForHome(timeout time.Duration, codexHome string, maxAge time.Duration) (map[string]any, error) {
+func GetQuotaForHome(ctx context.Context, timeout time.Duration, codexHome string, maxAge time.Duration) (map[string]any, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	codexHome, err := resolveHome(codexHome)
 	if err != nil {
 		return nil, err
 	}
 	key := codexCacheKey(codexHome)
+	unlock, err := quotacache.AcquireProbe(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("Codex quota query lock: %w", err)
+	}
+	defer unlock()
 	if raw, ok := quotacache.Get(key, maxAge); ok {
 		if out, err := parseCachedQuota(raw); err == nil {
 			return out, nil
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "codex", "app-server")
+	cmd := childprocess.CommandContext(ctx, "codex", "app-server")
 	if home, err := os.UserHomeDir(); err == nil {
 		// Use ~/.config/quota/ as CWD to avoid TCC-protected folder access.
 		safeDir := filepath.Join(home, ".config", "quota")
@@ -122,7 +126,7 @@ func GetQuotaForHome(timeout time.Duration, codexHome string, maxAge time.Durati
 	}
 	defer func() {
 		_ = stdin.Close()
-		_ = cmd.Process.Kill()
+		_ = cmd.Cancel()
 		_ = cmd.Wait()
 	}()
 
@@ -158,9 +162,12 @@ func GetQuotaForHome(timeout time.Duration, codexHome string, maxAge time.Durati
 		for {
 			select {
 			case <-ctx.Done():
-				return nil, errors.New("timeout waiting for rpc response")
+				return nil, fmt.Errorf("waiting for rpc response: %w", ctx.Err())
 			case sr, ok := <-lines:
 				if !ok {
+					if err := ctx.Err(); err != nil {
+						return nil, fmt.Errorf("waiting for rpc response: %w", err)
+					}
 					return nil, errors.New("process exited before response")
 				}
 				line := strings.TrimSpace(sr.line)
@@ -201,6 +208,7 @@ func GetQuotaForHome(timeout time.Duration, codexHome string, maxAge time.Durati
 	if err != nil {
 		return nil, err
 	}
+	fetchedAt := time.Now()
 
 	var rr rateLimitsResponse
 	if err := json.Unmarshal(resRaw, &rr); err != nil {
@@ -212,7 +220,7 @@ func GetQuotaForHome(timeout time.Duration, codexHome string, maxAge time.Durati
 		return nil, err
 	}
 	// Cache the raw rate-limits response only until its first data-change boundary.
-	quotacache.PutWithContext(ctx, key, string(resRaw), cacheValidUntil(rr))
+	quotacache.PutWithContext(ctx, key, string(resRaw), fetchedAt, cacheValidUntil(rr))
 	return out, nil
 }
 

@@ -189,6 +189,8 @@ home 미지정 시 quota 기본 계정(`~/.codex`)을 조회한다. 호출자 �
 - 일반 OS·네트워크 환경과 범용 진단 설정은 보존한다. TLS 연결 설정인 `CLAUDE_CODE_CLIENT_CERT`·`CLAUDE_CODE_CLIENT_KEY`·`CLAUDE_CODE_CLIENT_KEY_PASSPHRASE`·`CODEX_CA_CERTIFICATE`도 보존한다. `MCP_*`는 에이전트 전용 네임스페이스가 아니므로 CLI가 사용하는 실행 제어 항목만 제거하며, 별도 MCP 서버의 사용자 정의 환경까지 일괄 제거하지 않는다.
 - 사용자 명령과 내부 hook은 같은 대상 해석 계약을 따른다. hook에 계정 경로가 필요하면 설치 시 확정한 인자나 hook payload로 전달하며, hook 실행 시점의 호출자 환경에서 다시 추론하지 않는다.
 
+**조회 수명주기**: 일반 조회, 계정 선택, 위임 준비, 모델 목록 조회는 CLI 요청의 취소를 공유한다. SIGINT·SIGTERM을 받으면 진행 중인 조회·잠금 대기를 취소하고 생성한 자식 프로세스의 정리를 기다린 뒤 non-zero로 종료한다. 취소된 요청은 새 프롬프트 실행으로 넘어가지 않는다. 원본 CLI로 실행을 넘긴 뒤에는 그 CLI가 신호와 종료 상태를 담당한다.
+
 **플래그** (조회 모드):
 | 플래그 | 기본값 | 설명 |
 |--------|--------|------|
@@ -267,7 +269,7 @@ home 미지정 시 quota 기본 계정(`~/.codex`)을 조회한다. 호출자 �
 **모델·effort 메타데이터 캐시**:
 - `quota-cli models [refresh] [--agent=all|claude|codex] [--account=<key>] [--json]`은 등록 계정의 모델·effort 메타데이터를 조회한다. 기본 provider 범위는 `all`이며 `refresh`는 유효기간과 무관하게 다시 조회한다.
 - 캐시는 `~/.config/quota/model-cache/`에서 provider·CLI 절대 경로·계정 설정 디렉터리별로 분리한다. 조회 성공 시각, 조회한 CLI 버전, 모델 ID와 CLI가 제공한 alias 해석값·effort 정보를 저장한다. capability 누락은 미확인으로 보존하고 지원 불가로 추론하지 않는다.
-- provider를 명시한 `exec-prompt` 실행 전과 `select-agent` 선택 결과 반환 전에 선택된 계정의 캐시를 확인한다. 자동 라우팅은 분류 전에 등록된 Codex 계정들의 캐시만 확인한다. 캐시 부재, 성공 시각으로부터 3시간 이상 경과, CLI 버전 변경이면 새로 조회한다. 일반 quota 조회와 quota-bar는 이 조회를 수행하지 않는다.
+- 모델 목록은 `models` 명령과 모델명 기반 자동 라우팅에서 조회한다. 자동 라우팅은 분류 전에 등록된 Codex 계정들의 캐시만 확인한다. 캐시 부재, 성공 시각으로부터 3시간 이상 경과, CLI 버전 변경이면 새로 조회한다. provider를 명시한 `exec-prompt`, `select-agent`, 일반 quota 조회와 quota-bar는 모델 목록을 조회하지 않으며 그 캐시의 상태에 의존하지 않는다. 실행 파일 탐색 실패와 quota 선택 실패는 그대로 오류로 처리한다.
 - 성공 시각은 quota가 CLI 목록 응답을 받은 시각이다. CLI 내부 캐시 사용 여부나 서버에서 직접 갱신한 시각을 보장하지 않는다. 수동 갱신도 quota 캐시를 건너뛰고 CLI에 재조회하는 동작이다.
 - 같은 캐시의 조회·교체를 프로세스 간 직렬화하고 원자적으로 저장한다. 조회 실패, 빈 목록, 조회 중 CLI 버전 변경은 기존 내용·성공 시각을 갱신하지 않고 호출을 실패시킨다. 손상된 캐시는 오류로 보고하며 `models refresh`로 복구한다. 실패 시 이전 캐시나 다른 provider로 자동 대체하지 않는다.
 - 목록은 CLI가 보고한 메타데이터이며 실제 프롬프트 실행이나 요청 effort 적용을 증명하지 않는다. 목록 밖 모델은 미확인이고, `exec-prompt`의 원본 CLI 인자 전달 계약은 유지한다.
@@ -582,16 +584,16 @@ quota-cli·quota-bar·위임 실행이 공유하는, 계정별 **마지막 성�
 - **파싱 전 raw만 저장한다.** 파싱된 결과는 `time.Time`/`int`/`[]map[string]any` 등 Go 타입을 담고 있어 JSON 왕복으로 깨진다(→ string/float64/[]any). 읽을 때 재파싱해 타입 손상을 피한다. 상대 리셋만 있는 provider 출력은 절대 변경 시각을 알 수 없으므로 신선도 기준으로만 제한된다.
 - **성공만 저장한다.** 조회 실패는 캐시하지 않아 일시적 실패가 굳지 않고 매번 재시도된다.
 - **데이터 변경 경계에서 무효화한다.** 저장 시 가장 이른 창 리셋 또는 사용 가능한 초기화권 만료 시각을 함께 기록하고, 그 시각이 지나면 신선도 기준 이내라도 히트를 거부한다. 상대 리셋만 있는 창은 절대 시각이 없어 신선도 기준만 적용된다.
-- **읽기**: 소비자가 자기 신선도 기준(cli/위임 75초, bar 2분) 이내이고 데이터 변경 경계 전이면 재사용하고, miss이면 그 계정을 실측해 기록한다. 동시 miss는 각각 실측할 수 있으며 이후 조회부터 캐시를 공유한다.
-- **쓰기**: sidecar 파일 flock으로 직렬화한 read-modify-write + temp→rename 원자적 교체(파일 권한 0o600 — raw에 계정 사용 패턴이 담긴다). 일부 계정만 조회한 소비자가 다른 계정 항목을 덮어쓰지 않는다.
+- **읽기와 조회**: 같은 계정의 캐시 확인·실측·결과 게시를 프로세스 간 직렬화한다. 대기한 호출은 잠금을 얻은 뒤 자기 신선도 기준(cli/위임 75초, bar 2분)과 데이터 변경 경계로 캐시를 다시 확인하고 앞선 조회 결과를 재사용한다. 다른 계정의 실측은 병렬로 진행한다. `maxAge <= 0`인 명시적 실측은 캐시를 읽지 않되 같은 계정 조회와 직렬화한다. 잠금 대기는 호출의 취소·시간 제한을 따르며, 조회 잠금을 얻지 못하면 실측하지 않고 오류로 끝낸다.
+- **쓰기**: 신선도 시각은 CLI 응답을 확보한 시각이며 저장 대기 시간으로 갱신하지 않는다. 더 오래된 시각의 결과는 이미 저장된 최신 결과를 덮지 않는다. sidecar 파일 flock으로 직렬화한 read-modify-write + temp→rename 원자적 교체(파일 권한 0o600 — raw에 계정 사용 패턴이 담긴다)를 사용하며 다른 계정 항목을 보존한다. 캐시 저장 실패는 성공한 실측 결과를 실패로 바꾸지 않는다.
 
 ## Internal 패키지 사양
 
 ### internal/claude
 
 **함수**:
-- `GetQuota(timeout time.Duration) (map[string]any, error)` — 기본 계정 조회 (config-dir 미지정, 항상 실측 = maxAge 0)
-- `GetQuotaForConfigDir(timeout time.Duration, configDir string, maxAge time.Duration) (map[string]any, error)` — 지정한 Claude config-dir 계정 조회. `configDir`가 빈 문자열이면 quota 기본 계정(`~/.claude`). 공유 캐시(§공유 캐시)에 이 계정의 마지막 조회가 `maxAge` 이내로 있으면 그 raw를 재파싱해 반환하고, 실측 시 결과를 캐시에 기록한다. `maxAge`가 0 이하면 캐시 읽기를 건너뛰되 성공 시 갱신은 한다.
+- `GetQuota(ctx context.Context, timeout time.Duration) (map[string]any, error)` — 기본 계정 조회 (config-dir 미지정, 항상 실측 = maxAge 0)
+- `GetQuotaForConfigDir(ctx context.Context, timeout time.Duration, configDir string, maxAge time.Duration) (map[string]any, error)` — 지정한 Claude config-dir 계정 조회. `configDir`가 빈 문자열이면 quota 기본 계정(`~/.claude`). 공유 캐시(§공유 캐시)에 이 계정의 마지막 조회가 `maxAge` 이내로 있으면 그 raw를 재파싱해 반환하고, 실측 시 결과를 캐시에 기록한다. `maxAge`가 0 이하면 캐시 읽기를 건너뛰되 성공 시 갱신은 한다.
 - `WindowKeys() []string` — 슬롯을 미리 만들어야 하는 소비자(quota-bar)가 열거하는 **소비자 힌트**(표시 순서). 데이터의 상한이 아니다 — 모델별 행이 더 많으면 `parseUsage`는 `extra_4` 이상도 반환하고, 슬롯이 없는 소비자만 그것을 무시한다.
 
 - Claude CLI를 **headless(`-p`)로 1회 실행**해 quota 조회. 두 함수는 동일한 조회 로직을 공유하며 config-dir 주입 여부만 다르다.
@@ -624,8 +626,8 @@ quota-cli·quota-bar·위임 실행이 공유하는, 계정별 **마지막 성�
 ### internal/codex
 
 **함수**:
-- `GetQuota(timeout time.Duration) (map[string]any, error)` — quota 기본 계정(`~/.codex`) 조회 (항상 실측 = maxAge 0)
-- `GetQuotaForHome(timeout time.Duration, codexHome string, maxAge time.Duration) (map[string]any, error)` — 지정한 Codex home 계정 조회. `codexHome`가 빈 문자열이면 quota 기본 계정(`~/.codex`). 공유 캐시 동작은 `GetQuotaForConfigDir`와 동일하다.
+- `GetQuota(ctx context.Context, timeout time.Duration) (map[string]any, error)` — quota 기본 계정(`~/.codex`) 조회 (항상 실측 = maxAge 0)
+- `GetQuotaForHome(ctx context.Context, timeout time.Duration, codexHome string, maxAge time.Duration) (map[string]any, error)` — 지정한 Codex home 계정 조회. `codexHome`가 빈 문자열이면 quota 기본 계정(`~/.codex`). 공유 캐시 동작은 `GetQuotaForConfigDir`와 동일하다.
 
 **동작**:
 1. `codex app-server` 프로세스를 시작 (stdin/stdout pipe). 프로세스 환경은 `EnvForHome`에서 **호출 환경 독립성** 계약에 따라 구성하고, quota가 확정한 `CODEX_HOME=<codexHome>`을 하나만 주입한다.

@@ -90,7 +90,7 @@ func parseAutoPromptArgs(args []string) (autoPromptOptions, error) {
 	return opts, fmt.Errorf("automatic exec-prompt requires -- followed by exactly one prompt")
 }
 
-func loadAutoPromptCatalogs(cfg config.Config) ([]accountModels, error) {
+func loadAutoPromptCatalogs(ctx context.Context, cfg config.Config) ([]accountModels, error) {
 	results, dirs, err := modelAccounts(cfg, modelOptions{agent: "codex"})
 	if err != nil {
 		return nil, err
@@ -100,9 +100,9 @@ func loadAutoPromptCatalogs(cfg config.Config) ([]accountModels, error) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), delegateProbeTimeout)
+			probeCtx, cancel := context.WithTimeout(ctx, delegateProbeTimeout)
 			defer cancel()
-			snapshot, err := loadAccountModels(ctx, "codex", dirs[i], false)
+			snapshot, err := loadAccountModels(probeCtx, "codex", dirs[i], false)
 			if err != nil {
 				results[i].Error = err.Error()
 				return
@@ -111,6 +111,9 @@ func loadAutoPromptCatalogs(cfg config.Config) ([]accountModels, error) {
 		}(i)
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 
@@ -206,7 +209,7 @@ func autoPromptAccounts(cfg config.Config, opts autoPromptOptions, catalogs []ac
 	return candidates, nil
 }
 
-func selectAutoPromptAccount(cfg config.Config, opts autoPromptOptions, catalogs []accountModels, now time.Time) (autoPromptAccount, error) {
+func selectAutoPromptAccount(ctx context.Context, cfg config.Config, opts autoPromptOptions, catalogs []accountModels, now time.Time) (autoPromptAccount, error) {
 	accounts, err := autoPromptAccounts(cfg, opts, catalogs)
 	if err != nil {
 		return autoPromptAccount{}, err
@@ -218,13 +221,16 @@ func selectAutoPromptAccount(cfg config.Config, opts autoPromptOptions, catalogs
 		go func(i int, account autoPromptAccount) {
 			defer wg.Done()
 			if account.provider == "claude" {
-				results[i].quota, results[i].err = claude.GetQuotaForConfigDir(delegateProbeTimeout, account.dir, cliCacheMaxAge)
+				results[i].quota, results[i].err = claude.GetQuotaForConfigDir(ctx, delegateProbeTimeout, account.dir, cliCacheMaxAge)
 			} else {
-				results[i].quota, results[i].err = codex.GetQuotaForHome(delegateProbeTimeout, account.dir, cliCacheMaxAge)
+				results[i].quota, results[i].err = codex.GetQuotaForHome(ctx, delegateProbeTimeout, account.dir, cliCacheMaxAge)
 			}
 		}(i, account)
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return autoPromptAccount{}, err
+	}
 	scores := make([]accountScore, len(accounts))
 	usable := make([]bool, len(accounts))
 	minLeftPcts := make([]float64, len(accounts))
@@ -332,18 +338,18 @@ func autoPromptArgs(account autoPromptAccount, opts autoPromptOptions) []string 
 	return append(args, "--", opts.prompt)
 }
 
-func runAutoPrompt(opts autoPromptOptions) int {
+func runAutoPrompt(ctx context.Context, opts autoPromptOptions) int {
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config load error:", err)
 		return 1
 	}
-	catalogs, err := loadAutoPromptCatalogs(cfg)
+	catalogs, err := loadAutoPromptCatalogs(ctx, cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	account, err := selectAutoPromptAccount(cfg, opts, catalogs, time.Now())
+	account, err := selectAutoPromptAccount(ctx, cfg, opts, catalogs, time.Now())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		if errors.Is(err, errAutoPromptModels) {
@@ -361,7 +367,11 @@ func runAutoPrompt(opts autoPromptOptions) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if err := execDelegated(bin, nil, autoPromptArgs(account, opts), autoPromptEnv(account, os.Environ())); err != nil {
+	if err := ctx.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if err := execDelegated(ctx, bin, nil, autoPromptArgs(account, opts), autoPromptEnv(account, os.Environ())); err != nil {
 		fmt.Fprintln(os.Stderr, account.provider+" exec error:", err)
 		return 1
 	}

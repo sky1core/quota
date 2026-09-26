@@ -44,13 +44,13 @@ type quotaProbeResult struct {
 	err   error
 }
 
-func runClaudePrompt(args []string) int {
+func runClaudePrompt(ctx context.Context, args []string) int {
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config load error:", err)
 		return 1
 	}
-	account, err := selectClaudeAccount(cfg, args, time.Now())
+	account, err := selectClaudeAccount(ctx, cfg, args, time.Now())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "claude account selection error:", err)
 		return 1
@@ -60,24 +60,24 @@ func runClaudePrompt(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if _, err := refreshDelegationModels("claude", account.ConfigDir); err != nil {
-		fmt.Fprintln(os.Stderr, "claude model catalog error:", err)
+	if err := ctx.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if err := execDelegated(bin, []string{"-p"}, args, claude.EnvForConfigDir(os.Environ(), account.ConfigDir)); err != nil {
+	if err := execDelegated(ctx, bin, []string{"-p"}, args, claude.EnvForConfigDir(os.Environ(), account.ConfigDir)); err != nil {
 		fmt.Fprintln(os.Stderr, "claude exec error:", err)
 		return 1
 	}
 	return 0
 }
 
-func runCodexPrompt(args []string) int {
+func runCodexPrompt(ctx context.Context, args []string) int {
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config load error:", err)
 		return 1
 	}
-	account, err := selectCodexAccount(cfg, time.Now())
+	account, err := selectCodexAccount(ctx, cfg, time.Now())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "codex account selection error:", err)
 		return 1
@@ -87,25 +87,18 @@ func runCodexPrompt(args []string) int {
 		fmt.Fprintln(os.Stderr, "codex CLI not found")
 		return 1
 	}
-	if _, err := refreshDelegationModels("codex", account.Home); err != nil {
-		fmt.Fprintln(os.Stderr, "codex model catalog error:", err)
+	if err := ctx.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if err := execDelegated(bin, []string{"exec"}, args, codex.EnvForHome(os.Environ(), account.Home)); err != nil {
+	if err := execDelegated(ctx, bin, []string{"exec"}, args, codex.EnvForHome(os.Environ(), account.Home)); err != nil {
 		fmt.Fprintln(os.Stderr, "codex exec error:", err)
 		return 1
 	}
 	return 0
 }
 
-func refreshDelegationModels(provider, accountDir string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), delegateProbeTimeout)
-	defer cancel()
-	snapshot, err := loadAccountModels(ctx, provider, accountDir, false)
-	return snapshot.Binary, err
-}
-
-func selectClaudeAccount(cfg config.Config, args []string, now time.Time) (config.ResolvedAccount, error) {
+func selectClaudeAccount(ctx context.Context, cfg config.Config, args []string, now time.Time) (config.ResolvedAccount, error) {
 	accounts, skipped := cfg.ResolveAccounts()
 	if len(skipped) > 0 {
 		return config.ResolvedAccount{}, fmt.Errorf("invalid Claude account config: %s", strings.Join(skipped, "; "))
@@ -120,10 +113,13 @@ func selectClaudeAccount(cfg config.Config, args []string, now time.Time) (confi
 		wg.Add(1)
 		go func(i int, account config.ResolvedAccount) {
 			defer wg.Done()
-			results[i].quota, results[i].err = claude.GetQuotaForConfigDir(delegateProbeTimeout, account.ConfigDir, cliCacheMaxAge)
+			results[i].quota, results[i].err = claude.GetQuotaForConfigDir(ctx, delegateProbeTimeout, account.ConfigDir, cliCacheMaxAge)
 		}(i, account)
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return config.ResolvedAccount{}, err
+	}
 
 	requestedModel := claudeRequestedModel(args)
 	compareModel := shouldCompareClaudeModelWindow(results, requestedModel, minLeftPcts, now)
@@ -153,7 +149,7 @@ func selectClaudeAccount(cfg config.Config, args []string, now time.Time) (confi
 	return config.ResolvedAccount{}, fmt.Errorf("no account has usable quota%s", quotaFailureSuffix(failures))
 }
 
-func selectCodexAccount(cfg config.Config, now time.Time) (config.ResolvedCodexAccount, error) {
+func selectCodexAccount(ctx context.Context, cfg config.Config, now time.Time) (config.ResolvedCodexAccount, error) {
 	accounts, skipped := cfg.ResolveCodexAccounts()
 	if len(skipped) > 0 {
 		return config.ResolvedCodexAccount{}, fmt.Errorf("invalid Codex account config: %s", strings.Join(skipped, "; "))
@@ -168,10 +164,13 @@ func selectCodexAccount(cfg config.Config, now time.Time) (config.ResolvedCodexA
 		wg.Add(1)
 		go func(i int, account config.ResolvedCodexAccount) {
 			defer wg.Done()
-			results[i].quota, results[i].err = codex.GetQuotaForHome(delegateProbeTimeout, account.Home, cliCacheMaxAge)
+			results[i].quota, results[i].err = codex.GetQuotaForHome(ctx, delegateProbeTimeout, account.Home, cliCacheMaxAge)
 		}(i, account)
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return config.ResolvedCodexAccount{}, err
+	}
 
 	compareShortest := shouldCompareCodexShortestWindow(results, minLeftPcts, now)
 	var failures []string
@@ -769,6 +768,9 @@ func delegatedArgv(bin string, prefix, forwarded []string) []string {
 	return argv
 }
 
-func execDelegated(bin string, prefix, forwarded, env []string) error {
+func execDelegated(ctx context.Context, bin string, prefix, forwarded, env []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return syscall.Exec(bin, delegatedArgv(bin, prefix, forwarded), env)
 }

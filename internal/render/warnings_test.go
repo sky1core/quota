@@ -1,6 +1,7 @@
 package render
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,7 +27,7 @@ func TestTextParsedQuotaWarnings(t *testing.T) {
 			t.Setenv("PATH", "")
 			dir := filepath.Join(home, ".claude")
 			quotacache.Put(renderTestCacheKey(t, "claude", dir), tc.raw, time.Now().Add(time.Hour))
-			data, err := claude.GetQuotaForConfigDir(time.Second, dir, time.Minute)
+			data, err := claude.GetQuotaForConfigDir(context.Background(), time.Second, dir, time.Minute)
 			if err != nil {
 				t.Fatal(err)
 			}

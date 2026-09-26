@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -67,11 +70,11 @@ type selectAgentWindow struct {
 	SurplusPctPerHour float64 `json:"surplusPctPerHour,omitempty"`
 }
 
-func runSelectAgent(args []string) int {
-	return runSelectAgentWithIO(args, os.Stdout, os.Stderr)
+func runSelectAgent(ctx context.Context, args []string) int {
+	return runSelectAgentWithIO(ctx, args, os.Stdout, os.Stderr)
 }
 
-func runSelectAgentWithIO(args []string, stdout, stderr io.Writer) int {
+func runSelectAgentWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	opts, err := parseSelectAgentArgs(args, io.Discard)
 	if err == flag.ErrHelp {
 		printSelectAgentUsage(stderr)
@@ -95,16 +98,21 @@ func runSelectAgentWithIO(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "config load error:", err)
 		return 1
 	}
-	result, err := buildSelectAgentResult(cfg, opts, now)
+	result, err := buildSelectAgentResult(ctx, cfg, opts, now)
 	if err == nil && result.Selected != nil {
 		selected := result.Selected
-		dirKey := "CODEX_HOME"
+		var binary string
+		var binaryErr error
 		if selected.Provider == "claude" {
-			dirKey = "CLAUDE_CONFIG_DIR"
+			binary, binaryErr = findClaudePromptBinary()
+		} else {
+			binary, binaryErr = exec.LookPath("codex")
 		}
-		binary, catalogErr := refreshDelegationModels(selected.Provider, selected.SetEnv[dirKey])
-		if catalogErr != nil {
-			err = fmt.Errorf("%s model catalog: %w", selected.Key, catalogErr)
+		if binaryErr == nil {
+			binary, binaryErr = filepath.Abs(binary)
+		}
+		if binaryErr != nil {
+			err = fmt.Errorf("%s binary: %w", selected.Key, binaryErr)
 			for i := range result.Candidates {
 				if result.Candidates[i].Key == selected.Key {
 					result.Candidates[i].Status = selectAgentStatusError
@@ -115,6 +123,10 @@ func runSelectAgentWithIO(args []string, stdout, stderr io.Writer) int {
 		} else {
 			selected.Command[0] = binary
 		}
+	}
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		err = cancelErr
+		result.Selected = nil
 	}
 	if opts.jsonOut {
 		if err != nil {
@@ -178,12 +190,12 @@ func printSelectAgentUsage(output io.Writer) {
 `)
 }
 
-func buildSelectAgentResult(cfg config.Config, opts selectAgentOptions, now time.Time) (selectAgentResult, error) {
+func buildSelectAgentResult(ctx context.Context, cfg config.Config, opts selectAgentOptions, now time.Time) (selectAgentResult, error) {
 	result := selectAgentResult{Candidates: []selectAgentCandidate{}, Generated: now}
 	var scores []accountScore
 	var usable []bool
 	if opts.agent == selectAgentAll || opts.agent == selectAgentClaude {
-		candidates, providerScores, providerUsable, err := collectClaudeSelectAgentCandidates(cfg, opts.model, now)
+		candidates, providerScores, providerUsable, err := collectClaudeSelectAgentCandidates(ctx, cfg, opts.model, now)
 		if err != nil {
 			return result, err
 		}
@@ -192,7 +204,7 @@ func buildSelectAgentResult(cfg config.Config, opts selectAgentOptions, now time
 		usable = append(usable, providerUsable...)
 	}
 	if opts.agent == selectAgentAll || opts.agent == selectAgentCodex {
-		candidates, providerScores, providerUsable, err := collectCodexSelectAgentCandidates(cfg, now)
+		candidates, providerScores, providerUsable, err := collectCodexSelectAgentCandidates(ctx, cfg, now)
 		if err != nil {
 			return result, err
 		}
@@ -223,7 +235,7 @@ func buildSelectAgentResult(cfg config.Config, opts selectAgentOptions, now time
 	return result, err
 }
 
-func collectClaudeSelectAgentCandidates(cfg config.Config, requestedModel string, now time.Time) ([]selectAgentCandidate, []accountScore, []bool, error) {
+func collectClaudeSelectAgentCandidates(ctx context.Context, cfg config.Config, requestedModel string, now time.Time) ([]selectAgentCandidate, []accountScore, []bool, error) {
 	accounts, skipped := cfg.ResolveAccounts()
 	if len(skipped) > 0 {
 		return nil, nil, nil, fmt.Errorf("invalid Claude account config: %s", strings.Join(skipped, "; "))
@@ -238,10 +250,13 @@ func collectClaudeSelectAgentCandidates(cfg config.Config, requestedModel string
 		wg.Add(1)
 		go func(i int, account config.ResolvedAccount) {
 			defer wg.Done()
-			results[i].quota, results[i].err = claude.GetQuotaForConfigDir(delegateProbeTimeout, account.ConfigDir, cliCacheMaxAge)
+			results[i].quota, results[i].err = claude.GetQuotaForConfigDir(ctx, delegateProbeTimeout, account.ConfigDir, cliCacheMaxAge)
 		}(i, account)
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, err
+	}
 
 	compareModel := shouldCompareClaudeModelWindow(results, requestedModel, minLeftPcts, now)
 	candidates := make([]selectAgentCandidate, len(accounts))
@@ -286,7 +301,7 @@ func collectClaudeSelectAgentCandidates(cfg config.Config, requestedModel string
 	return candidates, scores, usable, nil
 }
 
-func collectCodexSelectAgentCandidates(cfg config.Config, now time.Time) ([]selectAgentCandidate, []accountScore, []bool, error) {
+func collectCodexSelectAgentCandidates(ctx context.Context, cfg config.Config, now time.Time) ([]selectAgentCandidate, []accountScore, []bool, error) {
 	accounts, skipped := cfg.ResolveCodexAccounts()
 	if len(skipped) > 0 {
 		return nil, nil, nil, fmt.Errorf("invalid Codex account config: %s", strings.Join(skipped, "; "))
@@ -301,10 +316,13 @@ func collectCodexSelectAgentCandidates(cfg config.Config, now time.Time) ([]sele
 		wg.Add(1)
 		go func(i int, account config.ResolvedCodexAccount) {
 			defer wg.Done()
-			results[i].quota, results[i].err = codex.GetQuotaForHome(delegateProbeTimeout, account.Home, cliCacheMaxAge)
+			results[i].quota, results[i].err = codex.GetQuotaForHome(ctx, delegateProbeTimeout, account.Home, cliCacheMaxAge)
 		}(i, account)
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, err
+	}
 
 	compareShortest := shouldCompareCodexShortestWindow(results, minLeftPcts, now)
 	candidates := make([]selectAgentCandidate, len(accounts))

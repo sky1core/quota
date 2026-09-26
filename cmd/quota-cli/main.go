@@ -20,34 +20,40 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	if len(os.Args) > 1 && os.Args[1] == "update" {
 		// No arguments: reject anything extra (including -h) instead of
 		// silently ignoring it and running a network check/install.
 		if len(os.Args) > 2 {
 			fmt.Fprintln(os.Stderr, "usage: quota-cli update   (인자 없음 — 설정된 업데이트 기준으로 재설치)")
-			os.Exit(2)
+			return 2
 		}
-		os.Exit(runUpdate())
+		return runUpdate()
 	}
 	if len(os.Args) > 1 && os.Args[1] == "account" {
-		os.Exit(runAccount(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "models" {
-		os.Exit(runModels(os.Args[2:], os.Stdout, os.Stderr))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "exec-prompt" {
-		os.Exit(runExecPrompt(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "select-agent" {
-		os.Exit(runSelectAgent(os.Args[2:]))
+		return runAccount(os.Args[2:])
 	}
 	if len(os.Args) > 1 && os.Args[1] == "session-log" {
-		os.Exit(runSessionLog(os.Args[2:]))
+		return runSessionLog(os.Args[2:])
 	}
 	if len(os.Args) > 1 && os.Args[1] == "agent" {
-		os.Exit(runAgent(os.Args[2:]))
+		return runAgent(os.Args[2:])
 	}
-	runQuery()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	if len(os.Args) > 1 && os.Args[1] == "models" {
+		return runModels(ctx, os.Args[2:], os.Stdout, os.Stderr)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "exec-prompt" {
+		return runExecPrompt(ctx, os.Args[2:])
+	}
+	if len(os.Args) > 1 && os.Args[1] == "select-agent" {
+		return runSelectAgent(ctx, os.Args[2:])
+	}
+	return runQuery(ctx)
 }
 
 func printExecPromptUsage() {
@@ -58,11 +64,11 @@ func printExecPromptUsage() {
 `)
 }
 
-func runExecPrompt(args []string) int {
-	return runExecPromptWith(args, runClaudePrompt, runCodexPrompt)
+func runExecPrompt(ctx context.Context, args []string) int {
+	return runExecPromptWith(ctx, args, runClaudePrompt, runCodexPrompt)
 }
 
-func runExecPromptWith(args []string, claudeRunner, codexRunner func([]string) int) int {
+func runExecPromptWith(ctx context.Context, args []string, claudeRunner, codexRunner func(context.Context, []string) int) int {
 	if len(args) == 0 {
 		printExecPromptUsage()
 		return 2
@@ -70,9 +76,9 @@ func runExecPromptWith(args []string, claudeRunner, codexRunner func([]string) i
 
 	switch args[0] {
 	case "--agent=claude":
-		return claudeRunner(args[1:])
+		return claudeRunner(ctx, args[1:])
 	case "--agent=codex":
-		return codexRunner(args[1:])
+		return codexRunner(ctx, args[1:])
 	default:
 		opts, err := parseAutoPromptArgs(args)
 		if err != nil {
@@ -80,7 +86,7 @@ func runExecPromptWith(args []string, claudeRunner, codexRunner func([]string) i
 			printExecPromptUsage()
 			return 2
 		}
-		return runAutoPrompt(opts)
+		return runAutoPrompt(ctx, opts)
 	}
 }
 
@@ -118,16 +124,16 @@ func printQueryUsage() {
 	fs.Usage()
 }
 
-func runQuery() {
+func runQuery(ctx context.Context) int {
 	opts, err := parseQueryArgs(os.Args[1:])
 	if err == flag.ErrHelp {
 		printQueryUsage()
-		return
+		return 0
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		printQueryUsage()
-		os.Exit(2)
+		return 2
 	}
 
 	out := map[string]any{}
@@ -160,7 +166,7 @@ func runQuery() {
 		wg.Add(1)
 		go func(a config.ResolvedAccount) {
 			defer wg.Done()
-			q, err := claude.GetQuotaForConfigDir(opts.timeout, a.ConfigDir, cliCacheMaxAge)
+			q, err := claude.GetQuotaForConfigDir(ctx, opts.timeout, a.ConfigDir, cliCacheMaxAge)
 			if err != nil {
 				addErr(a.Key, err.Error())
 				return
@@ -176,7 +182,7 @@ func runQuery() {
 		wg.Add(1)
 		go func(a config.ResolvedCodexAccount) {
 			defer wg.Done()
-			kq, err := codex.GetQuotaForHome(opts.timeout, a.Home, cliCacheMaxAge)
+			kq, err := codex.GetQuotaForHome(ctx, opts.timeout, a.Home, cliCacheMaxAge)
 			if err != nil {
 				addErr(a.Key, err.Error())
 				return
@@ -188,6 +194,10 @@ func runQuery() {
 	}
 
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 
 	if errs == nil {
 		errs = []any{}
@@ -199,12 +209,13 @@ func runQuery() {
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(out); err != nil {
 			fmt.Fprintf(os.Stderr, "json encode: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	}
 
 	fmt.Println(render.Text(out))
+	return 0
 }
 
 // --- account subcommand ---------------------------------------------------

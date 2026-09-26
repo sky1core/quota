@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -27,7 +28,7 @@ func TestModelsOptions(t *testing.T) {
 		}
 	}
 	var stdout, stderr bytes.Buffer
-	if code := runModels([]string{"--help"}, &stdout, &stderr); code != 0 {
+	if code := runModels(context.Background(), []string{"--help"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("help exit %d", code)
 	}
 }

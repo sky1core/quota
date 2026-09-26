@@ -56,7 +56,7 @@ func parseModelOptions(args []string, out io.Writer) (modelOptions, error) {
 	return opts, nil
 }
 
-func runModels(args []string, stdout, stderr io.Writer) int {
+func runModels(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	opts, err := parseModelOptions(args, stderr)
 	if err == flag.ErrHelp {
 		return 0
@@ -80,9 +80,9 @@ func runModels(args []string, stdout, stderr io.Writer) int {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), delegateProbeTimeout)
+			probeCtx, cancel := context.WithTimeout(ctx, delegateProbeTimeout)
 			defer cancel()
-			snapshot, err := loadAccountModels(ctx, results[i].Provider, dirs[i], opts.refresh)
+			snapshot, err := loadAccountModels(probeCtx, results[i].Provider, dirs[i], opts.refresh)
 			if err != nil {
 				results[i].Error = err.Error()
 				return
@@ -91,6 +91,10 @@ func runModels(args []string, stdout, stderr io.Writer) int {
 		}(i)
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
 	code := 0
 	for _, result := range results {
 		if result.Error != "" {

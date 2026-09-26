@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,7 +41,7 @@ func TestGetQuotaForConfigDirUsesSharedCache(t *testing.T) {
 	}
 	quotacache.Put(claudeCacheKey(canonicalConfigDir), "Current session: 12% used\n", time.Now().Add(time.Hour))
 
-	result, err := GetQuotaForConfigDir(time.Second, configDir, time.Minute)
+	result, err := GetQuotaForConfigDir(context.Background(), time.Second, configDir, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +78,7 @@ func TestGetQuotaForConfigDirReturnsWhenCacheLockBusy(t *testing.T) {
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 
-	result, err := GetQuotaForConfigDir(5*time.Second, t.TempDir(), 0)
+	result, err := GetQuotaForConfigDir(context.Background(), 5*time.Second, t.TempDir(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -764,7 +765,7 @@ func TestGetQuotaForConfigDirDefaultIgnoresCallerEnvironment(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir)
 
-	result, err := GetQuotaForConfigDir(5*time.Second, "", 0)
+	result, err := GetQuotaForConfigDir(context.Background(), 5*time.Second, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

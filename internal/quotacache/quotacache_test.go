@@ -66,6 +66,10 @@ func TestGetMissesFutureTimestamp(t *testing.T) {
 	if _, ok := Get("k", time.Hour); ok {
 		t.Fatal("future fetchedAt must miss")
 	}
+	PutWithContext(context.Background(), "k", "refreshed", time.Now(), time.Time{})
+	if got, ok := Get("k", time.Minute); !ok || got != "refreshed" {
+		t.Fatalf("invalid future entry prevented refresh: %q, hit=%v", got, ok)
+	}
 }
 
 // TestGetMissesAfterValidUntil pins the reset-boundary rule: past a stored
@@ -108,6 +112,33 @@ func TestPutOverwritesSameKey(t *testing.T) {
 	Put("k", "new", time.Time{})
 	if got, _ := Get("k", time.Minute); got != "new" {
 		t.Fatalf("want new, got %q", got)
+	}
+}
+
+func TestDelayedObservationCannotReplaceNewerResponse(t *testing.T) {
+	isolate(t)
+	older := time.Now().Add(-time.Minute)
+	newer := older.Add(time.Second)
+	PutWithContext(context.Background(), "account", "10", newer, time.Time{})
+	PutWithContext(context.Background(), "other", "55", newer, time.Time{})
+	PutWithContext(context.Background(), "account", "80", older, time.Time{})
+	if got, ok := Get("account", 75*time.Second); !ok || got != "10" {
+		t.Fatalf("delayed response replaced newer quota: %q, hit=%v", got, ok)
+	}
+	if got := load()["account"].FetchedAt; !got.Equal(newer) {
+		t.Fatalf("observation was redated: got %v, want %v", got, newer)
+	}
+	if got, ok := Get("other", time.Minute); !ok || got != "55" {
+		t.Fatalf("other account changed: %q, hit=%v", got, ok)
+	}
+}
+
+func TestPublicationDoesNotRenewObservationAge(t *testing.T) {
+	isolate(t)
+	observed := time.Now().Add(-2 * time.Minute)
+	PutWithContext(context.Background(), "account", "80", observed, time.Time{})
+	if _, ok := Get("account", 75*time.Second); ok {
+		t.Fatal("an old observation became fresh when published")
 	}
 }
 
@@ -154,7 +185,7 @@ func TestPutWithContextStopsWaitingForBusyLock(t *testing.T) {
 	}
 	for _, tt := range tests {
 		start := time.Now()
-		PutWithContext(tt.ctx, tt.name, "value", time.Time{})
+		PutWithContext(tt.ctx, tt.name, "value", time.Now(), time.Time{})
 		if elapsed := time.Since(start); elapsed > tt.max {
 			t.Fatalf("%s write waited too long: %s", tt.name, elapsed)
 		}

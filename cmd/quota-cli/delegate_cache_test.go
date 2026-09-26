@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -121,10 +122,10 @@ func TestExecPromptPreservesSharedCache(t *testing.T) {
 						t.Fatal("delegation changed shared quota cache")
 					}
 					t.Setenv("PATH", "")
-					if _, err := claude.GetQuotaForConfigDir(time.Second, "", 90*time.Second); err != nil {
+					if _, err := claude.GetQuotaForConfigDir(context.Background(), time.Second, "", 90*time.Second); err != nil {
 						t.Fatalf("bar-equivalent Claude cache read: %v", err)
 					}
-					if _, err := codex.GetQuotaForHome(time.Second, "", 90*time.Second); err != nil {
+					if _, err := codex.GetQuotaForHome(context.Background(), time.Second, "", 90*time.Second); err != nil {
 						t.Fatalf("bar-equivalent Codex cache read: %v", err)
 					}
 				})
@@ -142,5 +143,5 @@ func TestExecPromptCacheHelper(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
 		t.Fatal(err)
 	}
-	os.Exit(runExecPrompt(args))
+	os.Exit(runExecPrompt(context.Background(), args))
 }

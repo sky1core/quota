@@ -176,8 +176,9 @@ quota-cli models refresh --account=codex
 `~/.config/quota/model-cache/`에 조회 성공 시각과 CLI 버전을 함께 저장한다.
 기본 계정의 모델 조회도 quota 기본 계정 디렉터리로 cache identity를 고정한다. 다만 기본 Claude 실행은 상속된 `CLAUDE_CONFIG_DIR`를 제거하고 Claude의 builtin default 계정을 사용하며, Codex와 추가 Claude 계정은 확정된 계정 경로를 자식 환경에 명시한다. 호출 환경의 `CLAUDE_CONFIG_DIR`·`CODEX_HOME`은 조회 대상이나 캐시 identity를 바꾸지 않는다.
 모델 캐시는 확정된 계정 경로와 자식 프로세스에 전달한 계정 환경을 함께 구분한다.
-provider를 명시한 `exec-prompt`와 `select-agent`는 선택된 계정의 캐시가 없거나 3시간이 지났거나 CLI 버전이 바뀌면
-갱신한다. `models refresh`는 즉시 다시 조회한다. 갱신 실패 시 오래된 목록으로 진행하지 않고 오류를 반환한다.
+`models`와 모델명 기반 자동 라우팅은 캐시가 없거나 3시간이 지났거나 CLI 버전이 바뀌면 갱신한다.
+`models refresh`는 즉시 다시 조회한다. 갱신 실패 시 오래된 목록으로 진행하지 않고 오류를 반환한다.
+provider를 명시한 `exec-prompt`와 `select-agent`는 모델 목록을 조회하지 않으며, 그 캐시 오류에도 영향을 받지 않는다.
 자동 라우팅은 분류 전에 Codex 계정들의 캐시만 확인한다. 조회 시각은 CLI 응답을 받은 시각이며,
 CLI 자체 캐시가 사용될 수 있으므로 서버 갱신 시각을 뜻하지 않는다. 수동 갱신도 CLI 재조회다.
 목록에 없는 모델이나 누락된 effort 정보는 미확인이다. 이 목록은 모든 실행 가능한 모델을 보장하지 않으며,

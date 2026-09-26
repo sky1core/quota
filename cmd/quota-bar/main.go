@@ -461,13 +461,13 @@ func fetchQuota(accounts []config.ResolvedAccount, codexAccounts []config.Resolv
 
 	for _, a := range accounts {
 		go func(a config.ResolvedAccount) {
-			cq, err := claude.GetQuotaForConfigDir(timeout, a.ConfigDir, cacheMaxAge)
+			cq, err := claude.GetQuotaForConfigDir(context.Background(), timeout, a.ConfigDir, cacheMaxAge)
 			ch <- result{provider: a.Key, claude: true, data: cq, err: err}
 		}(a)
 	}
 	for _, a := range codexAccounts {
 		go func(a config.ResolvedCodexAccount) {
-			kq, err := codex.GetQuotaForHome(timeout, a.Home, cacheMaxAge)
+			kq, err := codex.GetQuotaForHome(context.Background(), timeout, a.Home, cacheMaxAge)
 			ch <- result{provider: a.Key, claude: false, data: kq, err: err}
 		}(a)
 	}

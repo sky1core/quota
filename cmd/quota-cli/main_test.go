@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"reflect"
 	"strings"
@@ -78,18 +79,18 @@ func TestRunExecPromptWith(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			called := ""
 			var gotArgs []string
-			claudeRunner := func(args []string) int {
+			claudeRunner := func(_ context.Context, args []string) int {
 				called = "claude"
 				gotArgs = args
 				return 11
 			}
-			codexRunner := func(args []string) int {
+			codexRunner := func(_ context.Context, args []string) int {
 				called = "codex"
 				gotArgs = args
 				return 12
 			}
 
-			if gotCode := runExecPromptWith(tt.args, claudeRunner, codexRunner); gotCode != tt.wantCode {
+			if gotCode := runExecPromptWith(context.Background(), tt.args, claudeRunner, codexRunner); gotCode != tt.wantCode {
 				t.Fatalf("exit code = %d, want %d", gotCode, tt.wantCode)
 			}
 			if called != tt.agent {

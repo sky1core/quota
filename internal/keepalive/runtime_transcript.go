@@ -232,7 +232,8 @@ func (s *claudeTranscript) consume(line []byte) error {
 		s.assistant = hasText && !containsTools && message.Model != "" && message.Model != "<synthetic>" && message.Usage != nil && message.Usage.OutputTokens > 0 && (message.StopReason == nil || *message.StopReason == "end_turn")
 	case "attachment":
 		switch record.Attachment.Type {
-		case "environment", "model", "instructions", "session_context", "date", "remote_session_change", "prompt_snapshot":
+		case "environment", "model", "instructions", "session_context", "date", "remote_session_change", "prompt_snapshot",
+			"deferred_tools_delta", "agent_listing_delta", "skill_listing", "auto_mode", "total_tokens_reminder":
 		default:
 			return errors.New("claude attachment type is unsupported")
 		}

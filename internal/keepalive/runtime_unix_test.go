@@ -241,6 +241,9 @@ func TestClaudeSocketFrameAndPeerIdentity(t *testing.T) {
 	listener, socket := runtimeTestSocket(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	if !runtimeSocketOwned(ctx, os.Getpid(), socket) || runtimeSocketOwned(ctx, os.Getppid(), socket) {
+		t.Fatal("socket ownership did not match the listening process")
+	}
 	conn, err := connectRuntimeSocket(ctx, socket, os.Getpid())
 	if err != nil {
 		t.Fatal(err)

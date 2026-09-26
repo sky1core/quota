@@ -6,6 +6,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func readRuntimeProcessStart(_ int, psStart string) (string, error) {
+	return psStart, nil
+}
+
 func runtimePeer(fd, pid, uid int) error {
 	peerPID, err := unix.GetsockoptInt(fd, unix.SOL_LOCAL, unix.LOCAL_PEERPID)
 	if err != nil || peerPID != pid {

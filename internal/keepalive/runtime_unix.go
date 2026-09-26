@@ -35,6 +35,10 @@ func readRuntimeProcess(ctx context.Context, pid int) (runtimeProcess, error) {
 	if err != nil {
 		return runtimeProcess{}, err
 	}
+	p.Start, err = readRuntimeProcessStart(pid, p.Start)
+	if err != nil {
+		return runtimeProcess{}, err
+	}
 	data, err = runtimeCommand(ctx, "lsof", []string{"-n", "-P", "-a", "-p", strconv.Itoa(pid), "-d", "txt", "-Fpn"})
 	if err != nil {
 		return runtimeProcess{}, errors.New("runtime executable unavailable")
@@ -179,7 +183,7 @@ func runtimeSocketOwned(ctx context.Context, pid int, socket string) bool {
 		if strings.HasPrefix(line, "p") {
 			owner = line == "p"+strconv.Itoa(pid)
 		}
-		if owner && line == "n"+socket {
+		if owner && (line == "n"+socket || line == "n"+socket+" type=STREAM") {
 			return true
 		}
 	}

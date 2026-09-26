@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -14,6 +16,7 @@ const codexTranscriptLimit = 64 * 1024 * 1024
 
 type codexTranscript struct {
 	pendingCommands                       map[string]bool
+	customExecCalls                       map[string]bool
 	session, cwd, turn, activity          string
 	seenMeta, active, answered, complete  bool
 	lastRecord, lastActivity              time.Time
@@ -44,7 +47,7 @@ func parseCodexTranscript(ctx context.Context, data []byte, session, cwd string)
 }
 
 func (s codexTranscript) idle() bool {
-	return len(s.pendingCommands) == 0 && s.seenMeta && !s.active && s.complete && s.answered && s.activity != ""
+	return len(s.pendingCommands) == 0 && len(s.customExecCalls) == 0 && s.seenMeta && !s.active && s.complete && s.answered && s.activity != ""
 }
 
 func (s codexTranscript) cacheUsage() *CacheUsage {
@@ -124,7 +127,8 @@ func (s *codexTranscript) consume(line []byte) error {
 			}
 			var item struct {
 				Type, Name string
-				CallID     string `json:"call_id"`
+				CallID     string          `json:"call_id"`
+				Output     json.RawMessage `json:"output"`
 			}
 			if json.Unmarshal(r.Payload, &item) != nil {
 				return errors.New("codex response item unavailable")
@@ -132,6 +136,39 @@ func (s *codexTranscript) consume(line []byte) error {
 			if item.Type == "function_call" && (item.Name == "exec_command" || item.Name == "shell_command" || item.Name == "shell") {
 				if err := s.commandState(item.CallID, "in_progress", nil); err != nil {
 					return err
+				}
+			} else if item.Type == "custom_tool_call" {
+				if item.Name != "exec" || item.CallID == "" || s.customExecCalls[item.CallID] {
+					return errors.New("codex custom tool call is unsupported")
+				}
+				if s.customExecCalls == nil {
+					s.customExecCalls = map[string]bool{}
+				}
+				s.customExecCalls[item.CallID] = true
+				s.answered = false
+			} else if item.Type == "custom_tool_call_output" {
+				if !s.customExecCalls[item.CallID] {
+					return errors.New("codex custom tool output is uncorrelated")
+				}
+				var output []struct{ Type, Text string }
+				if json.Unmarshal(item.Output, &output) != nil || len(output) != 2 || output[0].Type != "input_text" || output[1].Type != "input_text" || !strings.HasPrefix(output[0].Text, "Script completed\n") {
+					return errors.New("codex custom tool output is unsupported")
+				}
+				var result struct {
+					SessionID *int64 `json:"session_id"`
+					ExitCode  *int   `json:"exit_code"`
+				}
+				if json.Unmarshal([]byte(output[1].Text), &result) != nil || (result.SessionID == nil) == (result.ExitCode == nil) {
+					return errors.New("codex custom tool result is unsupported")
+				}
+				delete(s.customExecCalls, item.CallID)
+				if result.SessionID != nil {
+					if *result.SessionID <= 0 {
+						return errors.New("codex background process identity is unsupported")
+					}
+					if err := s.commandState(strconv.FormatInt(*result.SessionID, 10), "in_progress", nil); err != nil {
+						return err
+					}
 				}
 			}
 		case "world_state", "token_usage_record":
@@ -151,6 +188,7 @@ func (s *codexTranscript) consume(line []byte) error {
 		CompletedAt int64  `json:"completed_at"`
 		Item        struct {
 			Type, ID, Phase string
+			ProcessID       string          `json:"process_id"`
 			Content         json.RawMessage `json:"content"`
 			Status          string          `json:"status"`
 			ExitCode        *int            `json:"exit_code"`
@@ -171,8 +209,19 @@ func (s *codexTranscript) consume(line []byte) error {
 		s.usageBaseOK = s.usageTotalOK
 		s.usageSeen, s.usageResultOK = false, false
 	case "item_completed":
-		if e.Item.Type == "CommandExecution" && s.pendingCommands[e.Item.ID] && e.Thread == s.session {
-			return s.commandState(e.Item.ID, e.Item.Status, e.Item.ExitCode)
+		if e.Item.Type == "CommandExecution" && e.Thread == s.session {
+			byID, byProcess := s.pendingCommands[e.Item.ID], s.pendingCommands[e.Item.ProcessID]
+			if byID || byProcess {
+				if byID {
+					if err := s.commandState(e.Item.ID, e.Item.Status, e.Item.ExitCode); err != nil {
+						return err
+					}
+				}
+				if byProcess && e.Item.ProcessID != e.Item.ID {
+					return s.commandState(e.Item.ProcessID, e.Item.Status, e.Item.ExitCode)
+				}
+				return nil
+			}
 		}
 		if !s.active || e.Turn != s.turn || e.Thread != s.session || e.Item.ID == "" {
 			return errors.New("codex item ownership is ambiguous")

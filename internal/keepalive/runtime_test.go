@@ -119,24 +119,26 @@ func TestMissingDefaultProviderHomeDoesNotBlockOthers(t *testing.T) {
 }
 
 func TestClaudeContextAttachmentsAndMetaResponse(t *testing.T) {
-	for _, meta := range []bool{false, true} {
-		at := time.Date(2030, 1, 2, 12, 0, 0, 0, time.UTC)
-		lines := strings.Split(strings.TrimSpace(string(runtimeTurn(t, runtimeTestUser, runtimeTestReply, at))), "\n")
-		var user, answer map[string]any
-		json.Unmarshal([]byte(lines[0]), &user)
-		json.Unmarshal([]byte(lines[1]), &answer)
-		user["isMeta"] = meta
-		answer["parentUuid"] = runtimeTestAuto
-		var data []byte
-		data = append(data, runtimeJSON(t, map[string]any{"type": "ai-title", "sessionId": runtimeTestSession, "title": "Example"})...)
-		data = append(data, runtimeJSON(t, user)...)
-		data = append(data, runtimeJSON(t, map[string]any{"type": "attachment", "sessionId": runtimeTestSession, "uuid": runtimeTestAuto, "parentUuid": runtimeTestUser, "attachment": map[string]string{"type": "environment"}})...)
-		data = append(data, runtimeJSON(t, answer)...)
-		data = append(data, runtimeJSON(t, map[string]any{"type": "system", "subtype": "stop_hook_summary", "sessionId": runtimeTestSession})...)
-		data = append(data, []byte(lines[2]+"\n")...)
-		state, err := parseClaudeTranscript(context.Background(), data, runtimeTestSession)
-		if err != nil || !state.responseComplete() || state.idle() == meta || state.activity != runtimeTestUser {
-			t.Fatalf("meta=%v: state=%+v error=%v", meta, state, err)
+	for _, attachment := range []string{"environment", "deferred_tools_delta", "agent_listing_delta", "skill_listing", "auto_mode", "total_tokens_reminder"} {
+		for _, meta := range []bool{false, true} {
+			at := time.Date(2030, 1, 2, 12, 0, 0, 0, time.UTC)
+			lines := strings.Split(strings.TrimSpace(string(runtimeTurn(t, runtimeTestUser, runtimeTestReply, at))), "\n")
+			var user, answer map[string]any
+			json.Unmarshal([]byte(lines[0]), &user)
+			json.Unmarshal([]byte(lines[1]), &answer)
+			user["isMeta"] = meta
+			answer["parentUuid"] = runtimeTestAuto
+			var data []byte
+			data = append(data, runtimeJSON(t, map[string]any{"type": "ai-title", "sessionId": runtimeTestSession, "title": "Example"})...)
+			data = append(data, runtimeJSON(t, user)...)
+			data = append(data, runtimeJSON(t, map[string]any{"type": "attachment", "sessionId": runtimeTestSession, "uuid": runtimeTestAuto, "parentUuid": runtimeTestUser, "attachment": map[string]string{"type": attachment}})...)
+			data = append(data, runtimeJSON(t, answer)...)
+			data = append(data, runtimeJSON(t, map[string]any{"type": "system", "subtype": "stop_hook_summary", "sessionId": runtimeTestSession})...)
+			data = append(data, []byte(lines[2]+"\n")...)
+			state, err := parseClaudeTranscript(context.Background(), data, runtimeTestSession)
+			if err != nil || !state.responseComplete() || state.idle() == meta || state.activity != runtimeTestUser {
+				t.Fatalf("attachment=%s meta=%v: state=%+v error=%v", attachment, meta, state, err)
+			}
 		}
 	}
 }

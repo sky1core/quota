@@ -132,7 +132,7 @@ func parseCodexLocks(data []byte, home string) (map[string][]int, error) {
 			id := strings.TrimSuffix(filepath.Base(path), ".lock")
 			if !runtimeUUID.MatchString(id) || filepath.Base(path) != id+".lock" || pid <= 1 {
 				failures = append(failures, errors.New("codex writer lock identity is unsupported"))
-				continue
+				id = path
 			}
 			duplicate := false
 			for _, owner := range owners[id] {
@@ -300,12 +300,12 @@ func scanCodexRuntime(ctx context.Context, account Account, now time.Time, maxAg
 	if err != nil {
 		return nil, err
 	}
-	var rpc *codexRPC
-	var closeHelper func() error
+	rpc, closeHelper, err := startCodexRPC(ctx, account, executable)
+	if err != nil {
+		return nil, err
+	}
 	defer func() {
-		if closeHelper != nil {
-			resultErr = errors.Join(resultErr, closeHelper())
-		}
+		resultErr = errors.Join(resultErr, closeHelper())
 	}()
 	var failures []error
 	if scanErr != nil {
@@ -334,13 +334,6 @@ func scanCodexRuntime(ctx context.Context, account Account, now time.Time, maxAg
 		candidate := e.candidate(account, pids[0], now, maxAge)
 		if candidate.ActivityID == "" {
 			continue
-		}
-		if rpc == nil {
-			rpc, closeHelper, err = startCodexRPC(ctx, account, executable)
-			if err != nil {
-				failures = append(failures, err)
-				break
-			}
 		}
 		queue, err := rpc.queue(ctx, id)
 		if err != nil {
@@ -405,6 +398,21 @@ func deliverCodexRuntime(ctx context.Context, account Account, c Candidate, mess
 	if err != nil {
 		return receipt, err
 	}
+	owners, err := readCodexLocks(ctx, root, account.Home)
+	if err != nil && owners == nil {
+		return receipt, err
+	}
+	if !codexSoleWriter(owners, c.SessionID, c.PID) {
+		return receipt, errors.New("codex original thread writer is unavailable")
+	}
+	if _, err := readCodexProcess(ctx, c.PID, executable); err != nil {
+		return receipt, err
+	}
+	rpc, closeHelper, err := startCodexRPC(ctx, account, executable)
+	if err != nil {
+		return receipt, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, closeHelper()) }()
 	e, err := inspectCodexRuntime(ctx, root, account, c.SessionID, c.PID, executable)
 	if err != nil {
 		return receipt, err
@@ -417,11 +425,6 @@ func deliverCodexRuntime(ctx context.Context, account Account, c Candidate, mess
 	if fresh != c {
 		return receipt, errors.New("codex delivery candidate changed or is no longer idle")
 	}
-	rpc, closeHelper, err := startCodexRPC(ctx, account, executable)
-	if err != nil {
-		return receipt, err
-	}
-	defer func() { resultErr = errors.Join(resultErr, closeHelper()) }()
 	queue, err := rpc.queue(ctx, c.SessionID)
 	if err != nil {
 		return receipt, err

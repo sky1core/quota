@@ -53,6 +53,52 @@ func codexTestPayload(records []map[string]any, index int) map[string]any {
 	return records[index]["payload"].(map[string]any)
 }
 
+func TestCodexCustomExecBackgroundCompletion(t *testing.T) {
+	at := time.Now().Add(-time.Minute).UTC()
+	records := codexTestRecords(at)
+	call := map[string]any{"type": "response_item", "payload": map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "synthetic-call", "status": "completed"}}
+	output := map[string]any{"type": "response_item", "payload": map[string]any{"type": "custom_tool_call_output", "call_id": "synthetic-call", "output": []any{map[string]any{"type": "input_text", "text": "Script completed\n"}, map[string]any{"type": "input_text", "text": `{"session_id":4321}`}}}}
+	records = append(records[:5], append([]map[string]any{call, output}, records[5:]...)...)
+	state, err := parseCodexTranscript(context.Background(), codexTestData(t, records, at), codexTestSession, "/example/project")
+	if err != nil || state.idle() {
+		t.Fatalf("live custom command accepted: idle=%v error=%v", state.idle(), err)
+	}
+	completed := map[string]any{"type": "event_msg", "payload": map[string]any{"type": "item_completed", "thread_id": codexTestSession, "turn_id": codexTestTurn, "item": map[string]any{"type": "CommandExecution", "id": "synthetic-command", "process_id": "4321", "status": "completed", "exit_code": 0}}}
+	records = append(records, completed)
+	state, err = parseCodexTranscript(context.Background(), codexTestData(t, records, at), codexTestSession, "/example/project")
+	if err != nil || !state.idle() {
+		t.Fatalf("completed custom command stayed excluded: idle=%v error=%v", state.idle(), err)
+	}
+	started := map[string]any{"type": "event_msg", "payload": map[string]any{"type": "item_started", "thread_id": codexTestSession, "turn_id": codexTestTurn, "item": map[string]any{"type": "CommandExecution", "id": "synthetic-command"}}}
+	withStart := append([]map[string]any{}, records[:5]...)
+	withStart = append(withStart, started)
+	withStart = append(withStart, records[5:]...)
+	state, err = parseCodexTranscript(context.Background(), codexTestData(t, withStart, at), codexTestSession, "/example/project")
+	if err != nil || !state.idle() {
+		t.Fatalf("both command identities were not completed: idle=%v error=%v", state.idle(), err)
+	}
+	output["payload"].(map[string]any)["output"] = "aborted"
+	_, err = parseCodexTranscript(context.Background(), codexTestData(t, records, at), codexTestSession, "/example/project")
+	if err == nil {
+		t.Fatal("unreadable custom command output accepted")
+	}
+	for _, tc := range []struct{ name, header, result string }{
+		{"running", "Script running with cell ID 7\n", `{"exit_code":0}`},
+		{"missing result", "Script completed\n", `{}`},
+		{"conflicting result", "Script completed\n", `{"session_id":4321,"exit_code":0}`},
+	} {
+		output["payload"].(map[string]any)["output"] = []any{map[string]any{"type": "input_text", "text": tc.header}, map[string]any{"type": "input_text", "text": tc.result}}
+		if _, err := parseCodexTranscript(context.Background(), codexTestData(t, records, at), codexTestSession, "/example/project"); err == nil {
+			t.Errorf("%s custom command output accepted", tc.name)
+		}
+	}
+	output["payload"].(map[string]any)["output"] = []any{map[string]any{"type": "input_text", "text": "Script completed\n"}, map[string]any{"type": "input_text", "text": `{"exit_code":0}`}}
+	state, err = parseCodexTranscript(context.Background(), codexTestData(t, records[:len(records)-1], at), codexTestSession, "/example/project")
+	if err != nil || !state.idle() {
+		t.Fatalf("completed custom command stayed excluded: idle=%v error=%v", state.idle(), err)
+	}
+}
+
 func TestCodexTranscriptCorrelatesCompletedInput(t *testing.T) {
 	at := time.Now().Add(-time.Minute).UTC()
 	for _, client := range []bool{false, true} {
@@ -360,6 +406,60 @@ func TestCodexReadOnlyThreadMetadata(t *testing.T) {
 	}
 }
 
+func TestCodexReadOnlyWALMetadataAfterHelperStarts(t *testing.T) {
+	if os.Getenv("QUOTA_CODEX_INTEGRATION_TEST") != "1" {
+		t.Skip("requires an isolated agent environment; set QUOTA_CODEX_INTEGRATION_TEST=1")
+	}
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		t.Skip("sqlite3 unavailable")
+	}
+	home := t.TempDir()
+	path := filepath.Join(home, "state_5.sqlite")
+	transcript := filepath.Join(home, "sessions", "synthetic.jsonl")
+	executable, err := codexNativeExecutable()
+	if err != nil {
+		t.Skip("native Codex unavailable")
+	}
+	account := Account{Provider: "codex", Key: "codex", Home: home}
+	_, closeInitial, err := startCodexRPC(context.Background(), account, executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closeInitial(); err != nil {
+		t.Fatal(err)
+	}
+	query := "PRAGMA journal_mode=WAL; INSERT INTO threads(id,rollout_path,created_at,updated_at,source,model_provider,cwd,title,sandbox_policy,approval_mode,cli_version) VALUES('" + codexTestSession + "','" + transcript + "',1,1,'cli','openai','/example/project','Synthetic','read-only','never','0.153.4');"
+	if out, err := exec.Command("sqlite3", "-init", "/dev/null", path, query).CombinedOutput(); err != nil {
+		t.Fatalf("synthetic WAL creation: %v %s", err, out)
+	}
+	if out, err := exec.Command("sqlite3", "-init", "/dev/null", path, "PRAGMA wal_checkpoint(TRUNCATE);").CombinedOutput(); err != nil {
+		t.Fatalf("synthetic WAL checkpoint: %v %s", err, out)
+	}
+	for _, suffix := range []string{"-shm", "-wal"} {
+		if err := os.Rename(path+suffix, path+suffix+".saved"); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("synthetic WAL sidecar isolation: %v", err)
+		}
+	}
+	_, closeHelper, err := startCodexRPC(context.Background(), account, executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := closeHelper(); err != nil {
+			t.Error(err)
+		}
+	}()
+	root, err := os.OpenRoot(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	thread, err := readCodexThread(context.Background(), root, account, codexTestSession)
+	if err != nil || thread.Transcript != transcript {
+		t.Fatalf("read-only metadata after helper startup: %+v %v", thread, err)
+	}
+}
+
 func TestCodexLiveLockObservation(t *testing.T) {
 	home, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -505,5 +605,13 @@ func TestCodexMalformedMessageAndIndependentLockExclusion(t *testing.T) {
 	owners, err := parseCodexLocks([]byte(data), home)
 	if err == nil || len(owners[codexTestSession]) != 1 {
 		t.Fatal("independent owner was suppressed by unsupported lock")
+	}
+	if codexSoleWriter(owners, codexTestSession, 123) {
+		t.Fatal("unsupported lock on the same process lost its ambiguous ownership")
+	}
+	data = strings.Replace(data, "\nf4u\n", "\np456\nf4u\n", 1)
+	owners, err = parseCodexLocks([]byte(data), home)
+	if err == nil || !codexSoleWriter(owners, codexTestSession, 123) {
+		t.Fatal("unrelated unsupported lock suppressed a verified writer")
 	}
 }

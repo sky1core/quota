@@ -35,6 +35,8 @@ func runAgent(args []string) int {
 		return runAgentHooks(args[1:], os.Stdout, os.Stderr)
 	case "instructions":
 		return runAgentInstructions(args[1:], os.Stdin, os.Stdout, os.Stderr)
+	case "skills":
+		return runAgentSkills(args[1:], os.Stdout, os.Stderr)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown agent command: %q\n\n", args[0])
 		printAgentUsage(os.Stderr)
@@ -46,6 +48,7 @@ func printAgentUsage(output io.Writer) {
 	fmt.Fprint(output, `usage:
   quota-cli agent hooks <init|list|plan|apply|verify|doctor|eval> [options]
   quota-cli agent instructions <setup|uninstall|status> [options]
+  quota-cli agent skills <install|link|list|remove> [options]
 `)
 }
 

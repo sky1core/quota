@@ -103,7 +103,8 @@ func GetQuotaForHomeWithValidity(ctx context.Context, timeout time.Duration, cod
 	}
 	defer unlock()
 	if raw, validity, ok := quotacache.GetWithValidity(key, maxAge); ok {
-		if out, err := parseCachedQuota(raw); err == nil {
+		if out, quotaUntil, err := parseCachedQuota(raw); err == nil {
+			validity.ValidUntil = quotaUntil
 			return out, validity, nil
 		}
 	}
@@ -225,33 +226,24 @@ func GetQuotaForHomeWithValidity(ctx context.Context, timeout time.Duration, cod
 		return nil, quotacache.Validity{}, err
 	}
 	// Cache the raw rate-limits response only until its first data-change boundary.
-	validity := quotacache.Validity{FetchedAt: fetchedAt, ValidUntil: cacheValidUntil(rr)}
-	quotacache.PutWithContext(ctx, key, string(resRaw), fetchedAt, validity.ValidUntil)
+	validity := quotacache.Validity{FetchedAt: fetchedAt, ValidUntil: quotaValidUntil(rr)}
+	quotacache.PutWithContext(ctx, key, string(resRaw), fetchedAt, cacheValidUntil(rr))
 	return out, validity, nil
 }
 
-func parseCachedQuota(raw string) (map[string]any, error) {
+func parseCachedQuota(raw string) (map[string]any, time.Time, error) {
 	var rr rateLimitsResponse
 	if err := json.Unmarshal([]byte(raw), &rr); err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
-	return buildOutput(rr)
+	out, err := buildOutput(rr)
+	return out, quotaValidUntil(rr), err
 }
 
 // cacheValidUntil returns the first instant that can change data projected from
 // this response: a quota-window reset or an available reset-credit expiry.
 func cacheValidUntil(rr rateLimitsResponse) time.Time {
-	snap := selectSnapshot(rr)
-	var earliest time.Time
-	for _, w := range []*rateLimitWindow{snap.Primary, snap.Secondary} {
-		if w == nil || w.ResetsAt == nil {
-			continue
-		}
-		at := time.Unix(*w.ResetsAt, 0)
-		if earliest.IsZero() || at.Before(earliest) {
-			earliest = at
-		}
-	}
+	earliest := quotaValidUntil(rr)
 	if rr.ResetCredits != nil {
 		for _, credit := range rr.ResetCredits.Credits {
 			if credit.Status != "available" || credit.ExpiresAt == nil {
@@ -261,6 +253,21 @@ func cacheValidUntil(rr rateLimitsResponse) time.Time {
 			if earliest.IsZero() || at.Before(earliest) {
 				earliest = at
 			}
+		}
+	}
+	return earliest
+}
+
+func quotaValidUntil(rr rateLimitsResponse) time.Time {
+	snap := selectSnapshot(rr)
+	var earliest time.Time
+	for _, w := range []*rateLimitWindow{snap.Primary, snap.Secondary} {
+		if w == nil || w.ResetsAt == nil {
+			continue
+		}
+		at := time.Unix(*w.ResetsAt, 0)
+		if earliest.IsZero() || at.Before(earliest) {
+			earliest = at
 		}
 	}
 	return earliest

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/getlantern/systray"
+	"golang.org/x/sys/unix"
 
 	"github.com/sky1core/quota/internal/agenthooks"
 	"github.com/sky1core/quota/internal/claude"
@@ -644,14 +645,30 @@ var lockFD = -1
 // a legitimate holder.
 func acquireLock() (fd int, contended bool) {
 	p := pidLockPath()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		log.Printf("acquireLock: mkdir: %v", err)
-		return -1, false
-	}
-	fd, err := syscall.Open(p, syscall.O_CREAT|syscall.O_RDWR, 0o644)
-	if err != nil {
-		log.Printf("acquireLock: open: %v", err)
-		return -1, false
+	if inherited, ok := os.LookupEnv("QUOTA_BAR_LOCK_FD"); ok {
+		os.Unsetenv("QUOTA_BAR_LOCK_FD")
+		var err error
+		fd, err = strconv.Atoi(inherited)
+		if err != nil || fd < 3 {
+			log.Printf("acquireLock: invalid inherited descriptor %q", inherited)
+			return -1, false
+		}
+		var held, current syscall.Stat_t
+		if syscall.Fstat(fd, &held) != nil || syscall.Stat(p, &current) != nil || held.Dev != current.Dev || held.Ino != current.Ino {
+			log.Printf("acquireLock: inherited descriptor does not refer to pid lock")
+			return -1, false
+		}
+	} else {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			log.Printf("acquireLock: mkdir: %v", err)
+			return -1, false
+		}
+		var err error
+		fd, err = syscall.Open(p, syscall.O_CREAT|syscall.O_RDWR, 0o644)
+		if err != nil {
+			log.Printf("acquireLock: open: %v", err)
+			return -1, false
+		}
 	}
 	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		syscall.Close(fd)
@@ -661,7 +678,7 @@ func acquireLock() (fd int, contended bool) {
 	// Write PID
 	_ = syscall.Ftruncate(fd, 0)
 	pid := fmt.Sprintf("%d\n", os.Getpid())
-	_, _ = syscall.Write(fd, []byte(pid))
+	_, _ = syscall.Pwrite(fd, []byte(pid), 0)
 	return fd, false
 }
 
@@ -761,6 +778,21 @@ func sameExecutable(a, b string) bool {
 }
 
 func main() {
+	prepareAppProcess()
+	log.Printf("quota-bar started (pid=%d)", os.Getpid())
+	systray.Run(onReady, onExit)
+}
+
+func prepareAppProcess() {
+	var contended bool
+	if lockFD, contended = acquireLock(); lockFD < 0 {
+		if contended {
+			log.Printf("another instance is already running, exiting")
+			os.Exit(0)
+		}
+		log.Printf("could not acquire pid lock, exiting")
+		os.Exit(1)
+	}
 	if os.Getenv("QUOTA_BAR_DAEMON") != "1" {
 		exe, err := realExecutable()
 		if err != nil {
@@ -770,7 +802,8 @@ func main() {
 			log.Fatal(err)
 		}
 		cmd := exec.Command(appBundleExecutable(), os.Args[1:]...)
-		cmd.Env = append(os.Environ(), "QUOTA_BAR_DAEMON=1")
+		cmd.Env = append(os.Environ(), "QUOTA_BAR_DAEMON=1", "QUOTA_BAR_LOCK_FD=3")
+		cmd.ExtraFiles = []*os.File{os.NewFile(uintptr(lockFD), pidLockPath())}
 		cmd.Stdout = nil
 		cmd.Stderr = nil
 		cmd.Stdin = nil
@@ -802,30 +835,15 @@ func main() {
 		}
 		bundled := appBundleExecutable()
 		log.Printf("re-executing through app bundle %s", bundled)
-		err = syscall.Exec(bundled, append([]string{bundled}, os.Args[1:]...), append(os.Environ(), "QUOTA_BAR_BUNDLED=1"))
+		if _, err := unix.FcntlInt(uintptr(lockFD), unix.F_SETFD, 0); err != nil {
+			log.Fatalf("preserve pid lock across exec: %v", err)
+		}
+		err = syscall.Exec(bundled, append([]string{bundled}, os.Args[1:]...), append(os.Environ(), "QUOTA_BAR_BUNDLED=1", fmt.Sprintf("QUOTA_BAR_LOCK_FD=%d", lockFD)))
 		log.Fatalf("exec %s: %v", bundled, err)
 	}
 	// The marker only guards the exec above; drop it so processes spawned
 	// from here (update handover) start with a clean bare-binary path.
 	os.Unsetenv("QUOTA_BAR_BUNDLED")
-	var contended bool
-	if lockFD, contended = acquireLock(); lockFD < 0 {
-		if contended {
-			// Exit 0: with KeepAlive SuccessfulExit=false, a non-zero exit
-			// here would make launchd retry (and lose) the lock every
-			// ThrottleInterval forever whenever another instance
-			// legitimately holds it — e.g. the handover child left running
-			// after a manual-mode update restart.
-			log.Printf("another instance is already running, exiting")
-			os.Exit(0)
-		}
-		// Environment error (not a live holder): exit 1 so launchd retries —
-		// a transient hiccup at login must not leave the bar dead all session.
-		log.Printf("could not acquire pid lock, exiting")
-		os.Exit(1)
-	}
-	log.Printf("quota-bar started (pid=%d)", os.Getpid())
-	systray.Run(onReady, onExit)
 }
 
 var intentionalQuit bool

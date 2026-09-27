@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -436,6 +437,90 @@ func TestAgentHooksApplyNormalizesRelativeBinary(t *testing.T) {
 	}
 	if strings.Contains(string(b), `"./quota-cli agent`) {
 		t.Fatalf("settings still stores the relative binary: %s", string(b))
+	}
+}
+
+func TestAgentHooksApplyPinsExecutableAcrossPathChanges(t *testing.T) {
+	for _, option := range []string{"", "quota-cli", "qc"} {
+		t.Run("binary="+option, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			policyDir := filepath.Join(home, "policies")
+			policy, err := agenthooks.Preset(agenthooks.PresetGitHubHistoryGuard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := agenthooks.SavePolicy(policyDir, policy, false); err != nil {
+				t.Fatal(err)
+			}
+			name := "quota-cli"
+			if option != "" {
+				name = option
+			}
+			binary := writeTestExecutable(t, filepath.Join(home, "installed bin", name))
+			if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf 'selected executable\\n'\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", filepath.Dir(binary))
+			for _, runtime := range []string{"claude", "codex"} {
+				if _, err := agenthooks.Apply(runtime, name, filepath.Join(home, "old policies")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			args := []string{"--policy-dir", policyDir, "--runtime", "all", "--json"}
+			if option != "" {
+				args = append(args, "--binary", option)
+			}
+			var stdout, stderr bytes.Buffer
+			for _, operation := range []string{"apply", "plan", "doctor"} {
+				stdout.Reset()
+				stderr.Reset()
+				if code := runAgentHooks(append([]string{operation}, args...), &stdout, &stderr); code != 0 {
+					t.Fatalf("%s: exit=%d stdout=%s stderr=%s", operation, code, &stdout, &stderr)
+				}
+				var report struct {
+					Hooks []agenthooks.HookPlan `json:"hooks"`
+				}
+				if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+					t.Fatal(err)
+				}
+				if len(report.Hooks) != 2 {
+					t.Fatalf("missing runtime: %s", &stdout)
+				}
+				for _, hook := range report.Hooks {
+					if !hook.Present || hook.Binary != binary || !strings.Contains(hook.Command, binary) {
+						t.Errorf("%s did not retain executable: %+v", operation, hook)
+					}
+				}
+			}
+			t.Setenv("PATH", t.TempDir())
+			t.Chdir(t.TempDir())
+			for _, path := range []string{filepath.Join(home, ".claude", "settings.json"), filepath.Join(home, ".codex", "hooks.json")} {
+				root, err := agenthooks.ReadJSONObject(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				groups := root["hooks"].(map[string]any)["PreToolUse"].([]any)
+				if len(groups) != 1 {
+					t.Fatalf("managed hook duplicated: %+v", groups)
+				}
+				entries := groups[0].(map[string]any)["hooks"].([]any)
+				command := entries[0].(map[string]any)["command"].(string)
+				out, err := exec.Command("/bin/sh", "-c", command).CombinedOutput()
+				if err != nil || string(out) != "selected executable\n" {
+					t.Errorf("installed command failed after PATH change: %q %v", out, err)
+				}
+			}
+			stdout.Reset()
+			stderr.Reset()
+			doctorArgs := []string{"doctor", "--policy-dir", policyDir, "--runtime", "all"}
+			if option == "qc" {
+				doctorArgs = append(doctorArgs, "--binary", binary)
+			}
+			if code := runAgentHooks(doctorArgs, &stdout, &stderr); code != 0 {
+				t.Errorf("stored executable diagnosis depends on PATH: exit=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+			}
+		})
 	}
 }
 

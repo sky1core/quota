@@ -211,7 +211,7 @@ func knownIndirectProgram(arg string) bool {
 		return true
 	}
 	switch name {
-	case "git", "gh", "echo", "printf", "true", "false", ":", "rm", "rmdir", "unlink", "dd", "kill", "killall", "pkill", "chmod", "chown", "chgrp":
+	case "git", "gh", "find", "cat", "grep", "trash", "echo", "printf", "true", "false", ":", "rm", "rmdir", "unlink", "dd", "kill", "killall", "pkill", "chmod", "chown", "chgrp":
 		return true
 	}
 	return false

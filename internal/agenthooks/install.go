@@ -53,20 +53,24 @@ func absolutizeHookBinary(binary string) string {
 	return binary
 }
 
-func CheckHookBinary(binary string) error {
+func ResolveHookBinary(binary string) (string, error) {
 	binary = hookBinary(binary)
 	path, err := exec.LookPath(binary)
 	if err != nil {
-		return fmt.Errorf("hook binary %q is not executable: %w", binary, err)
+		return "", fmt.Errorf("hook binary %q is not executable: %w", binary, err)
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("hook binary %q cannot be resolved: %w", binary, err)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return fmt.Errorf("hook binary %q cannot be inspected: %w", binary, err)
+		return "", fmt.Errorf("hook binary %q cannot be inspected: %w", binary, err)
 	}
 	if info.IsDir() {
-		return fmt.Errorf("hook binary %q is a directory", binary)
+		return "", fmt.Errorf("hook binary %q is a directory", binary)
 	}
-	return nil
+	return path, nil
 }
 
 func ClaudeSettingsPath() string {
@@ -197,6 +201,7 @@ func inspectHookPlan(plan *HookPlan, root map[string]any, runtime, binary, polic
 	if hookMaps, foundBinary, ok := findManagedHook(root, runtime, binary, policyDir); ok {
 		plan.Present = true
 		plan.Binary = foundBinary
+		plan.Command = HookCommand(runtime, foundBinary, policyDir)
 		for _, hookMap := range hookMaps {
 			plan.Reasons = append(plan.Reasons, unsupportedHookVariants(hookMap)...)
 		}
@@ -468,7 +473,19 @@ func managedHookStrictOptionsMatch(args []string, runtime, policyDir string, exa
 
 func managedHookBinaryMatches(arg, binary string) bool {
 	if strings.TrimSpace(binary) != "" {
-		return arg == absolutizeHookBinary(strings.TrimSpace(binary))
+		binary = absolutizeHookBinary(strings.TrimSpace(binary))
+		if arg == binary {
+			return true
+		}
+		if !strings.ContainsRune(binary, os.PathSeparator) && filepath.IsAbs(arg) {
+			resolved, err := ResolveHookBinary(binary)
+			return err == nil && arg == resolved
+		}
+		if !strings.ContainsRune(arg, os.PathSeparator) && filepath.IsAbs(binary) {
+			resolved, err := ResolveHookBinary(arg)
+			return err == nil && binary == resolved
+		}
+		return false
 	}
 	return commandName(arg) == "quota-cli"
 }

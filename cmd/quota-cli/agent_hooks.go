@@ -321,14 +321,15 @@ func agentHooksApply(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "no enabled agent hook policies found in %s\n", policyDirForDisplay(policyDir))
 		return 1
 	}
-	if err := agenthooks.CheckHookBinary(*binary); err != nil {
+	hookBinary, err := agenthooks.ResolveHookBinary(*binary)
+	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
 	var plans []agenthooks.HookPlan
 	var applyErrors []string
 	for _, target := range targets {
-		plan, err := agenthooks.ApplyPath(target.runtime, target.path, *binary, policyDir)
+		plan, err := agenthooks.ApplyPath(target.runtime, target.path, hookBinary, policyDir)
 		plan.Account = target.account
 		if err != nil {
 			fmt.Fprintln(stderr, err)
@@ -484,7 +485,7 @@ func agentHooksDoctor(args []string, stdout, stderr io.Writer) int {
 		if strings.TrimSpace(binaryToCheck) == "" && strings.TrimSpace(hooks[i].Binary) != "" {
 			binaryToCheck = hooks[i].Binary
 		}
-		if err := agenthooks.CheckHookBinary(binaryToCheck); err != nil {
+		if _, err := agenthooks.ResolveHookBinary(binaryToCheck); err != nil {
 			hooks[i].Error = err.Error()
 			statuses[i] = "broken"
 			failed = true

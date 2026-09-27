@@ -18,6 +18,7 @@ const (
 	optionBooleanValue
 	optionBooleanForce
 	optionToggle
+	optionOptionalNumber
 )
 
 type optionGroup struct {
@@ -391,6 +392,12 @@ func parseCommandInput(input commandInput) parsedCommand {
 		}
 	case "source", ".":
 		parsed.undecidable = "sourced script content is not visible to policy evaluator"
+	case "find":
+		var err error
+		parsed.nestedArgv, err = parseFindCommands(input)
+		if err != nil {
+			parsed.undecidable = err.Error()
+		}
 	case "xargs":
 		nested, err := parseProcessWrapperInput(input)
 		if err != nil {

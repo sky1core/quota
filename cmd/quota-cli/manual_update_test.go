@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -16,29 +17,48 @@ import (
 )
 
 func TestRunUpdateSignals(t *testing.T) {
+	goBinary, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goBinary, err = filepath.EvalSymlinks(goBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goPath := filepath.Dir(goBinary) + string(os.PathListSeparator) + "/usr/bin:/bin:/usr/sbin:/sbin"
 	binary := filepath.Join(t.TempDir(), "quota-cli")
 	buildCtx, cancelBuild := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancelBuild()
-	build := exec.CommandContext(buildCtx, "go", "build", "-buildvcs=false", "-o", binary, ".")
-	build.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "GOENV=off")
+	build := exec.CommandContext(buildCtx, goBinary, "build", "-buildvcs=false", "-o", binary, ".")
+	build.Env = append(os.Environ(), "PATH="+goPath, "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "GOENV=off")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build CLI: %v\n%s", err, out)
 	}
 	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
 		t.Run(sig.String(), func(t *testing.T) {
-			dir := t.TempDir()
-			lock, err := os.Open(dir)
-			if err != nil {
+			home := t.TempDir()
+			binDir := filepath.Join(home, "bin")
+			if err := os.Mkdir(binDir, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			defer lock.Close()
-			if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			ready := filepath.Join(home, "go-env-ready")
+			script := `#!/bin/sh
+if [ "$1" != "env" ] || [ "$2" != "GOBIN" ]; then
+  exit 42
+fi
+/bin/sleep 30 &
+child=$!
+printf '%s %s\n' "$$" "$child" > "$QUOTA_GO_ENV_READY"
+wait "$child"
+`
+			if err := os.WriteFile(filepath.Join(binDir, "go"), []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, binary, "update")
-			cmd.Env = append(os.Environ(), "GOBIN="+dir, "HOME="+t.TempDir(),
+			cmd.Env = append(os.Environ(), "HOME="+home, "GOPATH="+filepath.Join(home, "go"),
+				"PATH="+binDir+string(os.PathListSeparator)+goPath, "QUOTA_GO_ENV_READY="+ready,
 				"GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "GOENV=off")
 			var out bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &out, &out
@@ -47,27 +67,62 @@ func TestRunUpdateSignals(t *testing.T) {
 			}
 			done := make(chan error, 1)
 			go func() { done <- cmd.Wait() }()
-			select {
-			case err := <-done:
-				t.Fatalf("update exited while directory locked: %v\n%s", err, &out)
-			case <-time.After(time.Second):
+			var probePIDs [2]int
+			readyDeadline := time.NewTimer(5 * time.Second)
+			defer readyDeadline.Stop()
+			readyPoll := time.NewTicker(20 * time.Millisecond)
+			defer readyPoll.Stop()
+		waitReady:
+			for {
+				body, err := os.ReadFile(ready)
+				if err == nil {
+					parts := strings.Fields(string(body))
+					if len(parts) == 2 {
+						parentPID, parentErr := strconv.Atoi(parts[0])
+						childPID, childErr := strconv.Atoi(parts[1])
+						if parentErr == nil && childErr == nil && parentPID > 0 && childPID > 0 {
+							probePIDs = [2]int{parentPID, childPID}
+							break waitReady
+						}
+					}
+				}
+				select {
+				case err := <-done:
+					t.Fatalf("update exited before go env was ready: %v\n%s", err, &out)
+				case <-readyDeadline.C:
+					cancel()
+					<-done
+					t.Fatalf("go env did not become ready: %v\n%s", err, &out)
+				case <-readyPoll.C:
+				}
 			}
+			defer func() {
+				for _, pid := range probePIDs {
+					if signalProbeRunning(pid) {
+						_ = syscall.Kill(pid, syscall.SIGKILL)
+					}
+				}
+			}()
 			if err := cmd.Process.Signal(sig); err != nil {
 				cancel()
 				<-done
 				t.Fatal(err)
 			}
-			err = <-done
+			err := <-done
+			if ctx.Err() != nil {
+				t.Fatalf("update exceeded its test deadline after %s: %v\n%s", sig, ctx.Err(), &out)
+			}
 			var exitErr *exec.ExitError
 			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
 				t.Fatalf("update did not return failure normally after %s: %v\n%s", sig, err, &out)
 			}
-			if got := out.String(); got != "업데이트 실패: context canceled\n" {
-				t.Fatalf("update did not cancel its lock wait: %q", got)
+			if got := out.String(); !strings.HasPrefix(got, "업데이트 실패: ") || !strings.HasSuffix(got, "\n") {
+				t.Fatalf("update did not report its failure: %q", got)
 			}
-			entries, err := os.ReadDir(dir)
-			if err != nil || len(entries) != 0 {
-				t.Fatalf("cancelled update created files: %v, %v", entries, err)
+			for _, pid := range probePIDs {
+				if signalProbeRunning(pid) {
+					t.Fatalf("go env process survived %s: pid=%d", sig, pid)
+				}
 			}
 		})
 	}

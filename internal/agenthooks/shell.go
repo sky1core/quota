@@ -408,7 +408,8 @@ func commandWord(word *syntax.Word) (string, bool, bool, bool, bool) {
 	if literalPrefix {
 		prefix = text[:firstDynamicOffset]
 	}
-	if eq := strings.IndexByte(text, '='); eq >= 0 && firstDynamicOffset <= eq {
+	if eq := strings.IndexByte(text, '='); eq >= 0 && firstDynamicOffset <= eq &&
+		(!literalPrefix || strings.HasPrefix(prefix, "-")) {
 		return text[eq:], true, maySplit, false, true
 	}
 	if strings.HasPrefix(text, "-") && firstDynamicOffset <= 1 {
@@ -979,6 +980,11 @@ func parseWrapperChain(input commandInput) wrapperChain {
 	argv := input.argv
 	chain := wrapperChain{argv: argv, sameShell: true}
 	for {
+		if input.dynamicAt(chain.consumed) {
+			chain.dynamicCommand = true
+			chain.dynamicReason = "command name cannot be determined"
+			return chain
+		}
 		wrapperName := ""
 		if len(chain.argv) > 0 {
 			wrapperName = commandName(chain.argv[0])

@@ -195,6 +195,7 @@ func inspectNativeCodexHooks(ctx context.Context, cwd, home string, expected map
 	if err := cmd.Start(); err != nil {
 		return report, fmt.Errorf("start Codex native hook inspection: %w", err)
 	}
+	defer cmd.Cancel()
 	defer func() {
 		_ = stdin.Close()
 		done := make(chan error, 1)

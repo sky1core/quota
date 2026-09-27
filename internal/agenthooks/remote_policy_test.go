@@ -118,7 +118,7 @@ func TestRemotePolicyBoundaryThroughHookEvents(t *testing.T) {
 		{`find . -acl -sparse -xattr -xattrname com.example.tag -print`, true},
 		{`find . -depth 1 -exec rm {} \;`, false},
 		{`find . -newermm -exec -print`, true},
-		{`find "$dir" -name "$pattern" -print0`, true},
+		{`find ./"$dir" -name "$pattern" -print0`, true},
 		{`find . -name -exec -print`, true},
 		{`find . -printf '-exec rm {} ;'`, true},
 		{`find -f -exec -name '*.go' -print`, true},
@@ -294,5 +294,45 @@ func TestLocalAmendRestrictionRequiresSeparateRule(t *testing.T) {
 		if err != nil || got.Allowed == enabled {
 			t.Fatalf("dynamic options, enabled=%v: %+v, %v", enabled, got, err)
 		}
+	}
+}
+
+func TestFindDynamicExpressionBoundaryThroughHookEvents(t *testing.T) {
+	policy, err := Preset(PresetGitHubHistoryGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		command string
+		allow   bool
+	}{
+		{`ACTION=-exec; find . "$ACTION" git push \;`, false},
+		{`find "$ACTION" git push \;`, false},
+		{`find . "${ACTION:--exec}" git push \;`, false},
+		{`find -- "$ACTION" git push \;`, false},
+		{`find "$ROOT" -name "$PATTERN"`, false},
+		{`find . -name "$PATTERN"`, true},
+		{`find . -name "${PATTERN:--exec}"`, true},
+		{`find ./"$ROOT" -name "$PATTERN"`, true},
+		{`find /example/"$ROOT" -name "$PATTERN"`, true},
+		{`find prefix"$ROOT" -name "$PATTERN"`, true},
+		{`find -f "$ROOT" -name "$PATTERN"`, true},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			input, err := json.Marshal(map[string]any{"tool_name": "Bash", "tool_input": map[string]string{"command": tc.command}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision, err := EvaluateHookEvent([]Policy{policy}, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if decision.Allowed != tc.allow {
+				t.Fatalf("decision=%+v, want allowed=%v", decision, tc.allow)
+			}
+			if !tc.allow && (decision.RuleID != "" || decision.Reason == "") {
+				t.Fatalf("unknown find expression must report an undecidable reason: %+v", decision)
+			}
+		})
 	}
 }

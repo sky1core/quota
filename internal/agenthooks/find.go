@@ -26,7 +26,7 @@ func parseFindCommands(input commandInput) ([]commandInput, error) {
 	expression := false
 	for i := 1; i < len(input.argv); i++ {
 		arg := input.argv[i]
-		if input.maySplitAt(i) || input.dynamicAt(i) && expression {
+		if input.maySplitAt(i) || input.dynamicAt(i) && (expression || !input.literalPrefixAt(i)) {
 			return nil, fmt.Errorf("find expression cannot be determined")
 		}
 		if !expression && !strings.HasPrefix(arg, "-") && arg != "!" && arg != "(" {

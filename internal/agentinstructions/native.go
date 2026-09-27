@@ -58,8 +58,8 @@ type nativeHookMetadata struct {
 
 func InspectNativeCodexHooksForHome(ctx context.Context, cwd, home string, expected map[string]string) (NativeReport, error) {
 	for event, command := range expected {
-		if (event != "sessionStart" && event != "subagentStart") || command == "" {
-			return NativeReport{State: "unknown", Hooks: []NativeHook{}}, fmt.Errorf("invalid expected instruction hook event or command: %s", event)
+		if (event != "sessionStart" && event != "subagentStart" && event != "preToolUse") || command == "" {
+			return NativeReport{State: "unknown", Hooks: []NativeHook{}}, fmt.Errorf("invalid expected hook event or command: %s", event)
 		}
 	}
 	return inspectNativeCodexHooks(ctx, cwd, home, expected)
@@ -329,6 +329,7 @@ func parseNativeHooks(raw json.RawMessage, cwd string, expected map[string]strin
 	}
 	report.State = "configured"
 	counts := make(map[string]int)
+	checkUnexpectedInstructions := expected["sessionStart"] != "" || expected["subagentStart"] != ""
 	for i := range report.Hooks {
 		hook := &report.Hooks[i]
 		hook.State = "unknown"
@@ -353,7 +354,7 @@ func parseNativeHooks(raw json.RawMessage, cwd string, expected map[string]strin
 			hook.State = "blocked"
 		}
 		if !hook.Matched {
-			if hook.HandlerType == "command" && suspiciousInstructionCommand(hook.Command) {
+			if checkUnexpectedInstructions && hook.HandlerType == "command" && suspiciousInstructionCommand(hook.Command) {
 				hook.State = "blocked"
 				report.State = "blocked"
 				report.Issues = append(report.Issues, fmt.Sprintf("%s: unexpected instruction hook from %s at %s; ownership or duplicate delivery requires review", hook.Event, hook.Source, hook.SourcePath))
@@ -362,9 +363,17 @@ func parseNativeHooks(raw json.RawMessage, cwd string, expected map[string]strin
 			continue
 		}
 		counts[hook.Event]++
-		if hook.Async || (hook.Matcher != nil && *hook.Matcher != "" && *hook.Matcher != "*") {
+		matcherValid := hook.Matcher == nil || *hook.Matcher == "" || *hook.Matcher == "*"
+		if hook.Event == "preToolUse" {
+			matcherValid = hook.Matcher != nil && *hook.Matcher == "Bash"
+		}
+		if hook.Async || !matcherValid {
 			hook.State = "blocked"
-			report.Issues = append(report.Issues, hook.Event+" instruction hook is asynchronous or restricts event matching")
+			if hook.Event == "preToolUse" {
+				report.Issues = append(report.Issues, "preToolUse hook is asynchronous or does not match Bash")
+			} else {
+				report.Issues = append(report.Issues, hook.Event+" instruction hook is asynchronous or restricts event matching")
+			}
 		}
 		if hook.State == "blocked" || (hook.State == "needs-trust" && report.State == "configured") {
 			report.State = hook.State
@@ -378,7 +387,7 @@ func parseNativeHooks(raw json.RawMessage, cwd string, expected map[string]strin
 	for _, event := range events {
 		if counts[event] != 1 {
 			report.State = "blocked"
-			report.Issues = append(report.Issues, fmt.Sprintf("%s: expected exactly one instruction hook, found %d", event, counts[event]))
+			report.Issues = append(report.Issues, fmt.Sprintf("%s: expected exactly one hook, found %d", event, counts[event]))
 		}
 	}
 	if len(*entry.Errors) != 0 {

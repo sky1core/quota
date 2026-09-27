@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -172,6 +173,7 @@ func TestAgentHooksApplyUsesPolicyDirInHookCommand(t *testing.T) {
 func TestAgentHooksApplyTargetsRegisteredAccounts(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	installNativeHookFixture(t)
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "caller-claude"))
 	t.Setenv("CODEX_HOME", filepath.Join(home, "caller-codex"))
 	configPath := filepath.Join(home, ".config", "quota", "config.json")
@@ -293,7 +295,7 @@ func TestAgentHooksDoctorUsesBinaryFlag(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	code = agentHooksDoctor([]string{"--policy-dir", policyDir, "--runtime", "claude", "--binary", binary}, &stdout, &stderr)
+	code = agentHooksDoctor(context.Background(), []string{"--policy-dir", policyDir, "--runtime", "claude", "--binary", binary}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doctor code = %d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 	}
@@ -341,7 +343,7 @@ func TestAgentHooksDoctorRejectsMissingBinary(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := agentHooksDoctor([]string{"--policy-dir", policyDir, "--runtime", "claude", "--binary", binary}, &stdout, &stderr)
+	code := agentHooksDoctor(context.Background(), []string{"--policy-dir", policyDir, "--runtime", "claude", "--binary", binary}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doctor code = %d want 1", code)
 	}
@@ -370,7 +372,7 @@ func TestAgentHooksDoctorChecksStoredBinaryWhenFlagOmitted(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := agentHooksDoctor([]string{"--policy-dir", policyDir, "--runtime", "claude"}, &stdout, &stderr)
+	code := agentHooksDoctor(context.Background(), []string{"--policy-dir", policyDir, "--runtime", "claude"}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doctor code = %d want 1", code)
 	}
@@ -445,6 +447,7 @@ func TestAgentHooksApplyPinsExecutableAcrossPathChanges(t *testing.T) {
 		t.Run("binary="+option, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
+			codexFixtureDir := installNativeHookFixture(t)
 			policyDir := filepath.Join(home, "policies")
 			policy, err := agenthooks.Preset(agenthooks.PresetGitHubHistoryGuard)
 			if err != nil {
@@ -461,7 +464,7 @@ func TestAgentHooksApplyPinsExecutableAcrossPathChanges(t *testing.T) {
 			if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf 'selected executable\\n'\n"), 0700); err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv("PATH", filepath.Dir(binary))
+			t.Setenv("PATH", filepath.Dir(binary)+string(os.PathListSeparator)+codexFixtureDir)
 			for _, runtime := range []string{"claude", "codex"} {
 				if _, err := agenthooks.Apply(runtime, name, filepath.Join(home, "old policies")); err != nil {
 					t.Fatal(err)
@@ -493,7 +496,7 @@ func TestAgentHooksApplyPinsExecutableAcrossPathChanges(t *testing.T) {
 					}
 				}
 			}
-			t.Setenv("PATH", t.TempDir())
+			t.Setenv("PATH", codexFixtureDir)
 			t.Chdir(t.TempDir())
 			for _, path := range []string{filepath.Join(home, ".claude", "settings.json"), filepath.Join(home, ".codex", "hooks.json")} {
 				root, err := agenthooks.ReadJSONObject(path)
@@ -602,7 +605,7 @@ func TestAgentHooksDoctorMissingHookFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	code := agentHooksDoctor([]string{"--policy-dir", policyDir}, &stdout, &stderr)
+	code := agentHooksDoctor(context.Background(), []string{"--policy-dir", policyDir}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doctor code = %d want 1", code)
 	}
@@ -688,6 +691,7 @@ func TestAgentHooksDiagnosticOutputContract(t *testing.T) {
 func TestAgentHooksApplyAllPreservesPartialDiagnostics(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	installNativeHookFixture(t)
 	policyDir := filepath.Join(home, "policies")
 	policy, err := agenthooks.Preset(agenthooks.PresetGitHubHistoryGuard)
 	if err != nil {

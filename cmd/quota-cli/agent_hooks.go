@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/sky1core/quota/internal/agenthooks"
 	"github.com/sky1core/quota/internal/config"
@@ -57,19 +60,25 @@ func runAgentHooks(args []string, stdout, stderr io.Writer) int {
 		printAgentHooksUsage(stderr)
 		return 2
 	}
+	ctx := context.Background()
+	if args[0] == "plan" || args[0] == "apply" || args[0] == "doctor" {
+		var stop context.CancelFunc
+		ctx, stop = signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		defer stop()
+	}
 	switch args[0] {
 	case "init":
 		return agentHooksInit(args[1:], stdout, stderr)
 	case "list":
 		return agentHooksList(args[1:], stdout, stderr)
 	case "plan":
-		return agentHooksPlan(args[1:], stdout, stderr)
+		return agentHooksPlan(ctx, args[1:], stdout, stderr)
 	case "apply":
-		return agentHooksApply(args[1:], stdout, stderr)
+		return agentHooksApply(ctx, args[1:], stdout, stderr)
 	case "verify":
 		return agentHooksVerify(args[1:], stdout, stderr)
 	case "doctor":
-		return agentHooksDoctor(args[1:], stdout, stderr)
+		return agentHooksDoctor(ctx, args[1:], stdout, stderr)
 	case "eval":
 		return agentHooksEval(args[1:], os.Stdin, stdout, stderr)
 	default:
@@ -174,7 +183,7 @@ func agentHooksList(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func agentHooksPlan(args []string, stdout, stderr io.Writer) int {
+func agentHooksPlan(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs, opts := agentHooksBaseFlags("quota-cli agent hooks plan", io.Discard)
 	runtime := fs.String("runtime", "all", "Runtime: all, claude, or codex")
 	binary := fs.String("binary", "", "quota-cli binary path for hook commands")
@@ -212,6 +221,7 @@ func agentHooksPlan(args []string, stdout, stderr io.Writer) int {
 		for _, target := range targets {
 			plan := agenthooks.DetectPath(target.runtime, target.path, *binary, policyDir)
 			plan.Account = target.account
+			inspectAgentHookActivation(ctx, &plan)
 			plans = append(plans, plan)
 		}
 	}
@@ -240,8 +250,14 @@ func agentHooksPlan(args []string, stdout, stderr io.Writer) int {
 			status = "present"
 		}
 		fmt.Fprintf(stdout, "  %s %s\n    account: %s\n    path: %s\n    command: %s\n", plan.Runtime, status, plan.Account, plan.Path, plan.Command)
+		if plan.Activation != "" {
+			fmt.Fprintf(stdout, "    activation: %s\n", plan.Activation)
+		}
 		if plan.Error != "" {
 			fmt.Fprintf(stdout, "    error: %s\n", plan.Error)
+		}
+		for _, warning := range plan.Warnings {
+			fmt.Fprintf(stdout, "    warning: %s\n", warning)
 		}
 		for _, reason := range plan.Reasons {
 			fmt.Fprintf(stdout, "    reason: %s\n", reason)
@@ -269,7 +285,7 @@ func printAgentHookGroups(stdout io.Writer, groups []agenthooks.Group, indent st
 	}
 }
 
-func agentHooksApply(args []string, stdout, stderr io.Writer) int {
+func agentHooksApply(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs, opts := agentHooksBaseFlags("quota-cli agent hooks apply", io.Discard)
 	runtime := fs.String("runtime", "all", "Runtime: all, claude, or codex")
 	binary := fs.String("binary", "", "quota-cli binary path for hook commands")
@@ -329,8 +345,21 @@ func agentHooksApply(args []string, stdout, stderr io.Writer) int {
 	var plans []agenthooks.HookPlan
 	var applyErrors []string
 	for _, target := range targets {
+		if err := ctx.Err(); err != nil {
+			fmt.Fprintln(stderr, err)
+			applyErrors = append(applyErrors, err.Error())
+			break
+		}
 		plan, err := agenthooks.ApplyPath(target.runtime, target.path, hookBinary, policyDir)
 		plan.Account = target.account
+		inspectAgentHookActivation(ctx, &plan)
+		if err == nil && plan.Runtime == "codex" && plan.Activation != "ready" {
+			details := append([]string{}, plan.Reasons...)
+			if plan.Error != "" {
+				details = append(details, plan.Error)
+			}
+			err = fmt.Errorf("Codex hook account=%s saved, activation=%s: %s", plan.Account, plan.Activation, strings.Join(details, "; "))
+		}
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			applyErrors = append(applyErrors, err.Error())
@@ -349,8 +378,14 @@ func agentHooksApply(args []string, stdout, stderr io.Writer) int {
 		return writeJSONWithCode(stdout, stderr, report, failed)
 	}
 	for _, plan := range plans {
+		for _, warning := range plan.Warnings {
+			fmt.Fprintf(stdout, "warning account=%s: %s\n", plan.Account, warning)
+		}
 		if plan.Present {
 			fmt.Fprintf(stdout, "installed %s hook account=%s: %s\n", plan.Runtime, plan.Account, plan.Path)
+			if plan.Activation != "" {
+				fmt.Fprintf(stdout, "  activation: %s\n", plan.Activation)
+			}
 		}
 	}
 	if failed {
@@ -414,7 +449,7 @@ func agentHooksVerify(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func agentHooksDoctor(args []string, stdout, stderr io.Writer) int {
+func agentHooksDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs, opts := agentHooksBaseFlags("quota-cli agent hooks doctor", io.Discard)
 	runtime := fs.String("runtime", "all", "Runtime: all, claude, or codex")
 	binary := fs.String("binary", "", "quota-cli binary path for hook commands")
@@ -452,6 +487,7 @@ func agentHooksDoctor(args []string, stdout, stderr io.Writer) int {
 		for _, target := range targets {
 			plan := agenthooks.DetectPath(target.runtime, target.path, *binary, policyDir)
 			plan.Account = target.account
+			inspectAgentHookActivation(ctx, &plan)
 			hooks = append(hooks, plan)
 		}
 	}
@@ -496,8 +532,14 @@ func agentHooksDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 	for i, hook := range hooks {
 		fmt.Fprintf(stdout, "%s %s hook account=%s path=%s\n", statuses[i], hook.Runtime, hook.Account, hook.Path)
+		if hook.Activation != "" {
+			fmt.Fprintf(stdout, "  activation: %s\n", hook.Activation)
+		}
 		if hook.Error != "" {
 			fmt.Fprintf(stdout, "  %s\n", hook.Error)
+		}
+		for _, warning := range hook.Warnings {
+			fmt.Fprintf(stdout, "  warning: %s\n", warning)
 		}
 		for _, reason := range hook.Reasons {
 			fmt.Fprintf(stdout, "  reason: %s\n", reason)

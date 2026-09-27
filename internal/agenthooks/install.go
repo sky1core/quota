@@ -12,15 +12,17 @@ import (
 const hookStatusMessage = "Checking agent command policy"
 
 type HookPlan struct {
-	Runtime   string   `json:"runtime"`
-	Account   string   `json:"account,omitempty"`
-	Path      string   `json:"path"`
-	Command   string   `json:"command"`
-	Binary    string   `json:"binary,omitempty"`
-	PolicyDir string   `json:"policyDir,omitempty"`
-	Present   bool     `json:"present"`
-	Reasons   []string `json:"reasons,omitempty"`
-	Error     string   `json:"error,omitempty"`
+	Warnings   []string `json:"warnings,omitempty"`
+	Activation string   `json:"activation,omitempty"`
+	Runtime    string   `json:"runtime"`
+	Account    string   `json:"account,omitempty"`
+	Path       string   `json:"path"`
+	Command    string   `json:"command"`
+	Binary     string   `json:"binary,omitempty"`
+	PolicyDir  string   `json:"policyDir,omitempty"`
+	Present    bool     `json:"present"`
+	Reasons    []string `json:"reasons,omitempty"`
+	Error      string   `json:"error,omitempty"`
 }
 
 func HookCommand(runtime, binary, policyDir string) string {
@@ -202,6 +204,12 @@ func inspectHookPlan(plan *HookPlan, root map[string]any, runtime, binary, polic
 		plan.Present = true
 		plan.Binary = foundBinary
 		plan.Command = HookCommand(runtime, foundBinary, policyDir)
+		if runtime == "codex" {
+			plan.Command = hookMaps[0]["command"].(string)
+			if len(hookMaps) != 1 {
+				plan.Reasons = append(plan.Reasons, "multiple managed Codex evaluator hooks are installed; review /hooks and run agent hooks apply to keep one managed evaluator")
+			}
+		}
 		for _, hookMap := range hookMaps {
 			plan.Reasons = append(plan.Reasons, unsupportedHookVariants(hookMap)...)
 		}

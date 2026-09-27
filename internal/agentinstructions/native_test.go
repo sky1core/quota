@@ -102,6 +102,86 @@ func TestNativeHookReadiness(t *testing.T) {
 	}
 }
 
+func TestNativePreToolUseReadiness(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*NativeHook)
+		state  string
+	}{
+		{"trusted", func(*NativeHook) {}, "configured"},
+		{"managed", func(h *NativeHook) { h.TrustStatus = "managed" }, "configured"},
+		{"untrusted", func(h *NativeHook) { h.TrustStatus = "untrusted" }, "needs-trust"},
+		{"modified", func(h *NativeHook) { h.TrustStatus = "modified" }, "needs-trust"},
+		{"disabled", func(h *NativeHook) { disabled := false; h.Enabled = &disabled }, "blocked"},
+		{"async", func(h *NativeHook) { h.Async = true }, "blocked"},
+		{"missing matcher", func(h *NativeHook) { h.Matcher = nil }, "blocked"},
+		{"wrong matcher", func(h *NativeHook) { matcher := "Read"; h.Matcher = &matcher }, "blocked"},
+		{"wildcard matcher", func(h *NativeHook) { matcher := "*"; h.Matcher = &matcher }, "blocked"},
+		{"changed command", func(h *NativeHook) { h.Command += " --other" }, "blocked"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hook := syntheticNativeHook()
+			matcher := "Bash"
+			hook.Event, hook.Command, hook.Matcher = "preToolUse", "example-policy-hook", &matcher
+			tc.mutate(&hook)
+			report := NativeReport{}
+			if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{hook}), "/example/repo", map[string]string{"preToolUse": "example-policy-hook"}, &report); err != nil {
+				t.Fatal(err)
+			}
+			if report.State != tc.state {
+				t.Fatalf("state = %s, want %s; report = %+v", report.State, tc.state, report)
+			}
+			if tc.name != "changed command" && (!report.Hooks[0].Matched || report.Hooks[0].SourcePath != hook.SourcePath || report.Hooks[0].Matcher == nil && tc.name != "missing matcher") {
+				t.Fatalf("matched policy hook lost source or matcher metadata: %+v", report.Hooks[0])
+			}
+		})
+	}
+}
+
+func TestNativePreToolUseIgnoresInstructionHooks(t *testing.T) {
+	policy := syntheticNativeHook()
+	matcher := "Bash"
+	policy.Event, policy.Command, policy.Matcher = "preToolUse", "example-policy-hook", &matcher
+	instruction := syntheticNativeHook()
+	instruction.Command = `/alternate/quota-cli agent instructions _hook --agent=codex --event=SessionStart`
+	report := NativeReport{}
+	if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{instruction, policy}), "/example/repo", map[string]string{"preToolUse": policy.Command}, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.State != "configured" || report.Hooks[0].Command != "" || report.Hooks[0].Matched || !report.Hooks[1].Matched {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
+func TestNativePreToolUseDuplicateAndMissingMetadata(t *testing.T) {
+	policy := syntheticNativeHook()
+	matcher := "Bash"
+	policy.Event, policy.Command, policy.Matcher = "preToolUse", "example-policy-hook", &matcher
+	expected := map[string]string{"preToolUse": policy.Command}
+	report := NativeReport{}
+	if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{policy, policy}), "/example/repo", expected, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.State != "blocked" || len(report.Issues) == 0 {
+		t.Fatalf("duplicate report = %+v", report)
+	}
+	for _, field := range []string{"key", "currentHash", "isManaged", "sourcePath", "enabled"} {
+		raw := syntheticNativeHooks(t, []NativeHook{policy})
+		var decoded map[string]any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		delete(decoded["data"].([]any)[0].(map[string]any)["hooks"].([]any)[0].(map[string]any), field)
+		raw, err := json.Marshal(decoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := parseNativeHooks(raw, "/example/repo", expected, &NativeReport{}); err == nil {
+			t.Fatalf("accepted preToolUse hook without %s", field)
+		}
+	}
+}
+
 func TestNativeMergedSourcesRejectDuplicateDelivery(t *testing.T) {
 	first := syntheticNativeHook()
 	second := syntheticNativeHook()

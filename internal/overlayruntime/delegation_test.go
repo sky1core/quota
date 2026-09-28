@@ -41,6 +41,9 @@ func TestDelegationPreparesUntrackedInstructionsToMatchPrimary(t *testing.T) {
 			write(t, filepath.Join(repo, "AGENTS.md"), "primary root\n")
 			write(t, filepath.Join(repo, "sub", "AGENTS.md"), "primary nested\n")
 			write(t, filepath.Join(repo, "other", "AGENTS.md"), "primary other\n")
+			write(t, filepath.Join(repo, "sub", "deep", "AGENTS.md"), "primary deep\n")
+			write(t, filepath.Join(repo, ".gitignore"), "AGENTS.local.md\nvendor/\n")
+			write(t, filepath.Join(repo, "vendor", "pkg", "AGENTS.md"), "primary vendored\n")
 			start := filepath.Join(linked, "sub")
 			if err := os.Mkdir(start, 0o755); err != nil {
 				t.Fatal(err)
@@ -56,8 +59,10 @@ func TestDelegationPreparesUntrackedInstructionsToMatchPrimary(t *testing.T) {
 			if got := readFile(t, nested); got != "primary nested\n" {
 				t.Fatalf("nested = %q", got)
 			}
-			if _, err := os.Lstat(filepath.Join(linked, "other", "AGENTS.md")); !os.IsNotExist(err) {
-				t.Fatalf("instructions outside the start path were prepared: %v", err)
+			for rel, want := range map[string]string{"other/AGENTS.md": "primary other\n", "sub/deep/AGENTS.md": "primary deep\n", "vendor/pkg/AGENTS.md": "primary vendored\n"} {
+				if got := readFile(t, filepath.Join(linked, filepath.FromSlash(rel))); got != want {
+					t.Fatalf("%s = %q", rel, got)
+				}
 			}
 			if info, err := os.Lstat(root); err != nil || !info.Mode().IsRegular() {
 				t.Fatalf("prepared file is not regular: %v %v", info, err)
@@ -221,6 +226,55 @@ func TestDelegationRejectsUnpreparableTargets(t *testing.T) {
 	if link, err := os.Readlink(target); err != nil || link != elsewhere || readFile(t, elsewhere) != "linked content\n" {
 		t.Fatalf("symlink target modified: %q %v", link, err)
 	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(repo, "newdir", "AGENTS.md"), "new directory\n")
+	write(t, filepath.Join(linked, "newdir"), "a file where the directory belongs\n")
+	err = prepare(t, linked, "claude")
+	if err == nil || !strings.Contains(err.Error(), filepath.Join(linked, "newdir", "AGENTS.md")) || !strings.Contains(err.Error(), filepath.Join(repo, "newdir", "AGENTS.md")) {
+		t.Fatalf("file blocking the target directory accepted: %v", err)
+	}
+	if got := readFile(t, filepath.Join(linked, "newdir")); got != "a file where the directory belongs\n" {
+		t.Fatalf("blocking file modified: %q", got)
+	}
+	if err := os.Remove(filepath.Join(linked, "newdir")); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(linked, "newdir")); err != nil {
+		t.Fatal(err)
+	}
+	err = prepare(t, linked, "codex")
+	if err == nil || !strings.Contains(err.Error(), filepath.Join(linked, "newdir")) || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("symlinked parent directory accepted: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatalf("instructions written outside the worktree: %v", err)
+	}
+}
+
+func TestDelegationLeavesNestedRepositoryFilesToThatRepository(t *testing.T) {
+	testHome(t)
+	repo, linked := untrackedInstructionWorktree(t)
+	write(t, filepath.Join(repo, "vendor", "pkg", "AGENTS.md"), "primary vendored\n")
+	nested := filepath.Join(linked, "vendor", "pkg")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, nested, "init", "-q")
+	write(t, filepath.Join(nested, "AGENTS.md"), "nested repository\n")
+	git(t, nested, "add", "AGENTS.md")
+	git(t, nested, "commit", "-qm", "nested")
+	if err := prepare(t, linked, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(nested, "AGENTS.md")); got != "nested repository\n" {
+		t.Fatalf("file tracked by the nested repository overwritten: %q", got)
+	}
+	if got := readFile(t, filepath.Join(linked, "AGENTS.md")); got != "# shared placeholder\n" {
+		t.Fatalf("root not prepared: %q", got)
+	}
 }
 
 func TestDelegationRejectsWorktreeCreatedAfterLaunch(t *testing.T) {
@@ -249,12 +303,11 @@ func TestDelegationRejectsWorktreeCreatedAfterLaunch(t *testing.T) {
 	git(t, repo, "commit", "-qm", "track root")
 	nested := filepath.Join(repo, "sub", "AGENTS.md")
 	write(t, nested, "nested\n")
-	err := PrepareDelegationInstructions(context.Background(), filepath.Dir(nested), "codex", true)
-	if err == nil || !strings.Contains(err.Error(), nested) {
-		t.Fatalf("untracked nested instructions allowed: %v", err)
-	}
-	if err := PrepareDelegationInstructions(context.Background(), repo, "codex", true); err != nil {
-		t.Fatalf("nested instructions outside the start path blocked: %v", err)
+	for _, start := range []string{filepath.Dir(nested), repo} {
+		err := PrepareDelegationInstructions(context.Background(), start, "codex", true)
+		if err == nil || !strings.Contains(err.Error(), nested) {
+			t.Fatalf("untracked nested instructions allowed from %s: %v", start, err)
+		}
 	}
 	if err := os.Remove(nested); err != nil {
 		t.Fatal(err)
@@ -272,6 +325,8 @@ func TestDelegationPreparesFromBarePrimary(t *testing.T) {
 	bare = resolvePath(bare)
 	checkout := filepath.Join(filepath.Dir(repo), "checkout")
 	git(t, bare, "worktree", "add", "-q", checkout, "main")
+	git(t, bare, "branch", "AGENTS.md")
+	write(t, filepath.Join(bare, "remotes", "AGENTS.md"), "URL: legacy remote\n")
 	write(t, filepath.Join(bare, "sub", "AGENTS.md"), "bare nested\n")
 	start := filepath.Join(checkout, "sub")
 	if err := os.Mkdir(start, 0o755); err != nil {
@@ -286,11 +341,56 @@ func TestDelegationPreparesFromBarePrimary(t *testing.T) {
 	if got := readFile(t, filepath.Join(checkout, "AGENTS.md")); got != "# shared placeholder\n" {
 		t.Fatalf("tracked checkout root changed: %q", got)
 	}
+	for _, rel := range []string{"refs/heads/AGENTS.md", "remotes/AGENTS.md"} {
+		if _, err := os.Lstat(filepath.Join(checkout, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Fatalf("bare repository internals %s copied as instructions: %v", rel, err)
+		}
+	}
+}
+
+func TestDelegationFailsWhenPrimaryCannotBeListedCompletely(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions do not restrict root")
+	}
+	testHome(t)
+	repo, linked := untrackedInstructionWorktree(t)
+	write(t, filepath.Join(repo, "sub", "AGENTS.md"), "hidden nested\n")
+	if err := os.Chmod(filepath.Join(repo, "sub"), 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(filepath.Join(repo, "sub"), 0o755) })
+	for _, createsWorktree := range []bool{false, true} {
+		err := PrepareDelegationInstructions(context.Background(), linked, "codex", createsWorktree)
+		if err == nil || !strings.Contains(err.Error(), "sub") {
+			t.Fatalf("createsWorktree=%t: unreadable primary directory ignored: %v", createsWorktree, err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(linked, "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatalf("preparation proceeded despite an incomplete listing: %v", err)
+	}
+	if err := os.Chmod(filepath.Join(repo, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "config", "core.fsyncObjectFiles", "true")
+	if _, stderr, err := gitOutputWithStderr(context.Background(), repo, "ls-files", "--others"); err != nil || !strings.Contains(stderr, "warning:") {
+		t.Skipf("git did not emit a benign warning to exercise the filter: %q %v", stderr, err)
+	}
+	t.Setenv("GIT_TRACE", "1")
+	if err := prepare(t, linked, "codex"); err != nil {
+		t.Fatalf("benign git diagnostics treated as an incomplete listing: %v", err)
+	}
+	if got := readFile(t, filepath.Join(linked, "sub", "AGENTS.md")); got != "hidden nested\n" {
+		t.Fatalf("nested not prepared after the directory became readable: %q", got)
+	}
 }
 
 func TestDelegationRejectsInvalidInstructionSources(t *testing.T) {
 	for _, file := range []string{"AGENTS.md", "AGENTS.local.md", "sub/AGENTS.md"} {
-		for _, kind := range []string{"directory", "directory with tracked child", "symlink", "invalid UTF-8", "NUL"} {
+		kinds := []string{"symlink", "invalid UTF-8", "NUL"}
+		if file == "AGENTS.local.md" {
+			kinds = append(kinds, "directory", "directory with tracked child")
+		}
+		for _, kind := range kinds {
 			t.Run(file+"/"+kind, func(t *testing.T) {
 				testHome(t)
 				repo := newRepo(t)
@@ -363,9 +463,12 @@ func TestDelegationDoesNotRedirectOrHideInspectionFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Run("Git override", func(t *testing.T) {
-		t.Setenv("GIT_WORK_TREE", repo)
-		if err := prepare(t, repo, "codex"); err == nil || !strings.Contains(err.Error(), "GIT_WORK_TREE") {
-			t.Fatalf("Git override accepted: %v", err)
+		for name, value := range map[string]string{"GIT_WORK_TREE": repo, "GIT_LITERAL_PATHSPECS": "1", "GIT_GLOB_PATHSPECS": "1", "GIT_NOGLOB_PATHSPECS": "1", "GIT_ICASE_PATHSPECS": "1"} {
+			t.Setenv(name, value)
+			if err := prepare(t, repo, "codex"); err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("%s override accepted: %v", name, err)
+			}
+			os.Unsetenv(name)
 		}
 	})
 	t.Run("missing Git", func(t *testing.T) {

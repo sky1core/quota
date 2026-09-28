@@ -134,7 +134,7 @@ Codex 계정은 해당 모델·effort를 목록에 제공할 때만 후보가 �
 자동 실행은 `--` 뒤 프롬프트 하나와 stdin을 전달한다. provider 전용 옵션이 필요하면 `--agent`를 명시한다.
 읽기 중심 리뷰에는 `--` 앞에 `--read-only`를 추가한다. Claude는 `Read·Glob·Grep`만 제공하고 MCP 도구를 차단하므로 셸·테스트 실행은 불가능하다. Codex는 `--sandbox read-only`로 실행하며 기존 허용·금지 규칙을 유지한다. [Codex의 `allow` 규칙](https://learn.chatgpt.com/docs/agent-configuration/rules)으로 사전 허용된 명령은 샌드박스 밖에서 실행될 수 있으므로, 모든 명령의 쓰기를 금지하는 옵션은 아니다. 이 옵션은 provider별 실행 제한을 지정하며, 양쪽의 동일한 OS 격리나 기존 hook·외부 연동 전체의 부작용 차단을 보장하지 않는다. 옵션을 생략하면 기존 동작을 유지한다.
 
-**위임을 시작할 worktree의 `AGENTS.md`를 에이전트 실행 전에 primary 원본과 같게 만든다.** 대상은 primary가 Git으로 추적하지 않는 파일(ignore 포함)뿐이고, 추적 파일은 checkout에 맡긴다. 없으면 만들고 내용이 다르면 원본 내용으로 다시 쓴 뒤 일치를 확인한다. 쓰기·확인에 실패하면 원본·대상 경로와 이유를 출력하고 오류로 종료한다. 원본에 없는 파일은 요구하거나 만들거나 지우지 않는다. `--worktree`처럼 실행 뒤 만들어지는 worktree는 준비할 수 없으므로, primary에 미추적 `AGENTS.md`가 있으면 실행하지 않는다. worktree를 먼저 만들고 그 경로로 위임한다. `AGENTS.local.md`는 세션 시작 hook이 primary 원본을 직접 읽으므로 worktree 복사본은 필요 없다. 세부 판정은 [위임 시작 시 지침 준비·검사](SPEC.md)를 따른다.
+**위임을 시작할 worktree의 `AGENTS.md`를 에이전트 실행 전에 primary 원본과 같게 만든다.** 대상은 primary 루트부터 하위 폴더 전체에서 Git으로 추적하지 않는 파일(ignore 포함)뿐이고, 추적 파일은 checkout에 맡긴다. 없으면 만들고 내용이 다르면 원본 내용으로 다시 쓴 뒤 일치를 확인한다. 쓰기·확인에 실패하면 원본·대상 경로와 이유를 출력하고 오류로 종료한다. 원본에 없는 파일은 요구하거나 만들거나 지우지 않는다. `--worktree`처럼 실행 뒤 만들어지는 worktree는 준비할 수 없으므로, primary에 미추적 `AGENTS.md`가 있으면 실행하지 않는다. worktree를 먼저 만들고 그 경로로 위임한다. `AGENTS.local.md`는 세션 시작 hook이 primary 원본을 직접 읽으므로 worktree 복사본은 필요 없다. 세부 판정은 [위임 시작 시 지침 준비·검사](SPEC.md)를 따른다.
 
 등록된 같은 provider 계정들의 75초 공유 캐시를 우선 사용하고, 필요한 계정만 quota를 실측한다.
 신규 작업은 **5시간 quota 창이 있으면 잔여량이 25% 이상**이어야 배정한다. Claude의 `session`, Codex의

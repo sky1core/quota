@@ -1,11 +1,15 @@
 package overlayruntime
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/sky1core/quota/internal/atomicfile"
 )
@@ -25,15 +29,11 @@ func PrepareDelegationInstructions(ctx context.Context, dir, agent string, creat
 	if err != nil {
 		return fmt.Errorf("%s: %w", dir, err)
 	}
-	rel, err := filepath.Rel(r.Top, r.Start)
+	sources, err := r.untrackedInstructionSources()
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %w", dir, err)
 	}
-	paths := []string{"AGENTS.md"}
-	for ; rel != "."; rel = filepath.Dir(rel) {
-		paths = append(paths, filepath.Join(rel, "AGENTS.md"))
-	}
-	for _, rel := range paths {
+	for _, rel := range sources {
 		if err := r.prepareSharedInstructions(rel, agent, createsWorktree); err != nil {
 			return err
 		}
@@ -48,24 +48,67 @@ func PrepareDelegationInstructions(ctx context.Context, dir, agent string, creat
 	return nil
 }
 
+func (r repoContext) untrackedInstructionSources() ([]string, error) {
+	if r.Root == r.Common {
+		return instructionFilesBelow(r.Root)
+	}
+	out, stderr, err := gitOutputWithStderr(r.Context, r.Root, "ls-files", "--others", "-z", "--", ":(glob)**/AGENTS.md")
+	if err != nil {
+		return nil, err
+	}
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "warning: could not open directory") {
+			return nil, fmt.Errorf("git could not list every untracked file under %s: %s", r.Root, strings.TrimSpace(line))
+		}
+	}
+	var rels []string
+	for _, entry := range bytes.Split(out, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		if !utf8.Valid(entry) {
+			return nil, fmt.Errorf("untracked AGENTS.md path under %s is not valid UTF-8", r.Root)
+		}
+		rels = append(rels, filepath.FromSlash(string(entry)))
+	}
+	return rels, nil
+}
+
+var bareRepositoryEntries = map[string]bool{"branches": true, "common": true, "hooks": true, "info": true, "logs": true, "lost-found": true, "modules": true, "objects": true, "refs": true, "reftable": true, "remotes": true, "rr-cache": true, "svn": true, "worktrees": true}
+
+func instructionFilesBelow(root string) ([]string, error) {
+	var rels []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path == root {
+				return nil
+			}
+			if (filepath.Dir(path) == root && bareRepositoryEntries[d.Name()]) || exists(filepath.Join(path, ".git")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() != "AGENTS.md" {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rels = append(rels, rel)
+		return nil
+	})
+	return rels, err
+}
+
 func (r repoContext) prepareSharedInstructions(rel, agent string, createsWorktree bool) error {
 	source := filepath.Join(r.Root, rel)
-	if !exists(source) {
-		return nil
-	}
-	tracked, err := r.primaryTracked(source)
+	body, _, err := checkInstructionSource(source, true)
 	if err != nil {
 		return err
-	}
-	if tracked {
-		return nil
-	}
-	body, present, err := checkInstructionSource(source, false)
-	if err != nil {
-		return err
-	}
-	if !present {
-		return nil
 	}
 	if createsWorktree {
 		return fmt.Errorf("%s is not tracked by Git, so the worktree that %s --worktree creates after launch would start without it; create the worktree first and delegate into that directory", source, agent)
@@ -74,9 +117,12 @@ func (r repoContext) prepareSharedInstructions(rel, agent string, createsWorktre
 		return nil
 	}
 	target := filepath.Join(r.Top, rel)
-	tracked, err = r.tracked(target)
+	if err := rejectSymlinkedParents(r.Top, target); err != nil {
+		return fmt.Errorf("cannot prepare %s from %s: %w", target, source, err)
+	}
+	tracked, err := r.tracked(target)
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot prepare %s from %s: %w", target, source, err)
 	}
 	if tracked {
 		return nil
@@ -87,6 +133,9 @@ func (r repoContext) prepareSharedInstructions(rel, agent string, createsWorktre
 	}
 	if targetPresent && current == body {
 		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return fmt.Errorf("cannot prepare %s from %s: %w", target, source, err)
 	}
 	if err := atomicfile.Save(target, []byte(body), 0o644, true); err != nil {
 		return fmt.Errorf("cannot prepare %s from %s: %w", target, source, err)
@@ -101,11 +150,23 @@ func (r repoContext) prepareSharedInstructions(rel, agent string, createsWorktre
 	return nil
 }
 
-func (r repoContext) primaryTracked(path string) (bool, error) {
-	if r.Root == r.Common {
-		return false, nil
+func rejectSymlinkedParents(top, target string) error {
+	dir := filepath.Dir(target)
+	for dir != top {
+		info, err := os.Lstat(dir)
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symlink", dir)
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return fmt.Errorf("%s is outside %s", target, top)
+		}
+		dir = parent
 	}
-	return r.tracked(path)
+	return nil
 }
 
 func checkInstructionSource(path string, required bool) (string, bool, error) {

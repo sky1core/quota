@@ -10,6 +10,8 @@ import (
 	"github.com/sky1core/quota/internal/childprocess"
 )
 
+var pathspecEnvironment = []string{"GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"}
+
 func ValidateGitEnvironment(ctx context.Context, dir string) error {
 	hasGitEnvironment := false
 	for _, entry := range os.Environ() {
@@ -40,8 +42,13 @@ func ValidateGitEnvironment(ctx context.Context, dir string) error {
 			overrides = append(overrides, name)
 		}
 	}
+	for _, name := range pathspecEnvironment {
+		if _, exists := os.LookupEnv(name); exists {
+			overrides = append(overrides, name)
+		}
+	}
 	if len(overrides) > 0 {
-		return fmt.Errorf("repository-local Git environment variables are not supported: %s; unset them before running", strings.Join(overrides, ", "))
+		return fmt.Errorf("Git environment variables that change repository or pathspec interpretation are not supported: %s; unset them before running", strings.Join(overrides, ", "))
 	}
 	if checkConfig {
 		return validateCommandGitConfig(ctx, dir)

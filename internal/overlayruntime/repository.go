@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/sky1core/quota/internal/childprocess"
@@ -28,6 +29,11 @@ type repoContext struct {
 func (r repoContext) localSource() string { return filepath.Join(r.Root, localInstructions) }
 
 func gitOutput(ctx context.Context, cwd string, args ...string) ([]byte, error) {
+	out, _, err := gitOutputWithStderr(ctx, cwd, args...)
+	return out, err
+}
+
+func gitOutputWithStderr(ctx context.Context, cwd string, args ...string) ([]byte, string, error) {
 	cmd := childprocess.CommandContext(ctx, "git", args...)
 	cmd.Dir = cwd
 	cmd.Env = append(cmd.Environ(), "LC_ALL=C")
@@ -37,11 +43,11 @@ func gitOutput(ctx context.Context, cwd string, args ...string) ([]byte, error) 
 	err := childprocess.Run(cmd)
 	if err != nil {
 		if strings.HasPrefix(stderr.String(), "fatal: not a git repository (or any") {
-			return out.Bytes(), fmt.Errorf("%w: %s", ErrOutsideRepository, strings.TrimSpace(stderr.String()))
+			return out.Bytes(), stderr.String(), fmt.Errorf("%w: %s", ErrOutsideRepository, strings.TrimSpace(stderr.String()))
 		}
-		return out.Bytes(), fmt.Errorf("git %s failed: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr.String()), err)
+		return out.Bytes(), stderr.String(), fmt.Errorf("git %s failed: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr.String()), err)
 	}
-	return out.Bytes(), nil
+	return out.Bytes(), stderr.String(), nil
 }
 
 func gitBoolean(e error) (bool, error) {
@@ -55,13 +61,34 @@ func gitBoolean(e error) (bool, error) {
 	return false, e
 }
 
+func isNotDirectory(err error) bool { return errors.Is(err, syscall.ENOTDIR) }
+
 func (r repoContext) tracked(path string) (bool, error) {
-	out, e := gitOutput(r.Context, filepath.Dir(path), "ls-files", "-z", "--error-unmatch", "--", path)
+	cwd := filepath.Dir(path)
+	for {
+		info, err := os.Stat(cwd)
+		if err == nil && info.IsDir() {
+			break
+		}
+		if err != nil && !os.IsNotExist(err) && !isNotDirectory(err) {
+			return false, err
+		}
+		parent := filepath.Dir(cwd)
+		if parent == cwd {
+			return false, fmt.Errorf("no existing directory above %s", path)
+		}
+		cwd = parent
+	}
+	rel, err := filepath.Rel(cwd, path)
+	if err != nil {
+		return false, err
+	}
+	out, e := gitOutput(r.Context, cwd, "ls-files", "-z", "--error-unmatch", "--", ":(literal)"+rel)
 	if ok, err := gitBoolean(e); !ok {
 		return false, err
 	}
 	for _, entry := range strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00") {
-		if entry == filepath.Base(path) {
+		if entry == filepath.ToSlash(rel) {
 			return true, nil
 		}
 	}

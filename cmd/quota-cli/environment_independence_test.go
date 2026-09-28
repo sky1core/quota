@@ -340,7 +340,11 @@ func collectCallerEnvTargetSnapshot(cfg config.Config) (callerEnvTargetSnapshot,
 		snapshot.AgentHooks = append(snapshot.AgentHooks, target.runtime+"/"+target.account+"="+target.path)
 	}
 
-	installations, installErrs := instructionInstallations("/usr/local/bin/quota-cli", cfg, []string{"claude", "codex"})
+	executable, err := os.Executable()
+	if err != nil {
+		return snapshot, err
+	}
+	installations, installErrs := instructionInstallations(executable, cfg, []string{"claude", "codex"})
 	if len(installErrs) != 0 {
 		return snapshot, fmt.Errorf("agent instructions: %v", installErrs)
 	}

@@ -22,11 +22,71 @@ func testInstallation(t *testing.T) *Installation {
 	if err != nil {
 		t.Fatal(err)
 	}
-	i, err := NewInstallation("/example/quota-cli", targets)
+	i, err := NewInstallation(testExecutable(t, home), targets)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return i
+}
+
+func testExecutable(t *testing.T, home string) string {
+	t.Helper()
+	path := filepath.Join(home, "bin", "quota-cli")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestInstallationUsesTheResolvedExecutableForHookCommands(t *testing.T) {
+	i := testInstallation(t)
+	link := filepath.Join(filepath.Dir(i.executable), "linked-quota-cli")
+	if err := os.Symlink(i.executable, link); err != nil {
+		t.Fatal(err)
+	}
+	viaLink, err := NewInstallation(link, i.targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if viaLink.executable != i.executable {
+		t.Fatalf("symlink %s was not resolved to %s: %s", link, i.executable, viaLink.executable)
+	}
+	if _, err := viaLink.Apply(InstallPlan{Agents: []string{"claude", "codex"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{i.targets.ClaudeSettings, i.targets.CodexHooks} {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(body), link) || !strings.Contains(string(body), i.executable) {
+			t.Fatalf("%s does not reference the resolved executable: %s", path, body)
+		}
+	}
+	statuses, err := i.Inspect([]string{"claude", "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range statuses {
+		if !s.Configured || len(s.Problems) != 0 {
+			t.Fatalf("%s installed through the symlink is not configured for the resolved path: %+v", s.Agent, s)
+		}
+	}
+	plan, err := viaLink.Plan([]string{"claude", "codex"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range plan.Changes {
+		if change.Changed {
+			t.Fatalf("setup through the symlink would rewrite %s", change.Path)
+		}
+	}
+	if _, err := NewInstallation(filepath.Join(filepath.Dir(i.executable), "missing-quota-cli"), i.targets); err == nil {
+		t.Fatal("missing executable accepted")
+	}
 }
 
 func TestInstallationInspectsAndRepairsPromptGuard(t *testing.T) {

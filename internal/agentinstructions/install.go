@@ -92,7 +92,11 @@ func NewInstallation(executable string, targets InstallTargets) (*Installation, 
 	if !filepath.IsAbs(executable) || strings.ContainsAny(executable, "\x00\r\n") {
 		return nil, fmt.Errorf("executable must be an absolute path")
 	}
-	return &Installation{executable, targets}, nil
+	resolved, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve executable %s: %w", executable, err)
+	}
+	return &Installation{resolved, targets}, nil
 }
 func (i *Installation) resolveSelectedTargets(agents []string) (*Installation, error) {
 	resolved := *i

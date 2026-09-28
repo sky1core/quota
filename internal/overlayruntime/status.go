@@ -34,7 +34,12 @@ func CheckRepository(ctx context.Context, dir, agent string, options CheckOption
 		return status, err
 	}
 	status.Checkout, status.Primary, status.LocalInstructions = r.Top, r.Root, r.localSource()
-	body, notice, present, err := readLocalInstructions(r.localSource())
+	includeWarnings, err := r.worktreeIncludeWarnings(agent)
+	if err != nil {
+		status.Problems = append(status.Problems, err.Error())
+	}
+	status.Warnings = append(status.Warnings, includeWarnings...)
+	body, notice, present, err := readInstructions(r.localSource())
 	if err != nil {
 		return status, err
 	}
@@ -66,6 +71,13 @@ func CheckRepository(ctx context.Context, dir, agent string, options CheckOption
 			status.Warnings = append(status.Warnings, settings+": project instruction mode claude-md does not read AGENTS.md natively")
 		case mode == claudeModeManagedOnly:
 			status.Warnings = append(status.Warnings, settings+": project instruction mode managed-only drops project instruction files")
+		}
+		if err == nil {
+			warnings, err := r.claudeWorktreeCreateWarnings(options.ClaudeConfigDir)
+			status.Warnings = append(status.Warnings, warnings...)
+			if err != nil {
+				status.Problems = append(status.Problems, err.Error())
+			}
 		}
 	}
 	return status, nil

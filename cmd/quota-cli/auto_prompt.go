@@ -369,11 +369,7 @@ func runAutoPrompt(ctx context.Context, opts autoPromptOptions) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if err := ctx.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	if err := execDelegated(ctx, bin, nil, autoPromptArgs(account, opts), autoPromptEnv(account, os.Environ())); err != nil {
+	if err := execPreparedDelegated(ctx, account.provider, bin, nil, autoPromptArgs(account, opts), autoPromptEnv(account, os.Environ())); err != nil {
 		fmt.Fprintln(os.Stderr, account.provider+" exec error:", err)
 		return 1
 	}

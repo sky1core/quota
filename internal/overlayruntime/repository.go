@@ -56,8 +56,16 @@ func gitBoolean(e error) (bool, error) {
 }
 
 func (r repoContext) tracked(path string) (bool, error) {
-	_, e := gitOutput(r.Context, filepath.Dir(path), "ls-files", "--error-unmatch", "--", path)
-	return gitBoolean(e)
+	out, e := gitOutput(r.Context, filepath.Dir(path), "ls-files", "-z", "--error-unmatch", "--", path)
+	if ok, err := gitBoolean(e); !ok {
+		return false, err
+	}
+	for _, entry := range strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00") {
+		if entry == filepath.Base(path) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func resolvePath(p string) string {
@@ -136,7 +144,7 @@ func resolveContext(ctx context.Context, dir string) (repoContext, error) {
 
 func exists(p string) bool { _, e := os.Lstat(p); return e == nil || !os.IsNotExist(e) }
 
-func readLocalInstructions(path string) (body string, notice string, present bool, err error) {
+func readInstructions(path string) (body string, notice string, present bool, err error) {
 	info, e := os.Lstat(path)
 	if os.IsNotExist(e) {
 		return "", "", false, nil

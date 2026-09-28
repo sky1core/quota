@@ -33,7 +33,7 @@ func hookString(h map[string]any, key string) (string, error) {
 }
 
 func deliversFor(source string) bool {
-	return source == "startup" || source == "clear" || source == "compact"
+	return source == "startup" || source == "clear" || source == "compact" || source == "resume"
 }
 
 func RunSessionStartHook(ctx context.Context, agent string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -50,7 +50,7 @@ func RunSessionStartHook(ctx context.Context, agent string, stdin io.Reader, std
 
 func RunClaudePromptHook(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err := checkClaudePrompt(ctx, stdin); err != nil {
-		reason := fmt.Sprintf("%s: instruction check failed. Required local instructions cannot be treated as fully loaded. Do not perform the user's requested task or call tools. In your next response, explain this instruction-loading problem and its cause to the user. Ask the user to resolve the instruction or inspection error and start a new session before work continues. Do not suggest splitting, truncating, or bypassing the hook limit. Leave instruction files unchanged. Do not claim the instructions loaded successfully.\nCause: %v", cliName, err)
+		reason := fmt.Sprintf("%s: instruction check failed. Required local instructions cannot be treated as fully loaded. Do not perform the user's requested task or call tools. In your next response, explain this instruction-loading problem and its cause to the user. Ask the user to resolve the instruction or inspection error and start a new session or resume the session before work continues. Do not suggest splitting, truncating, or bypassing the hook limit. Leave instruction files unchanged. Do not claim the instructions loaded successfully.\nCause: %v", cliName, err)
 		if err := json.NewEncoder(stdout).Encode(map[string]any{"hookSpecificOutput": map[string]string{"hookEventName": "UserPromptSubmit", "additionalContext": reason}}); err != nil {
 			fmt.Fprintf(stderr, "%s\nCannot write hook response: %v\n", reason, err)
 			return 2
@@ -78,7 +78,7 @@ func checkClaudePrompt(ctx context.Context, stdin io.Reader) error {
 	if err != nil {
 		return err
 	}
-	body, notice, _, err := readLocalInstructions(r.localSource())
+	body, notice, _, err := readInstructions(r.localSource())
 	if err != nil {
 		return err
 	}
@@ -104,6 +104,10 @@ func sessionStart(ctx context.Context, agent string, stdin io.Reader, stdout io.
 	if !deliversFor(source) {
 		return nil
 	}
+	id, _ := h["session_id"].(string)
+	if source == "resume" && id == "" {
+		return nil
+	}
 	if err := ValidateGitEnvironment(ctx, dir); err != nil {
 		return err
 	}
@@ -114,28 +118,64 @@ func sessionStart(ctx context.Context, agent string, stdin io.Reader, stdout io.
 	if err != nil {
 		return err
 	}
+	var session *instructionSession
+	if id != "" {
+		transcript, _ := h["transcript_path"].(string)
+		session, err = r.instructionSession(agent, id, transcript)
+		if err != nil {
+			return err
+		}
+		defer session.close()
+	}
 	notices, err := r.cleanupLegacy()
 	if err != nil {
 		return err
 	}
-	body, notice, _, err := readLocalInstructions(r.localSource())
+	body, notice, present, err := readInstructions(r.localSource())
 	if err != nil {
 		return err
 	}
 	if notice != "" {
 		notices = append([]string{notice}, notices...)
 	}
+	snapshot := localSnapshot(body, present)
+	valid := notice == ""
+	if agent == "claude" && exceedsClaudeHookLimit(sessionStartContext(body, notices)) {
+		valid = false
+	}
+	if source == "resume" && valid {
+		switch {
+		case session.last == "", session.last == snapshot:
+			body = ""
+		case body == "":
+			state := "empty"
+			if !present {
+				state = "absent"
+			}
+			notices = append(notices, "AGENTS.local.md is now "+state+"; instructions previously delivered from it no longer apply.")
+		}
+	}
 	out := sessionStartContext(body, notices)
 	if agent == "claude" && exceedsClaudeHookLimit(out) {
+		valid = false
 		notice := fmt.Sprintf("Instruction hook context was not delivered in full because Claude's instruction hook output exceeds %d UTF-16 units. Tell the user about this failure; do not claim the full instruction context was loaded successfully.", claudeHookContextLimit)
 		out = sessionStartContext("", append([]string{notice}, notices...))
 	}
 	if out == "" {
+		if valid {
+			return session.remember(snapshot)
+		}
 		return nil
 	}
 	encoder := json.NewEncoder(stdout)
 	encoder.SetEscapeHTML(false)
-	return encoder.Encode(map[string]any{"hookSpecificOutput": map[string]string{"hookEventName": "SessionStart", "additionalContext": out}})
+	if err := encoder.Encode(map[string]any{"hookSpecificOutput": map[string]string{"hookEventName": "SessionStart", "additionalContext": out}}); err != nil {
+		return err
+	}
+	if valid {
+		return session.remember(snapshot)
+	}
+	return nil
 }
 
 func sessionStartContext(body string, notices []string) string {

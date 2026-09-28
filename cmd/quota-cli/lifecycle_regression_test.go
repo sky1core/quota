@@ -82,6 +82,7 @@ func TestExplicitExecPromptRunsWithoutModelCatalog(t *testing.T) {
 			}
 			quotacache.Put(quotaTestCacheKey(t, provider, dir), raw, time.Now().Add(time.Hour))
 			cmd := exec.Command(os.Args[0], "-test.run=^TestExplicitExecPromptRunsWithoutModelCatalog$")
+			cmd.Dir = home
 			cmd.Env = append(os.Environ(), "QUOTA_EXEC_NO_CATALOG_HELPER=1", "QUOTA_TEST_PROVIDER="+provider)
 			out, err := cmd.CombinedOutput()
 			if err != nil || strings.TrimSpace(string(out)) != "launched:"+wantArg {
@@ -161,6 +162,7 @@ wait "$child"
 		t.Fatal(err)
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestSignalStopsCLIProbeDescendants$")
+	cmd.Dir = home
 	cmd.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(home, ".config"), "PATH="+binDir, "QUOTA_SIGNAL_HELPER_ARGS="+string(encodedArgs), "QUOTA_BLOCK_STAGE="+stage, "QUOTA_DISCOVERY_STARTED="+started)
 	logFile, err := os.Create(filepath.Join(home, "output"))
 	if err != nil {

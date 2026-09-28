@@ -134,6 +134,8 @@ Codex 계정은 해당 모델·effort를 목록에 제공할 때만 후보가 �
 자동 실행은 `--` 뒤 프롬프트 하나와 stdin을 전달한다. provider 전용 옵션이 필요하면 `--agent`를 명시한다.
 읽기 중심 리뷰에는 `--` 앞에 `--read-only`를 추가한다. Claude는 `Read·Glob·Grep`만 제공하고 MCP 도구를 차단하므로 셸·테스트 실행은 불가능하다. Codex는 `--sandbox read-only`로 실행하며 기존 허용·금지 규칙을 유지한다. [Codex의 `allow` 규칙](https://learn.chatgpt.com/docs/agent-configuration/rules)으로 사전 허용된 명령은 샌드박스 밖에서 실행될 수 있으므로, 모든 명령의 쓰기를 금지하는 옵션은 아니다. 이 옵션은 provider별 실행 제한을 지정하며, 양쪽의 동일한 OS 격리나 기존 hook·외부 연동 전체의 부작용 차단을 보장하지 않는다. 옵션을 생략하면 기존 동작을 유지한다.
 
+**위임을 시작할 worktree의 `AGENTS.md`를 에이전트 실행 전에 primary 원본과 같게 만든다.** 대상은 primary가 Git으로 추적하지 않는 파일(ignore 포함)뿐이고, 추적 파일은 checkout에 맡긴다. 없으면 만들고 내용이 다르면 원본 내용으로 다시 쓴 뒤 일치를 확인한다. 쓰기·확인에 실패하면 원본·대상 경로와 이유를 출력하고 오류로 종료한다. 원본에 없는 파일은 요구하거나 만들거나 지우지 않는다. `--worktree`처럼 실행 뒤 만들어지는 worktree는 준비할 수 없으므로, primary에 미추적 `AGENTS.md`가 있으면 실행하지 않는다. worktree를 먼저 만들고 그 경로로 위임한다. `AGENTS.local.md`는 세션 시작 hook이 primary 원본을 직접 읽으므로 worktree 복사본은 필요 없다. 세부 판정은 [위임 시작 시 지침 준비·검사](SPEC.md)를 따른다.
+
 등록된 같은 provider 계정들의 75초 공유 캐시를 우선 사용하고, 필요한 계정만 quota를 실측한다.
 신규 작업은 **5시간 quota 창이 있으면 잔여량이 25% 이상**이어야 배정한다. Claude의 `session`, Codex의
 `windowMins == 300`으로 판정하며, 정상 응답에 주간 창만 있으면 주간 기준으로 배정한다.
@@ -245,10 +247,12 @@ quota-cli agent hooks eval --runtime=codex
 
 #### Agent instructions — 개인 지침 전달
 
-공용 `AGENTS.md`는 루트·하위 폴더 모두 Claude Code와 Codex CLI가 native로 읽는다. quota는 `AGENTS.md`를
-import·복사·병합·주입하지 않고, CLAUDE 파일을 만들거나 수정하지 않으며, 저장소에 어떤 파일도 만들지 않는다.
-`agent instructions`가 하는 일은 하나다. 각 계정의 세션 시작 hook이 현재 Git 저장소 primary 루트(bare 저장소는 bare 루트)의
-개인 `AGENTS.local.md` 전문을 additionalContext로 넣는다.
+역할은 셋으로 나뉜다. 공용 `AGENTS.md`는 각 worktree의 파일을 Claude Code와 Codex CLI가 native로 읽는다. 개인 `AGENTS.local.md`는 각 계정의 세션 시작 hook이 primary 루트(bare 저장소는 bare 루트)의 원본을 전문으로 전달한다. 위임 worktree의 `AGENTS.md` 준비는 `exec-prompt`가 실행 직전에 맡는다. 세션 시작 hook은 `AGENTS.md`를 복사·주입하지 않고, quota는 CLAUDE 파일이나 Git 설정을 변경하지 않는다.
+
+Claude Code가 스스로 만드는 worktree에 ignore된 지침을 복사할 설정은 생성 원본 checkout에서 `quota-cli agent instructions setup --scope=repo`로 보완한다. `--dry-run`으로 먼저 추가할 항목을 확인할 수 있다. 기존 `.worktreeinclude` 항목을 보존하고 필요한 공용 `AGENTS.md` 경로만 추가하며, 개인 지침·계정 설정은 변경하지 않는다. `status`는 설정 부재·패턴 제외·ignore 누락과 Claude `WorktreeCreate` 설정을 진단한다. 디렉터리 전체가 ignore되어 있으면 실제 파일의 상대경로를 명시하고 생성 결과를 확인한다.
+
+이 파일은 일반 `git worktree add`가 처리하지 않는다. [Claude의 기본 worktree 생성](https://code.claude.com/docs/en/worktrees#copy-gitignored-files-into-worktrees)과 [Codex 앱의 로컬 관리형 worktree](https://learn.chatgpt.com/docs/environments/git-worktrees#copy-ignored-local-files-into-managed-worktrees)에 적용되며, Claude의 사용자 정의 `WorktreeCreate`에서는 해당 훅이 복사를 담당한다. Codex CLI 0.156.0의 `--worktree`에서는 이 파일이 지정한 지침을 복사하지 않는 동작이 확인됐다. 이 설정이 적용되지 않는 worktree라도 `exec-prompt` 위임은 실행 직전 준비로 지침을 갖추고, 실행 뒤 만들어지는 worktree는 위에 적은 대로 미추적 원본이 있으면 실행하지 않는다.
+
 실행부는 quota-cli에 포함되며 별도 스크립트·hook spec이 필요하지 않다.
 Git 2.36 이상, Claude Code 2.1.277 이상·Codex CLI 0.154.0 이상을 대상으로 한다.
 
@@ -285,12 +289,13 @@ Codex가 있으면 설치한 quota hook의 현재 native hook hash만 `config.to
 
 개인 지침은 primary 루트의 `AGENTS.local.md`에 쓰고 Git에서 제외한다. 세션이 시작되면 hook이 hook 입력 `cwd`가 속한
 저장소의 primary `AGENTS.local.md`를 읽어 넣는다. linked worktree도 primary의 파일을 읽는다.
-파일이 없거나 Git 저장소 밖이면 아무것도 넣지 않는다. 아래 검사·한도를 통과한 본문은 분할하거나 자르지 않고 하나의 additionalContext에 전문을 출력한다.
+Git 저장소 밖이거나 처음부터 개인 지침 파일이 없으면 본문을 넣지 않는다. 아래 검사·한도를 통과한 본문은 분할하거나 자르지 않고 하나의 additionalContext에 전문을 출력한다.
 
-- Claude와 Codex 모두 source가 startup·clear·compact일 때 넣고 resume에는 넣지 않는다(이전 전달이 transcript에 남아 있다).
+- Claude와 Codex 모두 startup·clear·compact에는 전문을 전달한다. resume에는 해당 세션에 마지막으로 전달한 내용과 달라졌을 때만 최신 전문을 전달한다. 변경이 없으면 재주입하지 않는다.
+- 세션별 전달 기록에는 본문 대신 내용 해시만 저장한다. 기록이 없는 세션의 resume은 재주입하지 않고 현재 원본 상태를 기록한다. transcript에서 이전 전달 내용을 복원하지 않는다. 빈 파일·삭제로 바뀌면 이전 본문이 더는 적용되지 않음을 알린다. 전달에 실패한 본문은 완료로 기록하지 않는다.
 - SubagentStart와 매 턴 입력에는 붙이지 않는다.
 
-`AGENTS.local.md`는 symlink가 아닌 정규 파일이어야 하고, 유효한 UTF-8이며 NUL이 없고 8MiB 이하여야 한다.
+quota가 복사·주입하는 지침 원본은 symlink가 아닌 정규 파일이어야 하고, 유효한 UTF-8이며 NUL이 없고 8MiB 이하여야 한다.
 위반이면 본문 대신 notice를 넣는다. notice는 `[quota instructions] `로 시작한다.
 Claude에 보낼 최종 문자열(머리줄·notice 포함)이 UTF-16 단위 10,000자를 넘으면, hook은 전문 대신 짧은 오류를 전달하고
 에이전트에게 지침 전달 실패를 사용자에게 알리도록 지시한다. SessionStart 자체는 실행을 막지 못한다.
@@ -298,7 +303,7 @@ Claude의 UserPromptSubmit 검사는 현재 파일의 본문·머리줄이 10,00
 실패와 원인을 에이전트에 전달해 사용자에게 설명하고 도구 호출·요청 작업을 보류하도록 지시한다.
 대화형과 `claude -p` 모두 같은 경로를 사용한다. 이는 에이전트에게 보내는 지시이며, 런타임 강제 차단이나 `-p`의 오류 종료를 보장하지 않는다.
 정상 범위·빈 파일·파일 부재·저장소 밖은 통과한다.
-검사는 본문을 다시 주입하지 않으므로 파일을 고친 뒤에는 새 세션을 시작한다. 과거 전달 성공이나 일회성 정리 notice는 검사하지 않는다.
+매 입력 검사는 본문을 다시 주입하지 않으므로 파일을 고친 뒤에는 새 세션을 시작하거나 기존 세션을 resume한다. 과거 전달 성공이나 일회성 정리 notice는 검사하지 않는다.
 `status`도 본문과 머리줄이 이 한도를 넘으면 FAIL로 보고한다.
 
 **이전 생성물 정리**

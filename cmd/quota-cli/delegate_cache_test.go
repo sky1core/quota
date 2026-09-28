@@ -94,6 +94,7 @@ func TestExecPromptPreservesSharedCache(t *testing.T) {
 					}
 					encoded, _ := json.Marshal(args)
 					cmd := exec.Command(os.Args[0], "-test.run=^TestExecPromptCacheHelper$")
+					cmd.Dir = home
 					cmd.Env = append(os.Environ(), "QUOTA_CACHE_HELPER_ARGS="+string(encoded))
 					var stdout, stderr bytes.Buffer
 					cmd.Stdout = &stdout

@@ -66,7 +66,7 @@ func runClaudePrompt(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if err := execDelegated(ctx, bin, []string{"-p"}, args, claude.EnvForConfigDir(os.Environ(), account.ConfigDir)); err != nil {
+	if err := execPreparedDelegated(ctx, "claude", bin, []string{"-p"}, args, claude.EnvForConfigDir(os.Environ(), account.ConfigDir)); err != nil {
 		fmt.Fprintln(os.Stderr, "claude exec error:", err)
 		return 1
 	}
@@ -93,7 +93,7 @@ func runCodexPrompt(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if err := execDelegated(ctx, bin, []string{"exec"}, args, codex.EnvForHome(os.Environ(), account.Home)); err != nil {
+	if err := execPreparedDelegated(ctx, "codex", bin, []string{"exec"}, args, codex.EnvForHome(os.Environ(), account.Home)); err != nil {
 		fmt.Fprintln(os.Stderr, "codex exec error:", err)
 		return 1
 	}

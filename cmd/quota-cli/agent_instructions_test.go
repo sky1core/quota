@@ -93,6 +93,7 @@ func TestInstructionsRejectsRemovedAndGenericInputs(t *testing.T) {
 		{"setup", "--local-file=example"},
 		{"setup", "--agent=all", "--agent=codex"},
 		{"setup", "--agent=other"},
+		{"setup", "--scope=other"},
 		{"uninstall", "--remove-global-ignore"},
 		{"uninstall", "."},
 		{"status", ".", "extra"},
@@ -115,6 +116,52 @@ func TestInstructionsRejectsRemovedAndGenericInputs(t *testing.T) {
 		if code != 2 {
 			t.Errorf("%q: exit=%d output=%q errors=%q", args, code, out, stderr)
 		}
+	}
+}
+
+func TestInstructionsRepoSetupPreservesConfigurationAndLocalSource(t *testing.T) {
+	home := instructionsHome(t)
+	repo := instructionsRepo(t)
+	t.Chdir(repo)
+	instructionsWrite(t, filepath.Join(repo, ".gitignore"), "AGENTS.md\nprivate/\n*.local.md\n")
+	instructionsWrite(t, filepath.Join(repo, "AGENTS.md"), "shared\n")
+	instructionsWrite(t, filepath.Join(repo, "private", "AGENTS.md"), "nested\n")
+	instructionsWrite(t, filepath.Join(repo, "AGENTS.local.md"), "local\n")
+	path := filepath.Join(repo, ".worktreeinclude")
+	original := "# preserve\n.env\nAGENTS.md\n!private/AGENTS.md"
+	instructionsWrite(t, path, original)
+	for _, dry := range []bool{true, false} {
+		args := []string{"setup", "--scope=repo", "--json"}
+		if dry {
+			args = append(args, "--dry-run")
+		}
+		code, out, stderr := runInstructions(t, "", args...)
+		if code != 0 || !strings.Contains(out, "private/AGENTS.md") {
+			t.Fatalf("repo setup dry=%t: %d %s %s", dry, code, out, stderr)
+		}
+		got, err := os.ReadFile(path)
+		want := original
+		if !dry {
+			want += "\n/private/AGENTS.md\n"
+		}
+		if err != nil || string(got) != want {
+			t.Fatalf("repo setup changed unrelated settings: %q %v", got, err)
+		}
+	}
+	before, _ := os.Stat(path)
+	code, out, stderr := runInstructions(t, "", "setup", "--scope=repo", "--json")
+	after, _ := os.Stat(path)
+	if code != 0 || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatalf("idempotent setup: %d %s %s", code, out, stderr)
+	}
+	for _, rel := range []string{".claude/settings.json", ".codex/hooks.json", ".codex/config.toml"} {
+		if _, err := os.Stat(filepath.Join(home, rel)); !os.IsNotExist(err) {
+			t.Fatalf("repo setup changed account settings: %s %v", rel, err)
+		}
+	}
+	local, _ := os.ReadFile(filepath.Join(repo, "AGENTS.local.md"))
+	if string(local) != "local\n" {
+		t.Fatalf("local source changed: %q", local)
 	}
 }
 
@@ -369,10 +416,14 @@ func TestInstructionsPrepareEntryReportsLimitAndStatusReportsSource(t *testing.T
 			t.Fatal("Codex whole body changed")
 		}
 	}
-	resume := `{"cwd":` + string(mustJSON(repo)) + `,"source":"resume"}`
+	resume := `{"cwd":` + string(mustJSON(repo)) + `,"source":"resume","session_id":"x"}`
 	for _, agent := range []string{"claude", "codex"} {
-		if code, out, stderr := runInstructions(t, resume, "_prepare", "--agent="+agent, "--event=SessionStart"); code != 0 || out != "" || stderr != "" {
-			t.Fatalf("%s resume delivered: exit=%d stdout bytes=%d stderr=%q", agent, code, len(out), stderr)
+		code, out, stderr := runInstructions(t, resume, "_prepare", "--agent="+agent, "--event=SessionStart")
+		if code != 0 || stderr != "" || agent == "codex" && out != "" {
+			t.Fatalf("%s resume: exit=%d stdout bytes=%d stderr=%q", agent, code, len(out), stderr)
+		}
+		if agent == "claude" && !strings.Contains(hookContext(t, out), "not delivered in full") {
+			t.Fatal("failed Claude delivery was recorded as current")
 		}
 	}
 	if entries, _ := filepath.Glob(filepath.Join(repo, ".claude*")); len(entries) != 0 {

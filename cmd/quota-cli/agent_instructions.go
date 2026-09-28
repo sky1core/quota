@@ -30,24 +30,29 @@ type instructionAgentReport struct {
 }
 
 type instructionsReport struct {
-	Operation string                           `json:"operation"`
-	Directory string                           `json:"directory,omitempty"`
-	DryRun    bool                             `json:"dryRun,omitempty"`
-	Plan      *agentinstructions.InstallPlan   `json:"plan,omitempty"`
-	Applied   *agentinstructions.InstallResult `json:"accountChanges,omitempty"`
-	Agents    []instructionAgentReport         `json:"agents,omitempty"`
-	Notices   []string                         `json:"notices,omitempty"`
-	Error     string                           `json:"error,omitempty"`
+	Operation string                               `json:"operation"`
+	Directory string                               `json:"directory,omitempty"`
+	DryRun    bool                                 `json:"dryRun,omitempty"`
+	Plan      *agentinstructions.InstallPlan       `json:"plan,omitempty"`
+	Applied   *agentinstructions.InstallResult     `json:"accountChanges,omitempty"`
+	Worktree  *overlayruntime.WorktreeIncludeSetup `json:"worktreeInclude,omitempty"`
+	Agents    []instructionAgentReport             `json:"agents,omitempty"`
+	Notices   []string                             `json:"notices,omitempty"`
+	Error     string                               `json:"error,omitempty"`
 }
 
 func printAgentInstructionsUsage(out io.Writer) {
 	fmt.Fprint(out, `usage:
   quota-cli agent instructions setup [--agent=all|claude|codex] [--dry-run] [--json]
+  quota-cli agent instructions setup --scope=repo [--dry-run] [--json]
   quota-cli agent instructions uninstall [--agent=all|claude|codex] [--dry-run] [--json]
   quota-cli agent instructions status [dir] [--agent=all|claude|codex] [--json]
 
 Install session-start hooks that deliver the primary AGENTS.local.md of the
-current Git repository to Claude Code and Codex CLI. AGENTS.md is read natively.
+current Git repository to Claude Code and Codex CLI and redeliver it on resume
+only when it changed. AGENTS.md is read natively; exec-prompt prepares it in
+delegation worktrees. Repo setup only configures .worktreeinclude for ignored
+shared instructions.
 `)
 }
 
@@ -114,6 +119,10 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 	fs.Usage = func() { printAgentInstructionsUsage(stderr) }
 	jsonOut := fs.Bool("json", false, "Output JSON")
 	agent := fs.String("agent", "all", "Agent runtime: all, claude or codex")
+	scope := "global"
+	if operation == "setup" {
+		fs.StringVar(&scope, "scope", "global", "Setup scope: global accounts or current repo")
+	}
 	var dryRun bool
 	if operation != "status" {
 		fs.BoolVar(&dryRun, "dry-run", false, "Print the plan without saving")
@@ -129,7 +138,7 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 		fmt.Fprintln(stderr, err)
 		return 2
 	}
-	if *agent != "all" && *agent != "claude" && *agent != "codex" {
+	if (*agent != "all" && *agent != "claude" && *agent != "codex") || (scope != "global" && scope != "repo") || (scope == "repo" && *agent != "all") {
 		printAgentInstructionsUsage(stderr)
 		return 2
 	}
@@ -169,6 +178,14 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 	}
 	if err := overlayruntime.ValidateGitEnvironment(ctx, dir); err != nil {
 		return finish(err, true)
+	}
+	if scope == "repo" {
+		result, err := overlayruntime.SetupWorktreeInclude(ctx, ".", dryRun)
+		report.Worktree = &result
+		if result.Path != "" {
+			report.Directory = filepath.Dir(result.Path)
+		}
+		return finish(err, err != nil)
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -459,7 +476,16 @@ func printInstructionsReport(out io.Writer, r instructionsReport) {
 	}
 	fmt.Fprintln(out)
 	if r.DryRun {
-		fmt.Fprintln(out, "dry-run: no account configuration changed")
+		fmt.Fprintln(out, "dry-run: no configuration changed")
+	}
+	if r.Worktree != nil {
+		fmt.Fprintln(out, "worktree copy settings:", r.Worktree.Path)
+		for _, path := range r.Worktree.Added {
+			fmt.Fprintln(out, "  include:", path)
+		}
+		if r.Worktree.Applied {
+			fmt.Fprintln(out, "saved:", r.Worktree.Path)
+		}
 	}
 	if r.Plan != nil {
 		for _, change := range r.Plan.Changes {

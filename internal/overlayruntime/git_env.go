@@ -52,6 +52,7 @@ func ValidateGitEnvironment(ctx context.Context, dir string) error {
 func validateCommandGitConfig(ctx context.Context, dir string) error {
 	cmd := childprocess.CommandContext(ctx, "git", "config", "--null", "--list", "--name-only", "--show-scope", "--includes")
 	cmd.Dir = dir
+	cmd.Env = append(cmd.Environ(), "LC_ALL=C")
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr

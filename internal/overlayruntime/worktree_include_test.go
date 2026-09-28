@@ -111,7 +111,7 @@ func TestRepositoryReportsIgnoredDirectoryTraversal(t *testing.T) {
 	}
 }
 
-func TestRepositoryDistinguishesGitPatternFromClaudeLiteralPath(t *testing.T) {
+func TestRepositoryRequiresPatternMatchAndLiteralTraversalPath(t *testing.T) {
 	testHome(t)
 	repo := newRepo(t)
 	write(t, filepath.Join(repo, ".gitignore"), "private*/\n")
@@ -124,7 +124,48 @@ func TestRepositoryDistinguishesGitPatternFromClaudeLiteralPath(t *testing.T) {
 	}
 	write(t, path, "/private[1]/AGENTS.md\n")
 	status, err = CheckRepository(context.Background(), repo, "claude", CheckOptions{})
+	if err != nil || !strings.Contains(strings.Join(status.Warnings, "\n"), "does not include") {
+		t.Fatalf("unmatched glob accepted as a literal path: %+v %v", status, err)
+	}
+	write(t, path, "/private\\[1\\]/AGENTS.md\n/private[1]/AGENTS.md\n")
+	status, err = CheckRepository(context.Background(), repo, "claude", CheckOptions{})
 	if err != nil || len(status.Warnings) != 0 {
-		t.Fatalf("native literal path incorrectly rejected: %+v %v", status, err)
+		t.Fatalf("matching pattern with traversal path rejected: %+v %v", status, err)
+	}
+}
+
+func TestRepositoryHonorsIncludeNegationOrder(t *testing.T) {
+	testHome(t)
+	repo := newRepo(t)
+	git(t, repo, "rm", "--cached", "AGENTS.md")
+	write(t, filepath.Join(repo, ".gitignore"), "AGENTS.md\n")
+	write(t, filepath.Join(repo, "sub", "AGENTS.md"), "nested\n")
+	root := filepath.Join(repo, "AGENTS.md")
+	nested := filepath.Join(repo, "sub", "AGENTS.md")
+	path := filepath.Join(repo, ".worktreeinclude")
+	write(t, path, "/AGENTS.md\n/sub/AGENTS.md\n!/AGENTS.md\n")
+	for _, agent := range []string{"claude", "codex"} {
+		status, err := CheckRepository(context.Background(), repo, agent, CheckOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		warnings := strings.Join(status.Warnings, "\n")
+		if !strings.Contains(warnings, "does not include "+root) || strings.Contains(warnings, nested) {
+			t.Fatalf("%s: negated root path not diagnosed: %q", agent, warnings)
+		}
+	}
+	result, err := SetupWorktreeInclude(context.Background(), repo, false)
+	if err != nil || !result.Applied || strings.Join(result.Added, ",") != "/AGENTS.md" {
+		t.Fatalf("setup did not restore the negated path: %+v %v", result, err)
+	}
+	body, _ := os.ReadFile(path)
+	if string(body) != "/AGENTS.md\n/sub/AGENTS.md\n!/AGENTS.md\n/AGENTS.md\n" {
+		t.Fatalf("setup rewrote existing entries: %q", body)
+	}
+	for _, agent := range []string{"claude", "codex"} {
+		status, err := CheckRepository(context.Background(), repo, agent, CheckOptions{})
+		if err != nil || len(status.Warnings) != 0 {
+			t.Fatalf("%s: restored path still diagnosed: %+v %v", agent, status, err)
+		}
 	}
 }

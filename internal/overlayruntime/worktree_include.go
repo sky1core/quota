@@ -52,7 +52,7 @@ func (r repoContext) worktreeIncludeWarnings(agent string) ([]string, error) {
 		if err != nil {
 			return warnings, err
 		}
-		if !matched && !(agent == "claude" && explicitIncludePath(body, rel)) {
+		if !matched {
 			warnings = append(warnings, include+" does not include "+path+"; add its relative path to copy it during native worktree creation")
 			continue
 		}

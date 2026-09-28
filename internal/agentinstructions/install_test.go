@@ -490,9 +490,9 @@ func TestInspectReportsMissingDuplicateAndAlteredHooks(t *testing.T) {
 	}
 }
 
-func TestInstallationReplacesHooksOfPreviousInstallationsWithTheSameName(t *testing.T) {
+func TestInstallationReplacesHooksOfPreviousInstallationsAtAnotherPath(t *testing.T) {
 	i := testInstallation(t)
-	for _, command := range []string{"/other/quota-cli agent instructions _prepare --agent=codex --event=SessionStart", "/other/quota-cli agent instructions _hook --agent=codex --event=SessionStart", "/other/quota-cli agent overlay hook --runtime=codex --event=SessionStart"} {
+	for _, command := range []string{"/other/quota-cli agent instructions _prepare --agent=codex --event=SessionStart", "/other/renamed/quota-cli-real agent instructions _prepare --agent=codex --event=SessionStart", "/other/quota-cli agent instructions _hook --agent=codex --event=SessionStart", "/other/quota-cli agent overlay hook --runtime=codex --event=SessionStart"} {
 		root := map[string]any{"hooks": map[string]any{"SessionStart": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": command, "additionalContextLimit": 0}}}}}}
 		b, _ := json.Marshal(root)
 		installWrite(t, i.targets.CodexHooks, string(b))
@@ -516,7 +516,7 @@ func TestInstallationReplacesHooksOfPreviousInstallationsWithTheSameName(t *test
 
 func TestInstallationRejectsUnknownOwnershipBeforeWriting(t *testing.T) {
 	i := testInstallation(t)
-	for _, command := range []string{"quota-cli agent instructions _prepare --agent=codex --event=SessionStart", "/other/quota-cli agent instructions _prepare --agent=codex --event=SessionStart --part=0", `env X=value sh "$HOME/.local/bin/agents-overlay-context" json SessionStart AGENTS.md - . codex-session`, `f() { /example/quota-cli agent instructions _prepare --agent=codex --event=SessionStart; }`} {
+	for _, command := range []string{"quota-cli agent instructions _prepare --agent=codex --event=SessionStart", "/other/quota-cli agent instructions _prepare --agent=codex --event=SessionStart --part=0", "echo agent instructions _prepare", "/opt/unrelated/auditor agent instructions _hook", `/old/quota-cli agent  instructions _prepare --agent=codex --event="SessionStart`, `env X=value sh "$HOME/.local/bin/agents-overlay-context" json SessionStart AGENTS.md - . codex-session`, `f() { /example/quota-cli agent instructions _prepare --agent=codex --event=SessionStart; }`, `/example/quota-cli agent instructions _prepare --agent=codex --event="SessionStart`} {
 		root := map[string]any{"hooks": map[string]any{"SessionStart": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": command}}}}}}
 		b, _ := json.Marshal(root)
 		installWrite(t, i.targets.CodexHooks, string(b))
@@ -533,7 +533,7 @@ func TestInstallationRejectsUnknownOwnershipBeforeWriting(t *testing.T) {
 
 func TestInstallationPreservesUnrelatedProgramsWithInstructionArguments(t *testing.T) {
 	i := testInstallation(t)
-	commands := []string{"echo agent instructions _prepare", "/opt/unrelated/auditor agent instructions _hook", "echo legacy instruction words"}
+	commands := []string{"echo instructions _prepare", "/opt/unrelated/auditor agent hooks _hook", "echo 'agent instructions _prepare'", `((cd "$CLAUDE_PROJECT_DIR" && ./scripts/notify.sh); true)`, "echo legacy instruction words"}
 	var entries []any
 	for _, c := range commands {
 		entries = append(entries, map[string]any{"type": "command", "command": c})
@@ -581,14 +581,16 @@ func TestInstallationRejectsWrappedInstructionConflicts(t *testing.T) {
 	}
 }
 
-func TestSuspiciousInstructionCommandRecognizesPrepareAndHook(t *testing.T) {
-	for _, command := range []string{"/example/custom-binary agent instructions _prepare --agent=codex --event=SessionStart", "/example/quota-cli agent instructions _hook --agent=codex --event=SessionStart"} {
-		if !suspiciousInstructionCommand(command, "/example/custom-binary") {
-			t.Fatalf("not suspicious: %s", command)
+func TestSuspiciousInstructionCommandRecognizesTheArgumentContract(t *testing.T) {
+	for _, command := range []string{"/example/custom-binary agent instructions _prepare --agent=codex --event=SessionStart", "/example/quota-cli agent instructions _hook --agent=codex --event=SessionStart", "echo agent instructions _prepare", "/other/tool agent overlay hook --runtime=codex --event=SessionStart", `/example/quota-cli agent instructions _prepare --agent=codex --event="SessionStart`, `/old/quota-cli agent  instructions _prepare --agent=codex --event="SessionStart`, `f() { /example/quota-cli agent instructions _prepare --agent=codex --event=SessionStart; }`, `sh -e "$HOME/.local/bin/agents-overlay-context" json SessionStart AGENTS.md - . codex-session`, `dash /opt/legacy/agents-overlay-context json SessionStart AGENTS.md - . codex-session`, `sh -c '((/old/quota-cli agent instructions _prepare --agent=codex --event=SessionStart); true)'`, `"$RUNNER" agent instructions _prepare --agent=codex --event=SessionStart`} {
+		if !suspiciousInstructionCommand(command) {
+			t.Errorf("instruction argument contract not recognized: %s", command)
 		}
 	}
-	if suspiciousInstructionCommand("/example/custom-binary agent instructions _prepare --agent=codex --event=SessionStart") {
-		t.Fatal("unknown executable treated as quota")
+	for _, command := range []string{"echo instructions _prepare", "echo 'agent instructions _prepare'", "/example/custom-binary --agent=codex --event=SessionStart", "/opt/unrelated/auditor agent hooks _hook", "example-tool --label instructions", `echo "unterminated`, `((cd "$CLAUDE_PROJECT_DIR" && ./scripts/notify.sh); true)`, `sh -c '((echo a); true)'`, `"$RUNNER" --agent=codex`, ""} {
+		if suspiciousInstructionCommand(command) {
+			t.Errorf("unrelated command treated as an instruction hook: %s", command)
+		}
 	}
 }
 
@@ -633,5 +635,78 @@ func TestInstallationRemovesCurrentHooksOfUnsupportedEvents(t *testing.T) {
 	}
 	if len(statuses) != 1 || !statuses[0].Configured || len(statuses[0].Problems) != 0 {
 		t.Fatalf("status after setup: %+v", statuses)
+	}
+}
+
+func TestInstallationReplacesResolvedPathHooksAfterALinkRetarget(t *testing.T) {
+	i := testInstallation(t)
+	home := filepath.Dir(filepath.Dir(i.executable))
+	v1 := filepath.Join(home, "releases", "v1", "quota-cli-real")
+	v2 := filepath.Join(home, "releases", "v2", "quota-cli-real")
+	for _, path := range []string{v1, v2} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(home, "stable", "quota-cli")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(v1, link); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := NewInstallation(v1, i.targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolved.Apply(InstallPlan{Agents: []string{"claude", "codex"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(v2, link); err != nil {
+		t.Fatal(err)
+	}
+	current, err := NewInstallation(link, i.targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses, err := current.Inspect([]string{"claude", "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range statuses {
+		if s.Configured || !strings.Contains(strings.Join(s.Problems, "\n"), "previous installation") {
+			t.Fatalf("%s: hooks of the retargeted binary %s not reported as a previous installation: %+v", s.Agent, v1, s)
+		}
+	}
+	plan, err := current.Plan([]string{"claude", "codex"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := current.Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	for path, events := range map[string][]string{i.targets.ClaudeSettings: {"SessionStart", "UserPromptSubmit"}, i.targets.CodexHooks: {"SessionStart"}} {
+		root := installReadJSON(t, path)
+		for _, event := range events {
+			commands := installCommands(t, root, event)
+			if len(commands) != 1 || !strings.Contains(commands[0], link) || strings.Contains(commands[0], v1) {
+				t.Fatalf("%s %s after setup through the link: %v", path, event, commands)
+			}
+		}
+	}
+	statuses, err = current.Inspect([]string{"claude", "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range statuses {
+		if !s.Configured || len(s.Problems) != 0 {
+			t.Fatalf("%s after setup: %+v", s.Agent, s)
+		}
 	}
 }

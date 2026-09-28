@@ -118,10 +118,7 @@ func (r repoContext) prepareSharedInstructions(rel, agent string, createsWorktre
 		return nil
 	}
 	target := filepath.Join(r.Top, rel)
-	if err := rejectSymlinkedParents(r.Top, target); err != nil {
-		return fmt.Errorf("cannot prepare %s from %s: %w", target, source, err)
-	}
-	ours, err := r.ownsTarget(target)
+	ours, err := r.claimTarget(target)
 	if err != nil {
 		return fmt.Errorf("cannot prepare %s from %s: %w", target, source, err)
 	}
@@ -172,25 +169,6 @@ func (r repoContext) instructionLockPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, fmt.Sprintf("%x.lock", sha256.Sum256([]byte(r.Common)))), nil
-}
-
-func rejectSymlinkedParents(top, target string) error {
-	dir := filepath.Dir(target)
-	for dir != top {
-		info, err := os.Lstat(dir)
-		if err == nil && info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%s is a symlink", dir)
-		}
-		if err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return fmt.Errorf("%s is outside %s", target, top)
-		}
-		dir = parent
-	}
-	return nil
 }
 
 func checkInstructionSource(path string, required bool) (string, bool, error) {

@@ -24,7 +24,7 @@ func OwnsInstructionCommand(command, executable, agent, event string) bool {
 func InstructionCommand(command, executable, agent, event string) InstructionCommandState {
 	if inv, ok := parseDirectShellInvocation(command); ok {
 		argv := inv.Argv
-		if len(argv) >= 6 && managedExecutable(argv[0], executable) && argv[1] == "agent" {
+		if len(argv) >= 6 && filepath.IsAbs(argv[0]) && argv[1] == "agent" {
 			if argv[2] == "instructions" && (argv[3] == "_prepare" || argv[3] == "_hook") && ownsInstructionPrepareArgs(argv[4:], agent, event) {
 				if len(argv) == 6 && argv[3] == "_prepare" && argv[4] == "--agent="+agent && argv[5] == "--event="+event {
 					if sameExecutable(argv[0], executable) {
@@ -46,11 +46,25 @@ func InstructionCommand(command, executable, agent, event string) InstructionCom
 	return InstructionNotManaged
 }
 
-func managedExecutable(candidate, executable string) bool {
-	if sameExecutable(candidate, executable) {
-		return true
+func instructionContract(argv []string) bool {
+	return len(argv) >= 4 && instructionContractWords(argv[1], argv[2], argv[3])
+}
+
+func instructionContractWords(a, b, c string) bool {
+	return a == "agent" && ((b == "instructions" && (c == "_prepare" || c == "_hook")) || (b == "overlay" && c == "hook"))
+}
+
+func mentionsInstructionContract(command string) bool {
+	words := strings.Fields(strings.NewReplacer(`"`, "", `'`, "").Replace(command))
+	for i, word := range words {
+		if filepath.Base(word) == "agents-overlay-context" {
+			return true
+		}
+		if i+2 < len(words) && instructionContractWords(word, words[i+1], words[i+2]) {
+			return true
+		}
 	}
-	return filepath.IsAbs(candidate) && filepath.Base(candidate) == filepath.Base(executable)
+	return false
 }
 
 func ownsInstructionPrepareArgs(args []string, agent, event string) bool {
@@ -92,34 +106,25 @@ func sameExecutable(a, b string) bool {
 	}
 	return os.SameFile(aInfo, bInfo)
 }
-func SuspiciousInstructionCommand(command string, knownExecutables ...string) bool {
+func SuspiciousInstructionCommand(command string) bool {
 	invocations, err := ParseShellInvocations(strings.NewReplacer("$HOME", "/placeholder-home", "${HOME}", "/placeholder-home").Replace(command))
 	if err != nil {
-		return false
+		return mentionsInstructionContract(command)
 	}
 	for _, inv := range invocations {
-		argv := inv.Argv
-		if len(argv) == 0 {
+		if inv.DynamicCommand {
+			if mentionsInstructionContract(strings.Join(inv.Argv, " ")) {
+				return true
+			}
 			continue
 		}
-		quotaExecutable := filepath.Base(argv[0]) == "quota-cli"
-		for _, known := range knownExecutables {
-			if argv[0] == known {
-				quotaExecutable = true
-				break
+		if instructionContract(inv.Argv) {
+			return true
+		}
+		for _, word := range inv.Argv {
+			if filepath.Base(word) == "agents-overlay-context" {
+				return true
 			}
-		}
-		if quotaExecutable && len(argv) >= 4 && argv[1] == "agent" && argv[2] == "instructions" && (argv[3] == "_prepare" || argv[3] == "_hook") {
-			return true
-		}
-		if quotaExecutable && len(argv) >= 4 && argv[1] == "agent" && argv[2] == "overlay" && argv[3] == "hook" {
-			return true
-		}
-		if filepath.Base(argv[0]) == "agents-overlay-context" {
-			return true
-		}
-		if len(argv) > 1 && (filepath.Base(argv[0]) == "sh" || filepath.Base(argv[0]) == "bash") && filepath.Base(argv[1]) == "agents-overlay-context" {
-			return true
 		}
 	}
 	return false

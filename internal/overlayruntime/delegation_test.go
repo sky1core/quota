@@ -301,6 +301,63 @@ func TestDelegationLeavesNestedRepositoryFilesToThatRepository(t *testing.T) {
 	}
 }
 
+func TestDelegationSkipsSymlinksInsideANestedRepository(t *testing.T) {
+	testHome(t)
+	repo, linked := untrackedInstructionWorktree(t)
+	write(t, filepath.Join(repo, "vendor", "pkg", "docs", "AGENTS.md"), "primary vendored docs\n")
+	nested := filepath.Join(linked, "vendor", "pkg")
+	if err := os.MkdirAll(filepath.Join(nested, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, nested, "init", "-q")
+	if err := os.Symlink(filepath.Join(nested, "real"), filepath.Join(nested, "docs")); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepare(t, linked, "claude"); err != nil {
+		t.Fatalf("symlink inside the nested repository failed the delegation: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(nested, "real", "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatalf("file written through the nested repository's symlink: %v", err)
+	}
+	if got := readFile(t, filepath.Join(linked, "AGENTS.md")); got != "# shared placeholder\n" {
+		t.Fatalf("root not prepared: %q", got)
+	}
+}
+
+func TestDelegationSkipsSymlinksInsideANestedBareRepository(t *testing.T) {
+	testHome(t)
+	repo, linked := untrackedInstructionWorktree(t)
+	write(t, filepath.Join(repo, "vendor", "pkg", "docs", "AGENTS.md"), "primary vendored docs\n")
+	bare := filepath.Join(linked, "vendor", "pkg")
+	if err := os.MkdirAll(filepath.Join(bare, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, bare, "init", "-q", "--bare")
+	if err := os.Symlink(filepath.Join(bare, "real"), filepath.Join(bare, "docs")); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepare(t, linked, "codex"); err != nil {
+		t.Fatalf("symlink inside the nested bare repository failed the delegation: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(bare, "real", "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatalf("file written through the bare repository's symlink: %v", err)
+	}
+}
+
+func TestDelegationReportsBrokenNestedRepositoryMetadata(t *testing.T) {
+	testHome(t)
+	repo, linked := untrackedInstructionWorktree(t)
+	write(t, filepath.Join(repo, "docs", "AGENTS.md"), "primary docs\n")
+	write(t, filepath.Join(linked, "docs", ".git"), "gitdir: "+filepath.Join(linked, "missing-gitdir")+"\n")
+	err := prepare(t, linked, "claude")
+	if err == nil || !strings.Contains(err.Error(), filepath.Join(linked, "docs", "AGENTS.md")) {
+		t.Fatalf("broken nested repository metadata was not reported: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(linked, "docs", "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatalf("file written below broken repository metadata: %v", err)
+	}
+}
+
 func TestDelegationSkipsBareRepositoryAtTheTargetPath(t *testing.T) {
 	testHome(t)
 	repo, linked := untrackedInstructionWorktree(t)

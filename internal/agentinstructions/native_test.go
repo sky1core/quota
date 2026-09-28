@@ -49,7 +49,7 @@ func TestNativeExpectationsMatchByExecutableIdentity(t *testing.T) {
 		{"sessionStart", command(link), true, false},
 		{"sessionStart", command(previous), false, true},
 		{"sessionStart", agenthooks.ShellQuote([]string{real, "agent", "instructions", "_hook", "--agent=codex", "--event=SessionStart"}), false, true},
-		{"sessionStart", "/other/tool agent instructions _prepare --agent=codex --event=SessionStart", false, false},
+		{"sessionStart", "/other/tool agent instructions _prepare --agent=codex --event=SessionStart", false, true},
 		{"subagentStart", command(real), false, false},
 		{"preToolUse", "policy-hook", true, false},
 		{"preToolUse", command(real), false, false},
@@ -287,7 +287,7 @@ func TestNativeUnexpectedInstructionHooks(t *testing.T) {
 		{"project legacy script", `sh "$HOME/.local/bin/agents-overlay-context" json SessionStart AGENTS.md - . codex-session`, "project", "blocked"},
 		{"plugin alternative executable", `/alternate/quota-cli agent instructions _hook --agent=codex --event=SessionStart`, "plugin", "blocked"},
 		{"echo quoted words", `echo "quota-cli agent instructions _hook"`, "project", "configured"},
-		{"echo argument words", `echo agent instructions _hook`, "project", "configured"},
+		{"echo argument words", `echo agent instructions _hook`, "project", "blocked"},
 		{"unrelated command", `example-tool --label instructions`, "plugin", "configured"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

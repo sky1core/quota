@@ -50,18 +50,24 @@ func TestOwnsInstructionCommandRecognizesSessionStartParts(t *testing.T) {
 	}
 }
 
-func TestOwnsInstructionCommandRejectsDifferentExecutable(t *testing.T) {
+func TestInstructionCommandOwnershipFollowsTheArgumentContract(t *testing.T) {
 	dir := t.TempDir()
 	owned := filepath.Join(dir, "owned-quota-cli")
-	other := filepath.Join(dir, "other-quota-cli")
+	other := filepath.Join(dir, "other-tool")
 	for _, path := range []string{owned, other} {
 		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	command := ShellQuote([]string{other, "agent", "instructions", "_hook", "--agent=claude", "--event=WorktreeCreate"})
-	if OwnsInstructionCommand(command, owned, "claude", "WorktreeCreate") {
-		t.Fatal("different executable was treated as owned")
+	if state := InstructionCommand(command, owned, "claude", "WorktreeCreate"); state == InstructionNotManaged || state == InstructionCurrent {
+		t.Fatalf("managed argument contract from another executable: state %d", state)
+	}
+	if OwnsInstructionCommand("quota-cli agent instructions _prepare --agent=claude --event=SessionStart", owned, "claude", "SessionStart") {
+		t.Fatal("relative executable treated as owned")
+	}
+	if OwnsInstructionCommand(ShellQuote([]string{other, "agent", "hooks", "_hook", "--agent=claude", "--event=SessionStart"}), owned, "claude", "SessionStart") {
+		t.Fatal("command outside the argument contract treated as owned")
 	}
 }
 
@@ -97,7 +103,7 @@ func TestInstructionCommandDistinguishesCurrentPreviousAndLegacyForms(t *testing
 		{current(link), InstructionCurrent},
 		{current(previous), InstructionOtherExecutable},
 		{current(removed), InstructionOtherExecutable},
-		{current(renamed), InstructionNotManaged},
+		{current(renamed), InstructionOtherExecutable},
 		{current("quota-cli"), InstructionNotManaged},
 		{ShellQuote([]string{executable, "agent", "instructions", "_hook", "--agent=codex", "--event=SessionStart"}), InstructionLegacy},
 		{ShellQuote([]string{previous, "agent", "instructions", "_prepare", "--agent=codex", "--event=SessionStart", "--codex-home", dir}), InstructionLegacy},

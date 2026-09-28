@@ -265,7 +265,7 @@ quota-cli agent instructions status
 ```
 
 `setup`은 선택한 런타임의 기본 계정과 quota에 등록된 추가 계정 모두에 같은 hook 명령을 설치한다. 계정 경로 인자는 없다.
-hook 명령의 실행 파일 경로는 `setup`을 실행한 경로 그대로다. 심볼릭 링크로 실행했으면 링크 경로가 저장되므로 링크 대상만 바꾸는 업그레이드에도 hook이 새 바이너리를 실행한다. 다른 경로에 있는 같은 이름의 이전 설치본이 남긴 관리형 hook은 `status`가 보고하고 `setup`이 현재 실행 파일로 교체한다.
+hook 명령의 실행 파일 경로는 `setup`을 실행한 경로 그대로다. 심볼릭 링크로 실행했으면 링크 경로가 저장되므로 링크 대상만 바꾸는 업그레이드에도 hook이 새 바이너리를 실행한다. 관리형 hook은 실행 파일 이름이 아니라 `agent instructions _prepare --agent=… --event=…` 인자 형태로 식별한다. 다른 경로의 이전 설치본이 남긴 hook은 `status`가 보고하고 `setup`이 현재 실행 파일로 교체한다.
 
 - Claude: 각 계정 `settings.json`의 SessionStart에 `_prepare --agent=claude --event=SessionStart` 주입 hook 1개, UserPromptSubmit에 `_prepare --agent=claude --event=UserPromptSubmit` 검사 hook 1개.
 - Codex: 각 계정 `hooks.json`의 SessionStart에 `_prepare --agent=codex --event=SessionStart` hook 1개(`additionalContextLimit=0`).

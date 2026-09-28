@@ -195,8 +195,8 @@ func (e NativeExpectations) obsolete(event, command string) bool {
 	state := agenthooks.InstructionCommand(command, e.Executable, "codex", hookEvent)
 	return state != agenthooks.InstructionNotManaged && state != agenthooks.InstructionCurrent
 }
-func suspiciousInstructionCommand(command string, knownExecutables ...string) bool {
-	return agenthooks.SuspiciousInstructionCommand(command, knownExecutables...)
+func suspiciousInstructionCommand(command string) bool {
+	return agenthooks.SuspiciousInstructionCommand(command)
 }
 func canonicalInstallPath(path string) (string, error) {
 	missing := []string{}
@@ -306,7 +306,7 @@ func (i *Installation) transformHooks(root map[string]any, agent string, uninsta
 					groupRemoved = true
 					continue
 				}
-				if suspiciousInstructionCommand(command, i.executable) {
+				if suspiciousInstructionCommand(command) {
 					return fmt.Errorf("hooks.%s has an instruction command with unknown ownership: %q", event, command)
 				}
 				keep = append(keep, entry)

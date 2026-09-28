@@ -66,7 +66,7 @@ func TestInspectNativeCodexHooksCleansDescendants(t *testing.T) {
 			t.Setenv("HOME", home)
 			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 			t.Setenv("PATH", bin)
-			report, inspectErr := InspectNativeCodexHooksForHome(context.Background(), repo, filepath.Join(home, ".codex"), nil)
+			report, inspectErr := InspectNativeCodexHooksForHome(context.Background(), repo, filepath.Join(home, ".codex"), NativeExpectations{})
 			pidBytes, err := os.ReadFile(pidFile)
 			if err != nil {
 				t.Fatal(err)

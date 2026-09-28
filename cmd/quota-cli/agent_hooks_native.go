@@ -35,7 +35,7 @@ func inspectAgentHookActivation(ctx context.Context, plan *agenthooks.HookPlan) 
 		plan.Error = err.Error()
 		return
 	}
-	report, err := agentinstructions.InspectNativeCodexHooksForHome(ctx, cwd, filepath.Dir(plan.Path), map[string]string{"preToolUse": plan.Command})
+	report, err := agentinstructions.InspectNativeCodexHooksForHome(ctx, cwd, filepath.Dir(plan.Path), agentinstructions.NativeExpectations{Commands: map[string]string{"preToolUse": plan.Command}})
 	if err != nil {
 		plan.Reasons = append(plan.Reasons, fmt.Sprintf("Codex hook activation could not be verified: %v; check this account's Codex CLI and /hooks, then run agent hooks doctor again", err))
 		return

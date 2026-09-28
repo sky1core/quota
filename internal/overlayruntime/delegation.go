@@ -3,6 +3,7 @@ package overlayruntime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -120,6 +121,13 @@ func (r repoContext) prepareSharedInstructions(rel, agent string, createsWorktre
 	if err := rejectSymlinkedParents(r.Top, target); err != nil {
 		return fmt.Errorf("cannot prepare %s from %s: %w", target, source, err)
 	}
+	ours, err := r.ownsTarget(target)
+	if err != nil {
+		return fmt.Errorf("cannot prepare %s from %s: %w", target, source, err)
+	}
+	if !ours {
+		return nil
+	}
 	tracked, err := r.tracked(target)
 	if err != nil {
 		return fmt.Errorf("cannot prepare %s from %s: %w", target, source, err)
@@ -137,7 +145,11 @@ func (r repoContext) prepareSharedInstructions(rel, agent string, createsWorktre
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return fmt.Errorf("cannot prepare %s from %s: %w", target, source, err)
 	}
-	if err := atomicfile.Save(target, []byte(body), 0o644, true); err != nil {
+	lock, err := r.instructionLockPath()
+	if err != nil {
+		return fmt.Errorf("cannot prepare %s from %s: %w", target, source, err)
+	}
+	if err := atomicfile.SaveLocked(target, []byte(body), 0o644, lock); err != nil {
 		return fmt.Errorf("cannot prepare %s from %s: %w", target, source, err)
 	}
 	written, _, err := checkInstructionSource(target, true)
@@ -148,6 +160,18 @@ func (r repoContext) prepareSharedInstructions(rel, agent string, createsWorktre
 		return fmt.Errorf("%s does not match %s after preparation", target, source)
 	}
 	return nil
+}
+
+func (r repoContext) instructionLockPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, ".config", "quota", "instruction-locks")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, fmt.Sprintf("%x.lock", sha256.Sum256([]byte(r.Common)))), nil
 }
 
 func rejectSymlinkedParents(top, target string) error {

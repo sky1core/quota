@@ -9,11 +9,61 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/sky1core/quota/internal/agenthooks"
 )
 
 func syntheticNativeHook() NativeHook {
 	enabled := true
 	return NativeHook{Event: "sessionStart", Command: "example-hook", HandlerType: "command", Source: "user", SourcePath: "/example/hooks.json", Enabled: &enabled, TrustStatus: "trusted"}
+}
+
+func TestNativeExpectationsMatchByExecutableIdentity(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "current", "quota-cli")
+	previous := filepath.Join(dir, "previous", "quota-cli")
+	for _, path := range []string{real, previous} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(dir, "stable", "quota-cli")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	command := func(path string) string {
+		return agenthooks.ShellQuote([]string{path, "agent", "instructions", "_prepare", "--agent=codex", "--event=SessionStart"})
+	}
+	e := NativeExpectations{Commands: map[string]string{"sessionStart": command(real), "preToolUse": "policy-hook"}, Executable: real}
+	for _, tc := range []struct {
+		event, command  string
+		match, obsolete bool
+	}{
+		{"sessionStart", command(real), true, false},
+		{"sessionStart", command(link), true, false},
+		{"sessionStart", command(previous), false, true},
+		{"sessionStart", agenthooks.ShellQuote([]string{real, "agent", "instructions", "_hook", "--agent=codex", "--event=SessionStart"}), false, true},
+		{"sessionStart", "/other/tool agent instructions _prepare --agent=codex --event=SessionStart", false, false},
+		{"subagentStart", command(real), false, false},
+		{"preToolUse", "policy-hook", true, false},
+		{"preToolUse", command(real), false, false},
+	} {
+		if got := e.Matches(tc.event, tc.command); got != tc.match {
+			t.Errorf("%s %s: match %v, want %v", tc.event, tc.command, got, tc.match)
+		}
+		if got := e.obsolete(tc.event, tc.command); got != tc.obsolete {
+			t.Errorf("%s %s: obsolete %v, want %v", tc.event, tc.command, got, tc.obsolete)
+		}
+	}
+	if (NativeExpectations{Commands: map[string]string{"sessionStart": command(real)}}).Matches("sessionStart", command(link)) {
+		t.Fatal("identity match without an executable")
+	}
 }
 
 func syntheticNativeHooks(t *testing.T, hooks []NativeHook) json.RawMessage {
@@ -66,7 +116,7 @@ func TestNativeHookMetadataBoundaries(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = parseNativeHooks(raw, "/example/repo", map[string]string{"sessionStart": "example-hook"}, &NativeReport{})
+		err = parseNativeHooks(raw, "/example/repo", NativeExpectations{Commands: map[string]string{"sessionStart": "example-hook"}}, &NativeReport{})
 		if (err == nil) != tc.valid {
 			t.Fatalf("key=%s remove=%t valid=%t err=%v", tc.key, tc.remove, tc.valid, err)
 		}
@@ -92,7 +142,7 @@ func TestNativeHookReadiness(t *testing.T) {
 			hook := syntheticNativeHook()
 			tc.mutate(&hook)
 			report := NativeReport{}
-			if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{hook}), "/example/repo", map[string]string{"sessionStart": "example-hook"}, &report); err != nil {
+			if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{hook}), "/example/repo", NativeExpectations{Commands: map[string]string{"sessionStart": "example-hook"}}, &report); err != nil {
 				t.Fatal(err)
 			}
 			if report.State != tc.state {
@@ -125,7 +175,7 @@ func TestNativePreToolUseReadiness(t *testing.T) {
 			hook.Event, hook.Command, hook.Matcher = "preToolUse", "example-policy-hook", &matcher
 			tc.mutate(&hook)
 			report := NativeReport{}
-			if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{hook}), "/example/repo", map[string]string{"preToolUse": "example-policy-hook"}, &report); err != nil {
+			if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{hook}), "/example/repo", NativeExpectations{Commands: map[string]string{"preToolUse": "example-policy-hook"}}, &report); err != nil {
 				t.Fatal(err)
 			}
 			if report.State != tc.state {
@@ -145,7 +195,7 @@ func TestNativePreToolUseIgnoresInstructionHooks(t *testing.T) {
 	instruction := syntheticNativeHook()
 	instruction.Command = `/alternate/quota-cli agent instructions _hook --agent=codex --event=SessionStart`
 	report := NativeReport{}
-	if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{instruction, policy}), "/example/repo", map[string]string{"preToolUse": policy.Command}, &report); err != nil {
+	if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{instruction, policy}), "/example/repo", NativeExpectations{Commands: map[string]string{"preToolUse": policy.Command}}, &report); err != nil {
 		t.Fatal(err)
 	}
 	if report.State != "configured" || report.Hooks[0].Command != "" || report.Hooks[0].Matched || !report.Hooks[1].Matched {
@@ -157,7 +207,7 @@ func TestNativePreToolUseDuplicateAndMissingMetadata(t *testing.T) {
 	policy := syntheticNativeHook()
 	matcher := "Bash"
 	policy.Event, policy.Command, policy.Matcher = "preToolUse", "example-policy-hook", &matcher
-	expected := map[string]string{"preToolUse": policy.Command}
+	expected := NativeExpectations{Commands: map[string]string{"preToolUse": policy.Command}}
 	report := NativeReport{}
 	if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{policy, policy}), "/example/repo", expected, &report); err != nil {
 		t.Fatal(err)
@@ -188,7 +238,7 @@ func TestNativeMergedSourcesRejectDuplicateDelivery(t *testing.T) {
 	second.Source = "project"
 	second.SourcePath = "/example/repo/.codex/config.toml"
 	report := NativeReport{}
-	err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{first, second}), "/example/repo", map[string]string{"sessionStart": "example-hook"}, &report)
+	err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{first, second}), "/example/repo", NativeExpectations{Commands: map[string]string{"sessionStart": "example-hook"}}, &report)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,18 +254,18 @@ func TestNativeMalformedDiscoveryCannotSucceed(t *testing.T) {
 		`{"data":[{"cwd":"/example/repo","hooks":[]}]}`,
 	} {
 		report := NativeReport{}
-		if err := parseNativeHooks([]byte(raw), "/example/repo", map[string]string{"sessionStart": "example-hook"}, &report); err == nil {
+		if err := parseNativeHooks([]byte(raw), "/example/repo", NativeExpectations{Commands: map[string]string{"sessionStart": "example-hook"}}, &report); err == nil {
 			t.Fatalf("accepted %s", raw)
 		}
 	}
 	hook := syntheticNativeHook()
 	hook.Enabled = nil
-	if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{hook}), "/example/repo", map[string]string{"sessionStart": "example-hook"}, &NativeReport{}); err == nil {
+	if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{hook}), "/example/repo", NativeExpectations{Commands: map[string]string{"sessionStart": "example-hook"}}, &NativeReport{}); err == nil {
 		t.Fatal("accepted missing enabled")
 	}
 	hook = syntheticNativeHook()
 	hook.TrustStatus = "future-status"
-	if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{hook}), "/example/repo", map[string]string{"sessionStart": "example-hook"}, &NativeReport{}); err == nil {
+	if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{hook}), "/example/repo", NativeExpectations{Commands: map[string]string{"sessionStart": "example-hook"}}, &NativeReport{}); err == nil {
 		t.Fatal("accepted unknown trust status")
 	}
 }
@@ -224,7 +274,7 @@ func TestNativeReportDoesNotExposeUnrelatedCommands(t *testing.T) {
 	owned, unrelated := syntheticNativeHook(), syntheticNativeHook()
 	unrelated.Command = "unrelated-sensitive-command"
 	report := NativeReport{}
-	if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{owned, unrelated}), "/example/repo", map[string]string{"sessionStart": "example-hook"}, &report); err != nil {
+	if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{owned, unrelated}), "/example/repo", NativeExpectations{Commands: map[string]string{"sessionStart": "example-hook"}}, &report); err != nil {
 		t.Fatal(err)
 	}
 	if report.State != "configured" || len(report.Hooks) != 2 || report.Hooks[0].Command != "example-hook" || report.Hooks[1].Command != "" || report.Hooks[1].Source == "" {
@@ -246,7 +296,7 @@ func TestNativeUnexpectedInstructionHooks(t *testing.T) {
 			extra.Command, extra.Source = tc.command, tc.source
 			extra.SourcePath = "/example/repo/.codex/hooks.json"
 			report := NativeReport{}
-			expected := map[string]string{"sessionStart": session.Command, "subagentStart": subagent.Command}
+			expected := NativeExpectations{Commands: map[string]string{"sessionStart": session.Command, "subagentStart": subagent.Command}}
 			if err := parseNativeHooks(syntheticNativeHooks(t, []NativeHook{session, subagent, extra}), "/example/repo", expected, &report); err != nil {
 				t.Fatal(err)
 			}
@@ -269,7 +319,7 @@ func TestNativeInformationalWarningsPreserveInspection(t *testing.T) {
 		t.Fatal(err)
 	}
 	report := NativeReport{}
-	if err := parseNativeHooks(raw, "/example/repo", map[string]string{"sessionStart": "example-hook"}, &report); err != nil {
+	if err := parseNativeHooks(raw, "/example/repo", NativeExpectations{Commands: map[string]string{"sessionStart": "example-hook"}}, &report); err != nil {
 		t.Fatal(err)
 	}
 	if report.State != "configured" || len(report.Issues) != 1 {
@@ -299,7 +349,7 @@ func TestNativeMixedRepresentationsWithoutDuplicateInstructions(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(config), 0600); err != nil {
 		t.Fatal(err)
 	}
-	expected := map[string]string{"sessionStart": "example-session-hook", "subagentStart": "example-subagent-hook"}
+	expected := NativeExpectations{Commands: map[string]string{"sessionStart": "example-session-hook", "subagentStart": "example-subagent-hook"}}
 	report, err := InspectNativeCodexHooksForHome(context.Background(), repo, codexHome, expected)
 	if err != nil {
 		t.Fatal(err)
@@ -357,7 +407,7 @@ func TestNativeCodexIsolatedDiscovery(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte("project_doc_max_bytes = 12345\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := InspectNativeCodexHooksForHome(context.Background(), repo, codexHome, map[string]string{"sessionStart": command})
+	report, err := InspectNativeCodexHooksForHome(context.Background(), repo, codexHome, NativeExpectations{Commands: map[string]string{"sessionStart": command}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +421,7 @@ func TestNativeCodexIsolatedDiscovery(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(mergedConfig), 0600); err != nil {
 		t.Fatal(err)
 	}
-	report, err = InspectNativeCodexHooksForHome(context.Background(), repo, codexHome, map[string]string{"sessionStart": command})
+	report, err = InspectNativeCodexHooksForHome(context.Background(), repo, codexHome, NativeExpectations{Commands: map[string]string{"sessionStart": command}})
 	if err != nil {
 		t.Fatalf("merged discovery: %v; report: %+v", err, report)
 	}

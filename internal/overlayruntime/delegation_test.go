@@ -255,25 +255,127 @@ func TestDelegationRejectsUnpreparableTargets(t *testing.T) {
 }
 
 func TestDelegationLeavesNestedRepositoryFilesToThatRepository(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, nested string)
+		want  string
+	}{
+		{"tracked", func(t *testing.T, nested string) {
+			write(t, filepath.Join(nested, "AGENTS.md"), "nested repository\n")
+			git(t, nested, "add", "AGENTS.md")
+			git(t, nested, "commit", "-qm", "nested")
+		}, "nested repository\n"},
+		{"untracked", func(t *testing.T, nested string) {
+			write(t, filepath.Join(nested, "AGENTS.md"), "nested untracked\n")
+		}, "nested untracked\n"},
+		{"ignored", func(t *testing.T, nested string) {
+			write(t, filepath.Join(nested, ".gitignore"), "AGENTS.md\n")
+			write(t, filepath.Join(nested, "AGENTS.md"), "nested ignored\n")
+		}, "nested ignored\n"},
+		{"absent", func(t *testing.T, nested string) {}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testHome(t)
+			repo, linked := untrackedInstructionWorktree(t)
+			write(t, filepath.Join(repo, "vendor", "pkg", "AGENTS.md"), "primary vendored\n")
+			nested := filepath.Join(linked, "vendor", "pkg")
+			if err := os.MkdirAll(nested, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			git(t, nested, "init", "-q")
+			tc.setup(t, nested)
+			if err := prepare(t, linked, "claude"); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(filepath.Join(nested, "AGENTS.md"))
+			switch {
+			case tc.want == "" && !os.IsNotExist(err):
+				t.Fatalf("file created inside the nested repository: %q %v", got, err)
+			case tc.want != "" && (err != nil || string(got) != tc.want):
+				t.Fatalf("nested repository file changed: %q %v", got, err)
+			}
+			if got := readFile(t, filepath.Join(linked, "AGENTS.md")); got != "# shared placeholder\n" {
+				t.Fatalf("root not prepared: %q", got)
+			}
+		})
+	}
+}
+
+func TestDelegationSkipsBareRepositoryAtTheTargetPath(t *testing.T) {
 	testHome(t)
 	repo, linked := untrackedInstructionWorktree(t)
 	write(t, filepath.Join(repo, "vendor", "pkg", "AGENTS.md"), "primary vendored\n")
-	nested := filepath.Join(linked, "vendor", "pkg")
-	if err := os.MkdirAll(nested, 0o755); err != nil {
+	bare := filepath.Join(linked, "vendor", "pkg")
+	if err := os.MkdirAll(bare, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	git(t, nested, "init", "-q")
-	write(t, filepath.Join(nested, "AGENTS.md"), "nested repository\n")
-	git(t, nested, "add", "AGENTS.md")
-	git(t, nested, "commit", "-qm", "nested")
+	git(t, bare, "init", "-q", "--bare")
 	if err := prepare(t, linked, "claude"); err != nil {
-		t.Fatal(err)
+		t.Fatalf("bare repository at the target path failed the delegation: %v", err)
 	}
-	if got := readFile(t, filepath.Join(nested, "AGENTS.md")); got != "nested repository\n" {
-		t.Fatalf("file tracked by the nested repository overwritten: %q", got)
+	if _, err := os.Lstat(filepath.Join(bare, "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatalf("file created inside the bare repository: %v", err)
 	}
 	if got := readFile(t, filepath.Join(linked, "AGENTS.md")); got != "# shared placeholder\n" {
 		t.Fatalf("root not prepared: %q", got)
+	}
+}
+
+func TestDelegationLeavesNestedWorktreesAndSubmodulePathsAlone(t *testing.T) {
+	testHome(t)
+	repo, linked := untrackedInstructionWorktree(t)
+	write(t, filepath.Join(repo, "inner", "AGENTS.md"), "primary inner\n")
+	write(t, filepath.Join(repo, "vendor", "pkg", "AGENTS.md"), "primary vendored\n")
+	inner := filepath.Join(linked, "inner")
+	git(t, repo, "worktree", "add", "-qb", "inner", inner)
+	sha := strings.TrimSpace(git(t, linked, "rev-parse", "HEAD"))
+	git(t, linked, "update-index", "--add", "--cacheinfo", "160000,"+sha+",vendor/pkg")
+	if err := os.MkdirAll(filepath.Join(linked, "vendor", "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepare(t, linked, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{filepath.Join("inner", "AGENTS.md"), filepath.Join("vendor", "pkg", "AGENTS.md")} {
+		if _, err := os.Lstat(filepath.Join(linked, rel)); !os.IsNotExist(err) {
+			t.Fatalf("%s was prepared inside another worktree or a submodule path: %v", rel, err)
+		}
+	}
+	if got := readFile(t, filepath.Join(linked, "AGENTS.md")); got != "# shared placeholder\n" {
+		t.Fatalf("root not prepared: %q", got)
+	}
+}
+
+func TestDelegationLeavesOnlyInstructionFilesInTheWorktree(t *testing.T) {
+	home := testHome(t)
+	repo, linked := untrackedInstructionWorktree(t)
+	write(t, filepath.Join(repo, "src", "AGENTS.md"), "primary src\n")
+	write(t, filepath.Join(repo, ".gitignore"), "AGENTS.md\n")
+	git(t, repo, "add", ".gitignore")
+	git(t, repo, "commit", "-qm", "ignore instructions")
+	git(t, linked, "checkout", "-q", "--detach", strings.TrimSpace(git(t, repo, "rev-parse", "HEAD")))
+	if err := prepare(t, linked, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(linked, "src", "AGENTS.md")); got != "primary src\n" {
+		t.Fatalf("nested not prepared: %q", got)
+	}
+	if status := git(t, linked, "status", "--porcelain"); status != "" {
+		t.Fatalf("preparation left files in the worktree:\n%s", status)
+	}
+	var stray []string
+	filepath.WalkDir(linked, func(path string, d os.DirEntry, err error) error {
+		if err == nil && strings.Contains(d.Name(), ".quota") {
+			stray = append(stray, path)
+		}
+		return nil
+	})
+	if len(stray) != 0 {
+		t.Fatalf("preparation left quota files in the worktree: %v", stray)
+	}
+	locks, err := filepath.Glob(filepath.Join(home, ".config", "quota", "instruction-locks", "*.lock"))
+	if err != nil || len(locks) == 0 {
+		t.Fatalf("lock files not kept under the quota state directory: %v %v", locks, err)
 	}
 }
 

@@ -41,9 +41,13 @@ func testExecutable(t *testing.T, home string) string {
 	return path
 }
 
-func TestInstallationUsesTheResolvedExecutableForHookCommands(t *testing.T) {
+func TestInstallationKeepsTheInvokedPathAndReplacesPreviousInstallations(t *testing.T) {
 	i := testInstallation(t)
-	link := filepath.Join(filepath.Dir(i.executable), "linked-quota-cli")
+	home := filepath.Dir(filepath.Dir(i.executable))
+	link := filepath.Join(home, "stable", "quota-cli")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink(i.executable, link); err != nil {
 		t.Fatal(err)
 	}
@@ -51,19 +55,20 @@ func TestInstallationUsesTheResolvedExecutableForHookCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if viaLink.executable != i.executable {
-		t.Fatalf("symlink %s was not resolved to %s: %s", link, i.executable, viaLink.executable)
+	if viaLink.executable != link {
+		t.Fatalf("invoked path %s was not kept: %s", link, viaLink.executable)
 	}
 	if _, err := viaLink.Apply(InstallPlan{Agents: []string{"claude", "codex"}}); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{i.targets.ClaudeSettings, i.targets.CodexHooks} {
+	files := []string{i.targets.ClaudeSettings, i.targets.CodexHooks}
+	for _, path := range files {
 		body, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(body), link) || !strings.Contains(string(body), i.executable) {
-			t.Fatalf("%s does not reference the resolved executable: %s", path, body)
+		if !strings.Contains(string(body), link) || strings.Contains(string(body), i.executable) {
+			t.Fatalf("%s does not keep the invoked link path: %s", path, body)
 		}
 	}
 	statuses, err := i.Inspect([]string{"claude", "codex"})
@@ -72,7 +77,7 @@ func TestInstallationUsesTheResolvedExecutableForHookCommands(t *testing.T) {
 	}
 	for _, s := range statuses {
 		if !s.Configured || len(s.Problems) != 0 {
-			t.Fatalf("%s installed through the symlink is not configured for the resolved path: %+v", s.Agent, s)
+			t.Fatalf("%s installed through the link is not configured when inspected through the real path: %+v", s.Agent, s)
 		}
 	}
 	plan, err := viaLink.Plan([]string{"claude", "codex"}, false)
@@ -81,11 +86,98 @@ func TestInstallationUsesTheResolvedExecutableForHookCommands(t *testing.T) {
 	}
 	for _, change := range plan.Changes {
 		if change.Changed {
-			t.Fatalf("setup through the symlink would rewrite %s", change.Path)
+			t.Fatalf("setup through the link would rewrite %s although its hooks are current", change.Path)
 		}
 	}
-	if _, err := NewInstallation(filepath.Join(filepath.Dir(i.executable), "missing-quota-cli"), i.targets); err == nil {
-		t.Fatal("missing executable accepted")
+	plan, err = i.Plan([]string{"claude", "codex"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewrites := 0
+	for _, change := range plan.Changes {
+		if change.Changed {
+			rewrites++
+		}
+	}
+	if rewrites == 0 {
+		t.Fatal("setup through the real path kept the link path instead of storing the invoked path")
+	}
+
+	v2 := filepath.Join(home, "versions", "v2", "quota-cli")
+	if err := os.MkdirAll(filepath.Dir(v2), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(v2, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(v2, link); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := NewInstallation(link, i.targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses, err = upgraded.Inspect([]string{"claude", "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range statuses {
+		if !s.Configured || len(s.Problems) != 0 {
+			t.Fatalf("hooks stored with the link path stopped matching after the link target changed: %+v", s)
+		}
+	}
+
+	// hooks stored with a versioned real path by an earlier installation
+	for _, agent := range []string{"claude", "codex"} {
+		if _, err := i.Apply(InstallPlan{Agents: []string{agent}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	statuses, err = upgraded.Inspect([]string{"claude", "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range statuses {
+		if s.Configured || !strings.Contains(strings.Join(s.Problems, "\n"), "previous installation") {
+			t.Fatalf("%s hook running a previous installation was not reported: %+v", s.Agent, s)
+		}
+	}
+	plan, err = upgraded.Plan([]string{"claude", "codex"}, false)
+	if err != nil {
+		t.Fatalf("setup after the upgrade refused the previous installation's hooks: %v", err)
+	}
+	changed := map[string]bool{}
+	for _, change := range plan.Changes {
+		changed[change.Path] = changed[change.Path] || change.Changed
+	}
+	for _, path := range files {
+		if !changed[path] {
+			t.Fatalf("setup after the upgrade would leave %s on the previous installation", path)
+		}
+	}
+	if _, err := upgraded.Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range files {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), link) || strings.Contains(string(body), i.executable) {
+			t.Fatalf("%s was not moved to the invoked link path: %s", path, body)
+		}
+	}
+	statuses, err = upgraded.Inspect([]string{"claude", "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range statuses {
+		if !s.Configured || len(s.Problems) != 0 {
+			t.Fatalf("%s not configured after replacing the previous installation: %+v", s.Agent, s)
+		}
 	}
 }
 
@@ -398,9 +490,33 @@ func TestInspectReportsMissingDuplicateAndAlteredHooks(t *testing.T) {
 	}
 }
 
+func TestInstallationReplacesHooksOfPreviousInstallationsWithTheSameName(t *testing.T) {
+	i := testInstallation(t)
+	for _, command := range []string{"/other/quota-cli agent instructions _prepare --agent=codex --event=SessionStart", "/other/quota-cli agent instructions _hook --agent=codex --event=SessionStart", "/other/quota-cli agent overlay hook --runtime=codex --event=SessionStart"} {
+		root := map[string]any{"hooks": map[string]any{"SessionStart": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": command, "additionalContextLimit": 0}}}}}}
+		b, _ := json.Marshal(root)
+		installWrite(t, i.targets.CodexHooks, string(b))
+		statuses, err := i.Inspect([]string{"codex"})
+		if err != nil || statuses[0].Configured || !strings.Contains(strings.Join(statuses[0].Problems, "\n"), "run setup again") {
+			t.Fatalf("previous installation not reported for %s: %+v %v", command, statuses, err)
+		}
+		plan, err := i.Plan([]string{"codex"}, false)
+		if err != nil {
+			t.Fatalf("previous installation refused: %s: %v", command, err)
+		}
+		if _, err := i.Apply(plan); err != nil {
+			t.Fatal(err)
+		}
+		commands := installCommands(t, installReadJSON(t, i.targets.CodexHooks), "SessionStart")
+		if len(commands) != 1 || !strings.Contains(commands[0], i.executable) {
+			t.Fatalf("previous installation not replaced for %s: %v", command, commands)
+		}
+	}
+}
+
 func TestInstallationRejectsUnknownOwnershipBeforeWriting(t *testing.T) {
 	i := testInstallation(t)
-	for _, command := range []string{"/other/quota-cli agent instructions _prepare --agent=codex --event=SessionStart", "/other/quota-cli agent instructions _hook --agent=codex --event=SessionStart", "/other/quota-cli agent overlay hook --runtime=codex --event=SessionStart", `env X=value sh "$HOME/.local/bin/agents-overlay-context" json SessionStart AGENTS.md - . codex-session`, `f() { /example/quota-cli agent instructions _prepare --agent=codex --event=SessionStart; }`} {
+	for _, command := range []string{"quota-cli agent instructions _prepare --agent=codex --event=SessionStart", "/other/quota-cli agent instructions _prepare --agent=codex --event=SessionStart --part=0", `env X=value sh "$HOME/.local/bin/agents-overlay-context" json SessionStart AGENTS.md - . codex-session`, `f() { /example/quota-cli agent instructions _prepare --agent=codex --event=SessionStart; }`} {
 		root := map[string]any{"hooks": map[string]any{"SessionStart": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": command}}}}}}
 		b, _ := json.Marshal(root)
 		installWrite(t, i.targets.CodexHooks, string(b))
@@ -473,5 +589,49 @@ func TestSuspiciousInstructionCommandRecognizesPrepareAndHook(t *testing.T) {
 	}
 	if suspiciousInstructionCommand("/example/custom-binary agent instructions _prepare --agent=codex --event=SessionStart") {
 		t.Fatal("unknown executable treated as quota")
+	}
+}
+
+func TestInstallationRemovesCurrentHooksOfUnsupportedEvents(t *testing.T) {
+	i := testInstallation(t)
+	stale := map[string]any{"type": "command", "command": i.command("claude", "WorktreeCreate")}
+	root := map[string]any{"hooks": map[string]any{"WorktreeCreate": []any{map[string]any{"hooks": []any{stale}}}}}
+	body, err := json.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(i.targets.ClaudeSettings), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(i.targets.ClaudeSettings, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	statuses, err := i.Inspect([]string{"claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(statuses) != 1 || statuses[0].Configured || !strings.Contains(strings.Join(statuses[0].Problems, "\n"), "WorktreeCreate: obsolete managed hook") {
+		t.Fatalf("status accepted a managed hook of an unsupported event: %+v", statuses)
+	}
+	plan, err := i.Plan([]string{"claude"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := i.Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := os.ReadFile(i.targets.ClaudeSettings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(settings), "WorktreeCreate") {
+		t.Fatalf("setup kept the managed hook of an unsupported event: %s", settings)
+	}
+	statuses, err = i.Inspect([]string{"claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(statuses) != 1 || !statuses[0].Configured || len(statuses[0].Problems) != 0 {
+		t.Fatalf("status after setup: %+v", statuses)
 	}
 }

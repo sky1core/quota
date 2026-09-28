@@ -63,21 +63,80 @@ func gitBoolean(e error) (bool, error) {
 
 func isNotDirectory(err error) bool { return errors.Is(err, syscall.ENOTDIR) }
 
-func (r repoContext) tracked(path string) (bool, error) {
+func nearestExistingDir(path string) (string, error) {
 	cwd := filepath.Dir(path)
 	for {
 		info, err := os.Stat(cwd)
 		if err == nil && info.IsDir() {
-			break
+			return cwd, nil
 		}
 		if err != nil && !os.IsNotExist(err) && !isNotDirectory(err) {
-			return false, err
+			return "", err
 		}
 		parent := filepath.Dir(cwd)
 		if parent == cwd {
-			return false, fmt.Errorf("no existing directory above %s", path)
+			return "", fmt.Errorf("no existing directory above %s", path)
 		}
 		cwd = parent
+	}
+}
+
+func (r repoContext) ownsTarget(target string) (bool, error) {
+	cwd, err := nearestExistingDir(target)
+	if err != nil {
+		return false, err
+	}
+	out, err := gitOutput(r.Context, cwd, "rev-parse", "--is-bare-repository", "--is-inside-work-tree")
+	if err != nil {
+		if errors.Is(err, ErrOutsideRepository) {
+			return false, nil
+		}
+		return false, err
+	}
+	if string(out) != "false\ntrue\n" {
+		return false, nil
+	}
+	out, err = gitOutput(r.Context, cwd, "rev-parse", "--path-format=absolute", "--show-toplevel")
+	if err != nil {
+		return false, err
+	}
+	top, err := onePath(out)
+	if err != nil {
+		return false, err
+	}
+	if top != resolvePath(r.Top) {
+		return false, nil
+	}
+	rel, err := filepath.Rel(r.Top, target)
+	if err != nil {
+		return false, err
+	}
+	ancestors := map[string]bool{}
+	args := []string{"ls-files", "-z", "--stage", "--"}
+	for dir := filepath.Dir(rel); dir != "."; dir = filepath.Dir(dir) {
+		ancestors[filepath.ToSlash(dir)] = true
+		args = append(args, ":(literal)"+filepath.ToSlash(dir))
+	}
+	if len(ancestors) == 0 {
+		return true, nil
+	}
+	out, err = gitOutput(r.Context, r.Top, args...)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00") {
+		meta, path, found := strings.Cut(entry, "\t")
+		if found && strings.HasPrefix(meta, "160000 ") && ancestors[path] {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (r repoContext) tracked(path string) (bool, error) {
+	cwd, err := nearestExistingDir(path)
+	if err != nil {
+		return false, err
 	}
 	rel, err := filepath.Rel(cwd, path)
 	if err != nil {

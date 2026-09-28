@@ -187,7 +187,7 @@ func runAgentInstructions(args []string, stdin io.Reader, stdout, stderr io.Writ
 		}
 		return finish(err, err != nil)
 	}
-	executable, err := os.Executable()
+	executable, err := invokedExecutable()
 	if err != nil {
 		return finish(err, true)
 	}

@@ -8,32 +8,49 @@ import (
 	"strings"
 )
 
+type InstructionCommandState int
+
+const (
+	InstructionNotManaged InstructionCommandState = iota
+	InstructionCurrent
+	InstructionOtherExecutable
+	InstructionLegacy
+)
+
 func OwnsInstructionCommand(command, executable, agent, event string) bool {
-	if ownsCurrentInstructionCommand(command, executable, agent, event) {
-		return true
+	return InstructionCommand(command, executable, agent, event) != InstructionNotManaged
+}
+
+func InstructionCommand(command, executable, agent, event string) InstructionCommandState {
+	if inv, ok := parseDirectShellInvocation(command); ok {
+		argv := inv.Argv
+		if len(argv) >= 6 && managedExecutable(argv[0], executable) && argv[1] == "agent" {
+			if argv[2] == "instructions" && (argv[3] == "_prepare" || argv[3] == "_hook") && ownsInstructionPrepareArgs(argv[4:], agent, event) {
+				if len(argv) == 6 && argv[3] == "_prepare" && argv[4] == "--agent="+agent && argv[5] == "--event="+event {
+					if sameExecutable(argv[0], executable) {
+						return InstructionCurrent
+					}
+					return InstructionOtherExecutable
+				}
+				return InstructionLegacy
+			}
+			if argv[2] == "overlay" && argv[3] == "hook" && len(argv) == 6 && argv[4] == "--runtime="+agent && argv[5] == "--event="+event {
+				return InstructionLegacy
+			}
+		}
 	}
 	legacy := map[string]string{"claude/SessionStart": "json SessionStart CLAUDE.md CLAUDE.local.md . claude-session", "claude/WorktreeCreate": "claude-worktree-create", "claude/WorktreeRemove": "claude-worktree-remove", "codex/SessionStart": "json SessionStart AGENTS.md - . codex-session", "codex/SubagentStart": "json SubagentStart AGENTS.md - . codex-subagent"}
-	suffix, ok := legacy[agent+"/"+event]
-	return ok && command == `sh "$HOME/.local/bin/agents-overlay-context" `+suffix
+	if suffix, ok := legacy[agent+"/"+event]; ok && command == `sh "$HOME/.local/bin/agents-overlay-context" `+suffix {
+		return InstructionLegacy
+	}
+	return InstructionNotManaged
 }
-func ownsCurrentInstructionCommand(command, executable, agent, event string) bool {
-	inv, ok := parseDirectShellInvocation(command)
-	if !ok {
-		return false
+
+func managedExecutable(candidate, executable string) bool {
+	if sameExecutable(candidate, executable) {
+		return true
 	}
-	argv := inv.Argv
-	if len(argv) < 6 || !sameExecutable(argv[0], executable) {
-		return false
-	}
-	if argv[1] == "agent" && argv[2] == "instructions" && (argv[3] == "_prepare" || argv[3] == "_hook") {
-		return ownsInstructionPrepareArgs(argv[4:], agent, event)
-	}
-	return argv[1] == "agent" &&
-		argv[2] == "overlay" &&
-		argv[3] == "hook" &&
-		len(argv) == 6 &&
-		argv[4] == "--runtime="+agent &&
-		argv[5] == "--event="+event
+	return filepath.IsAbs(candidate) && filepath.Base(candidate) == filepath.Base(executable)
 }
 
 func ownsInstructionPrepareArgs(args []string, agent, event string) bool {

@@ -13,6 +13,21 @@ import (
 var ErrExists = errors.New("file already exists")
 
 func Save(path string, data []byte, perm os.FileMode, force bool) error {
+	if !force {
+		return save(path, data, perm, "")
+	}
+	sum := sha256.Sum256([]byte(filepath.Base(path)))
+	return save(path, data, perm, filepath.Join(filepath.Dir(path), fmt.Sprintf(".quota-%x.lock", sum)))
+}
+
+func SaveLocked(path string, data []byte, perm os.FileMode, lockPath string) error {
+	if lockPath == "" {
+		return errors.New("lock path is required")
+	}
+	return save(path, data, perm, lockPath)
+}
+
+func save(path string, data []byte, perm os.FileMode, lockPath string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -30,7 +45,7 @@ func Save(path string, data []byte, perm os.FileMode, force bool) error {
 		return err
 	}
 
-	if !force {
+	if lockPath == "" {
 		if err := os.Link(tmpName, path); err != nil {
 			if errors.Is(err, os.ErrExist) {
 				return fmt.Errorf("%s: %w", path, ErrExists)
@@ -40,7 +55,7 @@ func Save(path string, data []byte, perm os.FileMode, force bool) error {
 		return nil
 	}
 
-	unlock, err := lockTarget(path)
+	unlock, err := lockTarget(lockPath)
 	if err != nil {
 		return err
 	}
@@ -80,9 +95,7 @@ func createExclusiveTemp(dir, prefix string, perm os.FileMode) (*os.File, error)
 	}
 }
 
-func lockTarget(path string) (func(), error) {
-	sum := sha256.Sum256([]byte(filepath.Base(path)))
-	lockPath := filepath.Join(filepath.Dir(path), fmt.Sprintf(".quota-%x.lock", sum))
+func lockTarget(lockPath string) (func(), error) {
 	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err

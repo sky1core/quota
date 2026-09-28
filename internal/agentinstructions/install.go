@@ -92,11 +92,7 @@ func NewInstallation(executable string, targets InstallTargets) (*Installation, 
 	if !filepath.IsAbs(executable) || strings.ContainsAny(executable, "\x00\r\n") {
 		return nil, fmt.Errorf("executable must be an absolute path")
 	}
-	resolved, err := filepath.EvalSymlinks(executable)
-	if err != nil {
-		return nil, fmt.Errorf("cannot resolve executable %s: %w", executable, err)
-	}
-	return &Installation{resolved, targets}, nil
+	return &Installation{executable, targets}, nil
 }
 func (i *Installation) resolveSelectedTargets(agents []string) (*Installation, error) {
 	resolved := *i
@@ -168,6 +164,37 @@ func (i *Installation) expectedHook(agent, event string) map[string]any {
 func (i *Installation) owns(command, agent, event string) bool {
 	return agenthooks.OwnsInstructionCommand(command, i.executable, agent, event)
 }
+func (i *Installation) state(command, agent, event string) agenthooks.InstructionCommandState {
+	return agenthooks.InstructionCommand(command, i.executable, agent, event)
+}
+
+type NativeExpectations struct {
+	Commands   map[string]string
+	Executable string
+}
+
+var nativeInstructionEvents = map[string]string{"sessionStart": "SessionStart", "subagentStart": "SubagentStart"}
+
+func (e NativeExpectations) Matches(event, command string) bool {
+	want, ok := e.Commands[event]
+	if !ok || want == "" || command == "" {
+		return false
+	}
+	if command == want {
+		return true
+	}
+	hookEvent, managed := nativeInstructionEvents[event]
+	return managed && e.Executable != "" && agenthooks.InstructionCommand(command, e.Executable, "codex", hookEvent) == agenthooks.InstructionCurrent
+}
+
+func (e NativeExpectations) obsolete(event, command string) bool {
+	hookEvent, managed := nativeInstructionEvents[event]
+	if !managed || e.Executable == "" {
+		return false
+	}
+	state := agenthooks.InstructionCommand(command, e.Executable, "codex", hookEvent)
+	return state != agenthooks.InstructionNotManaged && state != agenthooks.InstructionCurrent
+}
 func suspiciousInstructionCommand(command string, knownExecutables ...string) bool {
 	return agenthooks.SuspiciousInstructionCommand(command, knownExecutables...)
 }
@@ -216,7 +243,21 @@ func installArray(v any) ([]any, bool) {
 		return nil, false
 	}
 }
+func (i *Installation) currentSettings(hook map[string]any, agent, event string) bool {
+	want := i.expectedHook(agent, event)
+	settings := map[string]any{}
+	for k, v := range hook {
+		settings[k] = v
+	}
+	settings["command"] = want["command"]
+	return installEqual(settings, want)
+}
 func (i *Installation) transformHooks(root map[string]any, agent string, uninstall bool) error {
+	installed := map[string]bool{}
+	for _, event := range instructionEvents(agent) {
+		installed[event] = true
+	}
+	present := map[string]bool{}
 	hooks := map[string]any{}
 	if raw, ok := root["hooks"]; ok {
 		var valid bool
@@ -255,7 +296,12 @@ func (i *Installation) transformHooks(root map[string]any, agent string, uninsta
 					return fmt.Errorf("hooks.%s hook must be an object", event)
 				}
 				command, _ := hook["command"].(string)
-				if i.owns(command, agent, event) {
+				if state := i.state(command, agent, event); state != agenthooks.InstructionNotManaged {
+					if !uninstall && installed[event] && !present[event] && len(group) == 1 && installEqual(hook, i.expectedHook(agent, event)) {
+						present[event] = true
+						keep = append(keep, entry)
+						continue
+					}
 					removed = true
 					groupRemoved = true
 					continue
@@ -286,6 +332,9 @@ func (i *Installation) transformHooks(root map[string]any, agent string, uninsta
 	}
 	if !uninstall {
 		for _, event := range instructionEvents(agent) {
+			if present[event] {
+				continue
+			}
 			groups, _ := installArray(hooks[event])
 			hooks[event] = append(groups, map[string]any{"hooks": []any{i.expectedHook(agent, event)}})
 		}
@@ -501,16 +550,21 @@ func (i *Installation) Inspect(agents []string) ([]InstallStatus, error) {
 				for _, e := range entries {
 					h, _ := e.(map[string]any)
 					c, _ := h["command"].(string)
-					if !i.owns(c, agent, event) {
+					state := i.state(c, agent, event)
+					if state == agenthooks.InstructionNotManaged {
 						continue
 					}
-					want, current := expected[event]
-					if !current || c != want["command"] {
+					_, current := expected[event]
+					switch {
+					case !current, state == agenthooks.InstructionLegacy:
 						problem(fmt.Sprintf("%s: obsolete managed hook; run setup again", event))
+						continue
+					case state == agenthooks.InstructionOtherExecutable:
+						problem(fmt.Sprintf("%s: managed hook runs a previous installation instead of %s; run setup again", event, i.executable))
 						continue
 					}
 					counts[event]++
-					if !installEqual(h, want) {
+					if !i.currentSettings(h, agent, event) {
 						problem(fmt.Sprintf("%s: managed hook differs from the fixed execution settings", event))
 					}
 					for k := range g {
@@ -576,6 +630,6 @@ func uniqueInstallStrings(v []string) []string {
 	return out
 }
 
-func (i *Installation) ExpectedCodexHooks() map[string]string {
-	return map[string]string{"sessionStart": i.command("codex", instructionEvent)}
+func (i *Installation) ExpectedCodexHooks() NativeExpectations {
+	return NativeExpectations{Commands: map[string]string{"sessionStart": i.command("codex", instructionEvent)}, Executable: i.executable}
 }

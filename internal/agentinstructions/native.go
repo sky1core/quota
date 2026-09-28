@@ -56,8 +56,8 @@ type nativeHookMetadata struct {
 	AsyncValue  json.RawMessage `json:"async"`
 }
 
-func InspectNativeCodexHooksForHome(ctx context.Context, cwd, home string, expected map[string]string) (NativeReport, error) {
-	for event, command := range expected {
+func InspectNativeCodexHooksForHome(ctx context.Context, cwd, home string, expected NativeExpectations) (NativeReport, error) {
+	for event, command := range expected.Commands {
 		if (event != "sessionStart" && event != "subagentStart" && event != "preToolUse") || command == "" {
 			return NativeReport{State: "unknown", Hooks: []NativeHook{}}, fmt.Errorf("invalid expected hook event or command: %s", event)
 		}
@@ -100,7 +100,7 @@ func (i *Installation) PlanCodexHookTrust(ctx context.Context, cwd string, insta
 		return nil, err
 	}
 	if installHookChanged {
-		if _, err := inspectNativeCodexHooks(ctx, cwd, i.targets.CodexHome, nil); err != nil {
+		if _, err := inspectNativeCodexHooks(ctx, cwd, i.targets.CodexHome, NativeExpectations{}); err != nil {
 			return nil, err
 		}
 		return &InstallChange{Account: i.targets.CodexAccount, Agent: "codex", Path: i.targets.CodexConfig, Changed: true, Operation: "sync managed hook trust"}, nil
@@ -135,7 +135,7 @@ func (i *Installation) codexHookTrustMetadata(ctx context.Context, cwd string) (
 	expected := i.ExpectedCodexHooks()
 	for n := range report.hookMetadata {
 		hook := &report.hookMetadata[n]
-		if hook.Event != "sessionStart" || hook.Command != expected["sessionStart"] || hook.HandlerType != "command" || !sameNativeCodexHookSource(hook.SourcePath, i.targets.CodexHooks) {
+		if hook.Event != "sessionStart" || !expected.Matches("sessionStart", hook.Command) || hook.HandlerType != "command" || !sameNativeCodexHookSource(hook.SourcePath, i.targets.CodexHooks) {
 			continue
 		}
 		if matched != nil {
@@ -168,7 +168,7 @@ func sameNativeCodexHookSource(actual, expected string) bool {
 	return false
 }
 
-func inspectNativeCodexHooks(ctx context.Context, cwd, home string, expected map[string]string) (NativeReport, error) {
+func inspectNativeCodexHooks(ctx context.Context, cwd, home string, expected NativeExpectations) (NativeReport, error) {
 	report := NativeReport{State: "unknown", Hooks: []NativeHook{}}
 	cwd, err := filepath.Abs(cwd)
 	if err != nil {
@@ -288,7 +288,7 @@ func codexQuotedKeySegment(key string) string {
 	return b.String()
 }
 
-func parseNativeHooks(raw json.RawMessage, cwd string, expected map[string]string, report *NativeReport) error {
+func parseNativeHooks(raw json.RawMessage, cwd string, expected NativeExpectations, report *NativeReport) error {
 	var result struct {
 		Data []struct {
 			Cwd      string                `json:"cwd"`
@@ -330,11 +330,11 @@ func parseNativeHooks(raw json.RawMessage, cwd string, expected map[string]strin
 	}
 	report.State = "configured"
 	counts := make(map[string]int)
-	checkUnexpectedInstructions := expected["sessionStart"] != "" || expected["subagentStart"] != ""
+	checkUnexpectedInstructions := expected.Commands["sessionStart"] != "" || expected.Commands["subagentStart"] != ""
 	for i := range report.Hooks {
 		hook := &report.Hooks[i]
 		hook.State = "unknown"
-		hook.Matched = hook.Command != "" && expected[hook.Event] == hook.Command && hook.HandlerType == "command"
+		hook.Matched = hook.HandlerType == "command" && expected.Matches(hook.Event, hook.Command)
 		if hook.Enabled == nil || hook.Event == "" || hook.Source == "" || hook.SourcePath == "" {
 			return errors.New("hooks/list returned incomplete hook metadata")
 		}
@@ -355,10 +355,17 @@ func parseNativeHooks(raw json.RawMessage, cwd string, expected map[string]strin
 			hook.State = "blocked"
 		}
 		if !hook.Matched {
-			if checkUnexpectedInstructions && hook.HandlerType == "command" && suspiciousInstructionCommand(hook.Command) {
-				hook.State = "blocked"
-				report.State = "blocked"
-				report.Issues = append(report.Issues, fmt.Sprintf("%s: unexpected instruction hook from %s at %s; ownership or duplicate delivery requires review", hook.Event, hook.Source, hook.SourcePath))
+			if checkUnexpectedInstructions && hook.HandlerType == "command" {
+				switch {
+				case hook.Source == "user" && expected.obsolete(hook.Event, hook.Command):
+					hook.State = "blocked"
+					report.State = "blocked"
+					report.Issues = append(report.Issues, fmt.Sprintf("%s: obsolete managed hook at %s; run setup again", hook.Event, hook.SourcePath))
+				case suspiciousInstructionCommand(hook.Command):
+					hook.State = "blocked"
+					report.State = "blocked"
+					report.Issues = append(report.Issues, fmt.Sprintf("%s: unexpected instruction hook from %s at %s; ownership or duplicate delivery requires review", hook.Event, hook.Source, hook.SourcePath))
+				}
 			}
 			hook.Command = ""
 			continue
@@ -380,8 +387,8 @@ func parseNativeHooks(raw json.RawMessage, cwd string, expected map[string]strin
 			report.State = hook.State
 		}
 	}
-	events := make([]string, 0, len(expected))
-	for event := range expected {
+	events := make([]string, 0, len(expected.Commands))
+	for event := range expected.Commands {
 		events = append(events, event)
 	}
 	sort.Strings(events)

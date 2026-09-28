@@ -65,6 +65,58 @@ func TestOwnsInstructionCommandRejectsDifferentExecutable(t *testing.T) {
 	}
 }
 
+func TestInstructionCommandDistinguishesCurrentPreviousAndLegacyForms(t *testing.T) {
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "current", "quota-cli")
+	previous := filepath.Join(dir, "previous", "quota-cli")
+	removed := filepath.Join(dir, "removed", "quota-cli")
+	renamed := filepath.Join(dir, "current", "quota-cli-dev")
+	for _, path := range []string{executable, previous, renamed} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(dir, "stable", "quota-cli")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(executable, link); err != nil {
+		t.Fatal(err)
+	}
+	current := func(path string) string {
+		return ShellQuote([]string{path, "agent", "instructions", "_prepare", "--agent=codex", "--event=SessionStart"})
+	}
+	for _, tc := range []struct {
+		command string
+		want    InstructionCommandState
+	}{
+		{current(executable), InstructionCurrent},
+		{current(link), InstructionCurrent},
+		{current(previous), InstructionOtherExecutable},
+		{current(removed), InstructionOtherExecutable},
+		{current(renamed), InstructionNotManaged},
+		{current("quota-cli"), InstructionNotManaged},
+		{ShellQuote([]string{executable, "agent", "instructions", "_hook", "--agent=codex", "--event=SessionStart"}), InstructionLegacy},
+		{ShellQuote([]string{previous, "agent", "instructions", "_prepare", "--agent=codex", "--event=SessionStart", "--codex-home", dir}), InstructionLegacy},
+		{ShellQuote([]string{previous, "agent", "overlay", "hook", "--runtime=codex", "--event=SessionStart"}), InstructionLegacy},
+		{`sh "$HOME/.local/bin/agents-overlay-context" json SessionStart AGENTS.md - . codex-session`, InstructionLegacy},
+		{current(executable), InstructionCurrent},
+	} {
+		if got := InstructionCommand(tc.command, executable, "codex", "SessionStart"); got != tc.want {
+			t.Errorf("%s: state %d, want %d", tc.command, got, tc.want)
+		}
+	}
+	if got := InstructionCommand(current(executable), link, "codex", "SessionStart"); got != InstructionCurrent {
+		t.Errorf("real path command inspected through the link: state %d", got)
+	}
+	if got := InstructionCommand(current(executable), executable, "claude", "SessionStart"); got != InstructionNotManaged {
+		t.Errorf("Codex command owned for Claude: state %d", got)
+	}
+}
+
 func TestOwnsInstructionCommandRejectsIndirectShellSyntax(t *testing.T) {
 	dir := t.TempDir()
 	executable := filepath.Join(dir, "quota-cli")

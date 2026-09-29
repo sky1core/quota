@@ -370,6 +370,68 @@ func writeSessionLog(t *testing.T, path string, lines []string) string {
 	return path
 }
 
+func TestSessionLogSkipsSymlinkedEntriesUnderLogRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CLAUDE_PROJECTS_DIR", "")
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("CODEX_SESSIONS_DIR", "")
+
+	cfg := config.Config{
+		ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/claude-two"}},
+	}
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	projectDir := filepath.Join(home, "claude-two", "projects", "project-a")
+	writeSessionLog(t, filepath.Join(projectDir, "real.jsonl"), []string{
+		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"needle in real log"}]}}`,
+	})
+	outside := writeSessionLog(t, filepath.Join(home, "outside", "external.jsonl"), []string{
+		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"needle in outside file"}]}}`,
+	})
+	if err := os.Symlink(outside, filepath.Join(projectDir, "linked.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "outside", "missing.jsonl"), filepath.Join(projectDir, "broken.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "outside"), filepath.Join(projectDir, "dir.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := sessionLogList([]string{"-agent", "claude", "-limit", "10"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("list exit code = %d, stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "real.jsonl") {
+		t.Fatalf("list output missing real.jsonl:\n%s", out)
+	}
+	for _, unwanted := range []string{"linked.jsonl", "broken.jsonl", "dir.jsonl"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("list output includes symlinked entry %q:\n%s", unwanted, out)
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = sessionLogSearch([]string{"-agent", "claude", "-limit", "10", "needle"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("search exit code = %d, stderr = %s", code, stderr.String())
+	}
+	out = stdout.String()
+	if !strings.Contains(out, "needle in real log") {
+		t.Fatalf("search output missing real log match:\n%s", out)
+	}
+	if strings.Contains(out, "needle in outside file") {
+		t.Fatalf("search followed a file symlink under the log root:\n%s", out)
+	}
+}
+
 func TestSessionLogSearchFollowsSymlinkedLogRoots(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

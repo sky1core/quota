@@ -456,6 +456,9 @@ func discoverSessionLogRecords(accounts []sessionLogAccount) ([]sessionLogRecord
 			if err != nil {
 				return err
 			}
+			if !info.Mode().IsRegular() {
+				return nil
+			}
 			records = append(records, sessionLogRecord{
 				Provider:  account.Provider,
 				Account:   account.Key,

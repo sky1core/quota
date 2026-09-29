@@ -50,9 +50,42 @@ func PrepareDelegationInstructions(ctx context.Context, dir, agent string, creat
 }
 
 func (r repoContext) untrackedInstructionSources() ([]string, error) {
+	var rels []string
+	var err error
 	if r.Root == r.Common {
-		return instructionFilesBelow(r.Root)
+		rels, err = instructionFilesBelow(r.Root)
+	} else {
+		rels, err = r.untrackedInstructionFiles()
 	}
+	if err != nil {
+		return nil, err
+	}
+	var own []string
+	for _, rel := range rels {
+		ours, err := r.ownsDirectory(filepath.Join(r.Root, filepath.Dir(rel)))
+		if err != nil {
+			return nil, err
+		}
+		if ours {
+			own = append(own, rel)
+		}
+	}
+	return own, nil
+}
+
+func (r repoContext) ownsDirectory(dir string) (bool, error) {
+	out, _, err := gitOutputWithEnv(r.Context, dir, []string{"GIT_DISCOVERY_ACROSS_FILESYSTEM=1"}, "rev-parse", "--path-format=absolute", "--git-dir")
+	if err != nil {
+		return false, fmt.Errorf("cannot determine the repository owning %s: %w", dir, err)
+	}
+	gitDir, err := onePath(out)
+	if err != nil {
+		return false, fmt.Errorf("cannot determine the repository owning %s: %w", dir, err)
+	}
+	return gitDir == r.Common, nil
+}
+
+func (r repoContext) untrackedInstructionFiles() ([]string, error) {
 	out, stderr, err := gitOutputWithStderr(r.Context, r.Root, "ls-files", "--others", "-z", "--", ":(glob)**/AGENTS.md")
 	if err != nil {
 		return nil, err

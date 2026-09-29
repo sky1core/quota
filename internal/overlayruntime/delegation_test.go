@@ -344,6 +344,54 @@ func TestDelegationSkipsSymlinksInsideANestedBareRepository(t *testing.T) {
 	}
 }
 
+func TestDelegationLeavesNestedBareRepositoryFilesToThatRepository(t *testing.T) {
+	t.Run("primary worktree", func(t *testing.T) {
+		testHome(t)
+		repo, linked := untrackedInstructionWorktree(t)
+		git(t, repo, "init", "-q", "--bare", "mirror.git")
+		write(t, filepath.Join(repo, "mirror.git", "AGENTS.md"), "mirror instructions\n")
+		if err := prepare(t, linked, "claude"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(linked, "mirror.git")); !os.IsNotExist(err) {
+			t.Fatalf("nested bare repository file copied into the worktree: %v", err)
+		}
+		if got := readFile(t, filepath.Join(linked, "AGENTS.md")); got != "# shared placeholder\n" {
+			t.Fatalf("root not prepared: %q", got)
+		}
+	})
+	t.Run("worktree created after launch", func(t *testing.T) {
+		testHome(t)
+		repo := newRepo(t)
+		git(t, repo, "init", "-q", "--bare", "mirror.git")
+		write(t, filepath.Join(repo, "mirror.git", "AGENTS.md"), "mirror instructions\n")
+		if err := PrepareDelegationInstructions(context.Background(), repo, "codex", true); err != nil {
+			t.Fatalf("nested bare repository file blocked worktree creation: %v", err)
+		}
+	})
+	t.Run("bare primary", func(t *testing.T) {
+		testHome(t)
+		repo := newRepo(t)
+		bare := filepath.Join(filepath.Dir(repo), "bare.git")
+		git(t, repo, "clone", "-q", "--bare", repo, bare)
+		bare = resolvePath(bare)
+		checkout := filepath.Join(filepath.Dir(repo), "checkout")
+		git(t, bare, "worktree", "add", "-q", checkout, "main")
+		git(t, bare, "init", "-q", "--bare", "mirror.git")
+		write(t, filepath.Join(bare, "mirror.git", "AGENTS.md"), "mirror instructions\n")
+		write(t, filepath.Join(bare, "sub", "AGENTS.md"), "bare nested\n")
+		if err := prepare(t, checkout, "claude"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(checkout, "mirror.git")); !os.IsNotExist(err) {
+			t.Fatalf("nested bare repository file copied into the checkout: %v", err)
+		}
+		if got := readFile(t, filepath.Join(checkout, "sub", "AGENTS.md")); got != "bare nested\n" {
+			t.Fatalf("bare nested = %q", got)
+		}
+	})
+}
+
 func TestDelegationReportsBrokenNestedRepositoryMetadata(t *testing.T) {
 	testHome(t)
 	repo, linked := untrackedInstructionWorktree(t)

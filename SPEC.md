@@ -235,7 +235,7 @@ home 미지정 시 quota 기본 계정(`~/.codex`)을 조회한다. 호출자 �
 
 **위임 시작 시 지침 준비·검사**:
 
-위임 에이전트는 실제 작업 worktree의 `AGENTS.md`를 native로 읽는다. 준비 기준은 그 worktree에 대응하는 primary 원본이며, primary 루트부터 모든 하위 폴더의 `AGENTS.md`를 대상으로 한다. 중첩 저장소(submodule, 안쪽에 만든 worktree) 내부는 그 저장소의 범위이므로 대상이 아니다. 표의 원본은 **primary가 Git으로 추적하지 않는** `AGENTS.md`(ignore 포함)다. 추적 파일은 각 checkout의 내용을 따르며, 대상 worktree에 없어도 복사하지 않고 오류로 보지 않는다.
+위임 에이전트는 실제 작업 worktree의 `AGENTS.md`를 native로 읽는다. 준비 기준은 그 worktree에 대응하는 primary 원본이며, primary 루트부터 모든 하위 폴더의 `AGENTS.md`를 대상으로 한다. 중첩 저장소(submodule, 안쪽에 만든 worktree, bare 저장소) 내부는 그 저장소의 범위이므로 대상이 아니다. 표의 원본은 **primary가 Git으로 추적하지 않는** `AGENTS.md`(ignore 포함)다. 추적 파일은 각 checkout의 내용을 따르며, 대상 worktree에 없어도 복사하지 않고 오류로 보지 않는다.
 
 | 원본 `AGENTS.md` | 위임 worktree의 대응 파일 | 처리 |
 |---|---|---|

@@ -1,6 +1,7 @@
 /quota-cli
 /quota-bar
 .tmp/
+.worktreeinclude
 
 # 마크다운은 기본 차단이고, 공개할 문서만 아래에서 개별 허용한다.
 # 로컬 노트가 새 .md로 조용히 딸려 들어가는 것을 막는 것이 목적이므로,

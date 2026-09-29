@@ -304,9 +304,16 @@ func classifyGhCommand(parsed *parsedCommand, path string, positionals commandIn
 		}
 	case "skill publish":
 		remote = dynamic("--dry-run") || !enabled("--dry-run")
-	case "stack":
+	case "stack push", "stack submit", "stack sync", "stack merge":
+		remote = true
+	case "stack link":
 		if positionals.anyDynamic() {
-			parsed.undecidable = "gh stack arguments cannot be determined"
+			parsed.undecidable = "gh stack link arguments cannot be determined"
+			return
+		}
+	case "stack alias":
+		if dynamic("--remove") || !enabled("--remove") {
+			parsed.undecidable = "gh stack alias installs a wrapper executable whose later invocations bypass policy evaluation"
 			return
 		}
 	}
@@ -325,7 +332,10 @@ func ghUnconditionalDataCommand(path string) bool {
 		"issue close", "issue reopen", "issue lock", "issue unlock", "issue delete", "issue transfer", "issue pin", "issue unpin",
 		"repo view", "repo list", "repo ls", "repo clone",
 		"alias list", "alias ls", "alias set", "alias import", "alias delete",
-		"release view", "release list", "release ls", "release download", "release upload", "release delete-asset":
+		"release view", "release list", "release ls", "release download", "release upload", "release delete-asset",
+		"stack view", "stack checkout", "stack init", "stack add", "stack rebase", "stack modify",
+		"stack unstack", "stack delete", "stack feedback",
+		"stack up", "stack down", "stack top", "stack bottom", "stack trunk", "stack switch":
 		return true
 	}
 	return false

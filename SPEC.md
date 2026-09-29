@@ -306,7 +306,7 @@ home 미지정 시 quota 기본 계정(`~/.codex`)을 조회한다. 호출자 �
 | 릴리스 | 기존 태그에 대한 릴리스 정보·노트·첨부물 생성/편집/삭제는 이 정책에서 허용한다. 태그 생성·변경·삭제를 수반하면 차단한다. `release create --verify-tag`와 태그 자동 생성, `release delete`와 `--cleanup-tag`를 구분한다. |
 | 저장소 설정 | 공개 범위, deploy key, collaborator/team, autolink, secret/variable, workflow enable/disable처럼 저장소 권한·보안·자동화 상태를 바꾸는 명령은 기본 차단한다. 조회 전용 설정 명령은 허용한다. |
 | 간접 실행 | `git hook run`·`for-each-repo`·`bisect run`·`submodule foreach`, alias/extension 실행, workflow·외부 작업 실행은 실행 내용에 따라 판정한다. 명령 이름만으로 원격 쓰기라고 단정하지 않으며, 실행 내용이 불명확한 경우는 아래 판정불가 계약을 따른다. |
-| stack 형식 제한 | PR 간 연결만 허용하고 스택의 push·이력 재작성 경로를 열지 않도록 별도 승인된 형식 제한을 적용한다. `gh stack link <정수> <정수>`만 허용하고 그 밖의 `gh stack ...`는 차단한다. 다른 형식이 모두 원격 쓰기라는 뜻은 아니며, 이 제한을 다른 협업 메타데이터 명령 전체로 확대하지 않는다. |
+| `gh stack` 확장 | `gh stack push`·`submit`·`sync`·`merge`는 원격 쓰기로 차단한다. `gh stack link`는 사용자가 정한 `gh stack link <정수> <정수>` 형식만 허용하고, 브랜치명·URL·추가 인자·옵션이 붙은 다른 link 형태는 push 가능성이 있으므로 차단하며 동적 인자는 판정불가다. `init`·`add`·`checkout`·`up`·`down`·`top`·`bottom`·`trunk`·`switch`·`rebase`·`modify`·`view`·`unstack`·`feedback`는 로컬·조회·메타데이터 작업으로 허용한다. `gh stack alias`는 PATH에 별도 실행 파일을 만들어 이후 호출이 hook 평가를 거치지 않으므로 판정불가로 차단하고, `--remove`만 허용한다. |
 
 **`agent hooks` 판정 계약**:
 - 판정 대상은 실행 명령과 그 명령에 적용되는 활성 정책이다. 인자에 `git push` 같은 문자열이 있다는 이유로 검색·출력을 실행으로 취급하지 않는다. `echo 'git push'`, `rg "git push"`는 Git/GitHub 기본 정책에서 허용한다. `eval 'git push'`, `sh -c 'git push'`처럼 실행 인자를 받는 지원 wrapper는 안쪽 명령을 평가한다.
@@ -319,7 +319,7 @@ home 미지정 시 quota 기본 계정(`~/.codex`)을 조회한다. 호출자 �
 
 **`agent hooks` 동작**:
 - 정책 파일은 기본적으로 `~/.config/quota/agent-hooks.d/*.json`에서 읽는다. 모든 `agent hooks` 하위 명령은 `--policy-dir <dir>`로 다른 정책 디렉터리를 지정할 수 있다.
-- `init --preset=github-history-guard`는 세 동작 그룹을 구분한 기본 정책을 생성한다. `remote-code-ref-mutation`은 위 Git/GitHub 기본 정책의 원격 코드·ref·저장소 설정 쓰기를 차단하고, `github-collaboration-metadata`는 협업 메타데이터 허용 대조군을 식별한다. 명시된 `gh stack` 형식 제한도 유지한다. `local-system-secret-safety`는 별도의 로컬·시스템·비밀정보 안전 범위를 가진다.
+- `init --preset=github-history-guard`는 세 동작 그룹을 구분한 기본 정책을 생성한다. `remote-code-ref-mutation`은 위 Git/GitHub 기본 정책의 원격 코드·ref·저장소 설정 쓰기를 차단하고, `github-collaboration-metadata`는 협업 메타데이터 허용 대조군을 식별한다. `local-system-secret-safety`는 별도의 로컬·시스템·비밀정보 안전 범위를 가진다.
 - `local-system-secret-safety` 차단 그룹에는 `rm`/`rmdir`/`unlink`, `mkfs*`/`newfs*`/`fdisk`, `dd if=*`/`dd of=*`, `sudo`/`doas`/`su`, `shutdown`/`reboot`/`poweroff`/`halt`/`init 0`/`init 6`, `killall`/`pkill`, 여러 PID·PID 0·음수 PID를 대상으로 하는 `kill`, `chmod`/`chown`/`chgrp`, `gh auth token`, `gh auth status --show-token`/`-t`가 포함된다. 0이 아닌 단일 양수 PID를 대상으로 하는 `kill <pid>`·`kill -TERM <pid>`·`kill -s TERM <pid>`와 `trash ...`는 이 그룹의 허용 대조군이다.
 - `list`/`plan`은 정책 그룹 이름과 설명을 출력하고, `verify`는 기본 정책의 내장 테스트를 위 그룹 이름과 함께 출력한다. 사용자는 `remote-code-ref-mutation`과 `local-system-secret-safety` 테스트가 차단으로 판정되는지, `github-collaboration-metadata` 테스트가 허용으로 판정되는지를 같은 명령에서 확인할 수 있어야 한다. 기존 정책 파일이 있으면 `--force` 없이는 덮어쓰지 않는다. 강제 저장도 완성된 파일 단위로 교체한다. 대상 심볼릭 링크는 덮어쓰지 않는다.
 - `plan`/`apply`/`doctor`는 선택한 runtime의 기본 계정과 quota 설정에 등록된 추가 계정을 모두 대상으로 한다. 기본 Claude는 `~/.claude/settings.json`, 기본 Codex는 `~/.codex/hooks.json`이며, 추가 Claude는 `claudeAccounts[].configDir/settings.json`, 추가 Codex는 `codexAccounts[].home/hooks.json`이다. 대상 산출에는 호출 환경의 `CLAUDE_CONFIG_DIR`/`CODEX_HOME`을 사용하지 않는다. 계정 key나 디렉터리가 중복·무효하면 `apply`는 어떤 hook도 쓰지 않고 실패한다.

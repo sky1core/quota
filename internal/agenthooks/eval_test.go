@@ -81,7 +81,8 @@ func TestGitHubHistoryGuardPresetGroups(t *testing.T) {
 		"deny gh run rerun":                    PolicyGroupRemoteCodeRefMutation,
 		"deny gh agent task create":            PolicyGroupRemoteCodeRefMutation,
 		"deny gh codespace ssh":                PolicyGroupRemoteCodeRefMutation,
-		"deny gh stack other":                  PolicyGroupRemoteCodeRefMutation,
+		"deny gh stack submit":                 PolicyGroupRemoteCodeRefMutation,
+		"deny gh stack link branch":            PolicyGroupRemoteCodeRefMutation,
 		"allow pr create with explicit head":   PolicyGroupGitHubCollaborationMetadata,
 		"allow pr close without branch delete": PolicyGroupGitHubCollaborationMetadata,
 		"allow pr comment":                     PolicyGroupGitHubCollaborationMetadata,
@@ -925,8 +926,8 @@ func TestCommandTextIsData(t *testing.T) {
 		{`echo 'gh pr close 23 --delete-branch'`, "deny-gh-pr-close-delete-branch"},
 		{`rg 'gh repo create --push'`, "deny-gh-repo-create"},
 		{`echo 'gh repo deploy-key add --allow-write'`, "deny-gh-repo-deploy-key-add-write"},
-		{`echo 'gh stack unlink 123 456'`, "deny-gh-stack-except-link-two-ints"},
-		{`echo 'gh stack link 123 456' 'gh stack unlink 123 456'`, "deny-gh-stack-except-link-two-ints"},
+		{`echo 'gh stack submit'`, "deny-gh-remote-code-ref-mutation"},
+		{`echo 'gh stack link 123 456' 'gh stack link feature-a 456'`, "deny-gh-stack-link-except-two-ints"},
 	} {
 		decision, err := EvaluateCommand([]Policy{policy}, tc.command)
 		if err != nil || !decision.Allowed {

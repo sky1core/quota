@@ -99,7 +99,7 @@ func TestGhUnknownOptionsAndUnresolvedValuesFailClosed(t *testing.T) {
 
 		`gh pr "$operation" 123`,
 		`nice -n 5 gh pr --force="$enabled" checkout 123`,
-		`gh stack --repo example/repository link 123 456`,
+		`gh stack link --bogus 123 456`,
 		`gh --future-option=value done`,
 		`gh --web pr view`,
 		`gh pr --force checkout 123`,

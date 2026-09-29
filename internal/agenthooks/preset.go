@@ -28,7 +28,7 @@ func githubHistoryGuardPreset() Policy {
 		Groups: []Group{
 			{
 				ID:          PolicyGroupRemoteCodeRefMutation,
-				Description: "Blocks remote code/ref/repository-setting writes and the explicitly restricted stack command forms.",
+				Description: "Blocks remote code/ref/repository-setting writes.",
 			},
 			{
 				ID:          PolicyGroupLocalSystemSecretSafety,
@@ -36,7 +36,7 @@ func githubHistoryGuardPreset() Policy {
 			},
 			{
 				ID:          PolicyGroupGitHubCollaborationMetadata,
-				Description: "Allows PR/Issue text, comment, review metadata, and PR stack links that do not push or move refs.",
+				Description: "Allows PR/Issue text, comment, review metadata, and the two-PR-number stack link that does not push.",
 			},
 		},
 		Rules: []Rule{
@@ -239,9 +239,9 @@ func githubHistoryGuardPreset() Policy {
 				Message: "gh auth status -t can print an authentication token; get explicit approval first.",
 			},
 			{
-				ID:     "deny-gh-stack-except-link-two-ints",
+				ID:     "deny-gh-stack-link-except-two-ints",
 				Effect: EffectDeny,
-				Match:  Match{Argv: exactArgs("gh", "stack")},
+				Match:  Match{Argv: exactArgs("gh", "stack", "link")},
 				Except: []Match{{
 					Argv:  []ArgPattern{{Exact: "gh"}, {Exact: "stack"}, {Exact: "link"}, {Type: "int"}, {Type: "int"}},
 					Exact: true,
@@ -480,9 +480,20 @@ func githubHistoryGuardPreset() Policy {
 			{Name: "deny unknown gh alias dispatch", Command: `gh done 12`, Want: DecisionDeny, Source: string(decisionSourceUndecidable)},
 			{Name: "deny unknown gh alias dispatch with home", Command: `HOME=/tmp/quota-test-home gh done 12`, Want: DecisionDeny, Source: string(decisionSourceUndecidable)},
 			{Name: "allow gh stack link ints", Command: `gh stack link 123 456`, Want: DecisionAllow},
-			{Name: "deny gh stack link text", Command: `gh stack link abc 456`, Want: DecisionDeny, RuleID: "deny-gh-stack-except-link-two-ints"},
-			{Name: "deny gh stack link extra", Command: `gh stack link 123 456 789`, Want: DecisionDeny, RuleID: "deny-gh-stack-except-link-two-ints"},
-			{Name: "deny gh stack other", Command: `gh stack submit`, Want: DecisionDeny, RuleID: "deny-gh-stack-except-link-two-ints"},
+			{Name: "deny gh stack link extra", Command: `gh stack link 123 456 789`, Want: DecisionDeny, RuleID: "deny-gh-stack-link-except-two-ints"},
+			{Name: "deny gh stack link url", Command: `gh stack link https://github.com/owner/repo/pull/10 456`, Want: DecisionDeny, RuleID: "deny-gh-stack-link-except-two-ints"},
+			{Name: "deny gh stack link flag", Command: `gh stack link --open 123 456`, Want: DecisionDeny, RuleID: "deny-gh-stack-link-except-two-ints"},
+			{Name: "deny gh stack link branch", Command: `gh stack link feature-auth 456`, Want: DecisionDeny, RuleID: "deny-gh-stack-link-except-two-ints"},
+			{Name: "deny gh stack link dynamic", Command: `gh stack link "$PR" 456`, Want: DecisionDeny, Source: string(decisionSourceUndecidable)},
+			{Name: "deny gh stack submit", Command: `gh stack submit`, Want: DecisionDeny, RuleID: "deny-gh-remote-code-ref-mutation"},
+			{Name: "deny gh stack push", Command: `gh stack push`, Want: DecisionDeny, RuleID: "deny-gh-remote-code-ref-mutation"},
+			{Name: "deny gh stack merge", Command: `gh stack merge 12`, Want: DecisionDeny, RuleID: "deny-gh-remote-code-ref-mutation"},
+			{Name: "allow gh stack view", Command: `gh stack view`, Want: DecisionAllow},
+			{Name: "allow gh stack checkout", Command: `gh stack checkout feature-auth`, Want: DecisionAllow},
+			{Name: "allow gh stack up", Command: `gh stack up 2`, Want: DecisionAllow},
+			{Name: "deny gh stack alias", Command: `gh stack alias gs`, Want: DecisionDeny, Source: string(decisionSourceUndecidable)},
+			{Name: "allow gh stack alias remove", Command: `gh stack alias --remove gs`, Want: DecisionAllow},
+			{Name: "deny gh stack unknown subcommand", Command: `gh stack unlink 123 456`, Want: DecisionDeny, Source: string(decisionSourceUndecidable)},
 			{Name: "allow git status", Command: `git status --short`, Want: DecisionAllow},
 			{Name: "allow git maintenance", Command: `git maintenance -h`, Want: DecisionAllow},
 			{Name: "allow gh pr view", Command: `gh pr view 12`, Want: DecisionAllow},

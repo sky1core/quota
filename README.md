@@ -217,7 +217,7 @@ quota-cli agent hooks doctor
 `remote-code-ref-mutation`은 push, PR merge·자동 merge, 원격 ref 생성·삭제, 저장소 공개 범위·권한·보안/자동화 설정 변경 등을 차단한다.
 로컬 commit/amend/merge/rebase, 브랜치·태그 조작, 조회, push 없는 PR 생성과 협업 메타데이터 작업은 허용한다.
 `gh api`는 요청의 실제 대상을 판정하며, 릴리스 정보·첨부물과 태그 변경도 구분한다.
-`gh stack link <number> <number>`만 허용하는 형식 제한은 별도로 유지한다.
+`gh stack`은 push·submit·sync·merge를 차단하고, link는 `gh stack link <number> <number>` 형식만 허용하며, 로컬·조회 명령은 허용한다.
 Git/GitHub의 추가 제한은 대상·조건·사유·영향을 명시해 승인받고 별도 규칙으로 설정한다.
 기본 원격 보호를 켰다는 이유로 로컬 작업 제한까지 함께 활성화하지 않는다.
 

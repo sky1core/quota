@@ -36,7 +36,7 @@ func githubHistoryGuardPreset() Policy {
 			},
 			{
 				ID:          PolicyGroupGitHubCollaborationMetadata,
-				Description: "Allows PR/Issue text, comment, review metadata, and the two-PR-number stack link that does not push.",
+				Description: "Allows PR/Issue text, comment, review metadata, and stack link with two integers; matching local branches may be pushed.",
 			},
 		},
 		Rules: []Rule{

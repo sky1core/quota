@@ -306,7 +306,7 @@ home 미지정 시 quota 기본 계정(`~/.codex`)을 조회한다. 호출자 �
 | 릴리스 | 기존 태그에 대한 릴리스 정보·노트·첨부물 생성/편집/삭제는 이 정책에서 허용한다. 태그 생성·변경·삭제를 수반하면 차단한다. `release create --verify-tag`와 태그 자동 생성, `release delete`와 `--cleanup-tag`를 구분한다. |
 | 저장소 설정 | 공개 범위, deploy key, collaborator/team, autolink, secret/variable, workflow enable/disable처럼 저장소 권한·보안·자동화 상태를 바꾸는 명령은 기본 차단한다. 조회 전용 설정 명령은 허용한다. |
 | 간접 실행 | `git hook run`·`for-each-repo`·`bisect run`·`submodule foreach`, alias/extension 실행, workflow·외부 작업 실행은 실행 내용에 따라 판정한다. 명령 이름만으로 원격 쓰기라고 단정하지 않으며, 실행 내용이 불명확한 경우는 아래 판정불가 계약을 따른다. |
-| `gh stack` 확장 | `gh stack push`·`submit`·`sync`·`merge`는 원격 쓰기로 차단한다. `gh stack link`는 사용자가 정한 `gh stack link <정수> <정수>` 형식만 허용하고, 브랜치명·URL·추가 인자·옵션이 붙은 다른 link 형태는 push 가능성이 있으므로 차단하며 동적 인자는 판정불가다. `init`·`add`·`checkout`·`up`·`down`·`top`·`bottom`·`trunk`·`switch`·`rebase`·`modify`·`view`·`unstack`·`feedback`는 로컬·조회·메타데이터 작업으로 허용한다. `gh stack alias`는 PATH에 별도 실행 파일을 만들어 이후 호출이 hook 평가를 거치지 않으므로 판정불가로 차단하고, `--remove`만 허용한다. |
+| `gh stack` 확장 | `gh stack push`·`submit`·`sync`·`merge`는 원격 쓰기로 차단한다. `gh stack link`는 사용자가 정한 `gh stack link <정수> <정수>` 형식만 허용하고, 브랜치명·URL·추가 인자·옵션이 붙은 다른 link 형태는 차단하며 동적 인자는 판정불가다. quota는 로컬 브랜치 존재 여부를 검사하지 않는다. 정수 인자와 같은 이름의 로컬 브랜치가 있으면 허용된 명령도 해당 브랜치를 push할 수 있으며, 이 경우는 차단하지 않는다. `init`·`add`·`checkout`·`up`·`down`·`top`·`bottom`·`trunk`·`switch`·`rebase`·`modify`·`view`·`unstack`·`feedback`는 로컬·조회·메타데이터 작업으로 허용한다. `gh stack alias`는 PATH에 별도 실행 파일을 만들어 이후 호출이 hook 평가를 거치지 않으므로 판정불가로 차단하고, `--remove`만 허용한다. |
 
 **`agent hooks` 판정 계약**:
 - 판정 대상은 실행 명령과 그 명령에 적용되는 활성 정책이다. 인자에 `git push` 같은 문자열이 있다는 이유로 검색·출력을 실행으로 취급하지 않는다. `echo 'git push'`, `rg "git push"`는 Git/GitHub 기본 정책에서 허용한다. `eval 'git push'`, `sh -c 'git push'`처럼 실행 인자를 받는 지원 wrapper는 안쪽 명령을 평가한다.

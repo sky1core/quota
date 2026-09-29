@@ -2,9 +2,12 @@ package overlayruntime
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -579,12 +582,9 @@ func TestDelegationFailsWhenPrimaryCannotBeListedCompletely(t *testing.T) {
 		t.Fatal(err)
 	}
 	git(t, repo, "config", "core.fsyncObjectFiles", "true")
-	if _, stderr, err := gitOutputWithStderr(context.Background(), repo, "ls-files", "--others"); err != nil || !strings.Contains(stderr, "warning:") {
-		t.Skipf("git did not emit a benign warning to exercise the filter: %q %v", stderr, err)
-	}
 	t.Setenv("GIT_TRACE", "1")
 	if err := prepare(t, linked, "codex"); err != nil {
-		t.Fatalf("benign git diagnostics treated as an incomplete listing: %v", err)
+		t.Fatalf("git diagnostics on stderr failed the delegation: %v", err)
 	}
 	if got := readFile(t, filepath.Join(linked, "sub", "AGENTS.md")); got != "hidden nested\n" {
 		t.Fatalf("nested not prepared after the directory became readable: %q", got)
@@ -687,4 +687,446 @@ func TestDelegationDoesNotRedirectOrHideInspectionFailures(t *testing.T) {
 			t.Fatalf("non-repository execution acquired a Git dependency: %v", err)
 		}
 	})
+}
+
+func TestDelegationFailsWhenBarePrimaryCannotBeListedCompletely(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions do not restrict root")
+	}
+	testHome(t)
+	repo := newRepo(t)
+	bare := filepath.Join(filepath.Dir(repo), "bare.git")
+	git(t, repo, "clone", "-q", "--bare", repo, bare)
+	bare = resolvePath(bare)
+	checkout := filepath.Join(filepath.Dir(repo), "checkout")
+	git(t, bare, "worktree", "add", "-q", checkout, "main")
+	write(t, filepath.Join(bare, "private", "AGENTS.md"), "hidden nested\n")
+	write(t, filepath.Join(bare, "sub", "AGENTS.md"), "bare nested\n")
+	private := filepath.Join(bare, "private")
+	if err := os.Chmod(private, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(private, 0o755) })
+	if err := prepare(t, checkout, "claude"); err == nil || !strings.Contains(err.Error(), private) {
+		t.Fatalf("unreadable bare primary directory ignored: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(checkout, "sub", "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatalf("preparation proceeded despite an incomplete listing: %v", err)
+	}
+}
+
+func TestDelegationDoesNotDiscoverRepositoriesBelowThePrimary(t *testing.T) {
+	explicitBareRepositories := func(t *testing.T, bare string) {
+		t.Helper()
+		t.Setenv("GIT_CONFIG_COUNT", "1")
+		t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+		t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
+		if _, stderr, err := gitOutputWithStderr(context.Background(), bare, "rev-parse", "--git-dir"); err == nil || !strings.Contains(stderr, "safe.bareRepository") {
+			t.Skipf("git did not refuse implicit bare repository discovery: %q %v", stderr, err)
+		}
+	}
+	t.Run("bare primary", func(t *testing.T) {
+		testHome(t)
+		repo := newRepo(t)
+		bare := filepath.Join(filepath.Dir(repo), "bare.git")
+		git(t, repo, "clone", "-q", "--bare", repo, bare)
+		bare = resolvePath(bare)
+		checkout := filepath.Join(filepath.Dir(repo), "checkout")
+		git(t, bare, "worktree", "add", "-q", checkout, "main")
+		git(t, bare, "init", "-q", "--bare", "mirror.git")
+		write(t, filepath.Join(bare, "mirror.git", "AGENTS.md"), "mirror instructions\n")
+		write(t, filepath.Join(bare, "sub", "AGENTS.md"), "bare nested\n")
+		explicitBareRepositories(t, bare)
+		if err := prepare(t, checkout, "claude"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(checkout, "mirror.git")); !os.IsNotExist(err) {
+			t.Fatalf("nested bare repository file copied into the checkout: %v", err)
+		}
+		if got := readFile(t, filepath.Join(checkout, "sub", "AGENTS.md")); got != "bare nested\n" {
+			t.Fatalf("bare nested = %q", got)
+		}
+	})
+	t.Run("primary worktree", func(t *testing.T) {
+		testHome(t)
+		repo, linked := untrackedInstructionWorktree(t)
+		git(t, repo, "init", "-q", "--bare", "mirror.git")
+		write(t, filepath.Join(repo, "mirror.git", "AGENTS.md"), "mirror instructions\n")
+		write(t, filepath.Join(repo, "sub", "AGENTS.md"), "primary sub\n")
+		explicitBareRepositories(t, filepath.Join(repo, "mirror.git"))
+		if err := prepare(t, linked, "codex"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(linked, "mirror.git")); !os.IsNotExist(err) {
+			t.Fatalf("nested bare repository file copied into the worktree: %v", err)
+		}
+		if got := readFile(t, filepath.Join(linked, "sub", "AGENTS.md")); got != "primary sub\n" {
+			t.Fatalf("primary sub = %q", got)
+		}
+		if got := readFile(t, filepath.Join(linked, "AGENTS.md")); got != "# shared placeholder\n" {
+			t.Fatalf("root not prepared: %q", got)
+		}
+	})
+}
+
+func TestDelegationIgnoresUnreadableInternalsOfNestedBareRepository(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions do not restrict root")
+	}
+	testHome(t)
+	repo, linked := untrackedInstructionWorktree(t)
+	git(t, repo, "init", "-q", "--bare", "mirror.git")
+	unreadable := filepath.Join(repo, "mirror.git", "objects", "unreadable")
+	if err := os.MkdirAll(unreadable, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unreadable, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(unreadable, 0o755) })
+	if err := prepare(t, linked, "claude"); err != nil {
+		t.Fatalf("unreadable directory inside a nested bare repository blocked the delegation: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(linked, "mirror.git")); !os.IsNotExist(err) {
+		t.Fatalf("nested bare repository copied into the worktree: %v", err)
+	}
+	if got := readFile(t, filepath.Join(linked, "AGENTS.md")); got != "# shared placeholder\n" {
+		t.Fatalf("root not prepared: %q", got)
+	}
+}
+
+func TestDelegationReportsInvalidRepositoryMarkersInThePrimary(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+	}{
+		{"empty .git directory", func(t *testing.T, dir string) {
+			if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"gitdir link to a missing directory", func(t *testing.T, dir string) {
+			write(t, filepath.Join(dir, ".git"), "gitdir: "+filepath.Join(dir, "missing")+"\n")
+		}},
+		{"gitdir link without the gitdir prefix", func(t *testing.T, dir string) {
+			write(t, filepath.Join(dir, ".git"), "not a gitdir link\n")
+		}},
+		{"dangling .git symlink", func(t *testing.T, dir string) {
+			if err := os.Symlink(filepath.Join(dir, "missing"), filepath.Join(dir, ".git")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testHome(t)
+			repo, linked := untrackedInstructionWorktree(t)
+			dir := filepath.Join(repo, "vendor", "pkg")
+			write(t, filepath.Join(dir, "AGENTS.md"), "behind an invalid marker\n")
+			tc.setup(t, dir)
+			marker := filepath.Join(dir, ".git")
+			if err := prepare(t, linked, "claude"); err == nil || !strings.Contains(err.Error(), marker) {
+				t.Fatalf("invalid repository marker accepted: %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(linked, "AGENTS.md")); !os.IsNotExist(err) {
+				t.Fatalf("preparation proceeded despite a failed repository check: %v", err)
+			}
+		})
+	}
+}
+
+func TestDelegationDistinguishesRepositoryLayoutsFromPlainDirectories(t *testing.T) {
+	testHome(t)
+	repo, linked := untrackedInstructionWorktree(t)
+	write(t, filepath.Join(repo, "docs", "HEAD"), "not a ref\n")
+	write(t, filepath.Join(repo, "docs", "objects"), "plain file\n")
+	write(t, filepath.Join(repo, "docs", "refs"), "plain file\n")
+	write(t, filepath.Join(repo, "docs", "AGENTS.md"), "primary docs\n")
+	if err := os.Mkdir(filepath.Join(repo, "docs", "commondir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(repo, "stale", "HEAD"), "ref: refs/heads/main\n")
+	write(t, filepath.Join(repo, "stale", "commondir"), "../..\n")
+	write(t, filepath.Join(repo, "stale", "AGENTS.md"), "stale metadata\n")
+	write(t, filepath.Join(repo, "wt", "HEAD"), "ref: refs/heads/main\n")
+	write(t, filepath.Join(repo, "wt", "commondir"), "../.git\n")
+	write(t, filepath.Join(repo, "wt", "AGENTS.md"), "worktree metadata\n")
+	if err := os.MkdirAll(filepath.Join(repo, "unborn", "objects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(repo, "unborn", "refs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("refs", "heads", "nothere"), filepath.Join(repo, "unborn", "HEAD")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(repo, "unborn", "AGENTS.md"), "unborn repository\n")
+	git(t, repo, "init", "-q", "--bare", "mirror.git")
+	write(t, filepath.Join(repo, "crlf", ".git"), "gitdir: ../mirror.git\r\n")
+	write(t, filepath.Join(repo, "crlf", "AGENTS.md"), "behind a CRLF gitfile\n")
+	if err := os.MkdirAll(filepath.Join(repo, "badhead", "objects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(repo, "badhead", "refs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(repo, "badhead", "HEAD"), "not a ref\n")
+	write(t, filepath.Join(repo, "badhead", "AGENTS.md"), "invalid HEAD content\n")
+	if err := os.MkdirAll(filepath.Join(repo, "fifo", "objects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(repo, "fifo", "refs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(repo, "fifo", "HEAD"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(repo, "fifo", "AGENTS.md"), "HEAD is a fifo\n")
+	done := make(chan error, 1)
+	go func() { done <- prepare(t, linked, "codex") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("preparation blocked on a repository-like directory")
+	}
+	for rel, want := range map[string]string{"docs": "primary docs\n", "stale": "stale metadata\n", "badhead": "invalid HEAD content\n", "fifo": "HEAD is a fifo\n"} {
+		if got := readFile(t, filepath.Join(linked, rel, "AGENTS.md")); got != want {
+			t.Fatalf("plain directory %s skipped: %q", rel, got)
+		}
+	}
+	for _, rel := range []string{"wt", "unborn", "crlf", "mirror.git"} {
+		if _, err := os.Lstat(filepath.Join(linked, rel)); !os.IsNotExist(err) {
+			t.Fatalf("repository %s copied as instructions: %v", rel, err)
+		}
+	}
+}
+
+func TestDelegationLeavesCaseRenamedSourceGitlinkPathsAlone(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions do not restrict root")
+	}
+	testHome(t)
+	repo, linked := untrackedInstructionWorktree(t)
+	if strings.TrimSpace(git(t, repo, "config", "core.ignorecase")) != "true" {
+		t.Skip("core.ignorecase is not enabled")
+	}
+	sha := strings.TrimSpace(git(t, repo, "rev-parse", "HEAD"))
+	git(t, repo, "update-index", "--add", "--cacheinfo", "160000,"+sha+",vendor/pkg")
+	write(t, filepath.Join(repo, "vendor", "Pkg", "AGENTS.md"), "inside a gitlink\n")
+	if _, err := os.Stat(filepath.Join(repo, "vendor", "pkg", "AGENTS.md")); err != nil {
+		t.Skip("case-sensitive filesystem")
+	}
+	private := filepath.Join(repo, "vendor", "Pkg", "private")
+	if err := os.Mkdir(private, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(private, 0o755) })
+	if err := prepare(t, linked, "claude"); err != nil {
+		t.Fatalf("case-renamed gitlink path blocked the delegation: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(linked, "vendor")); !os.IsNotExist(err) {
+		t.Fatalf("file below a gitlink copied into the worktree: %v", err)
+	}
+}
+
+func TestDelegationLeavesSourceGitlinkPathsAlone(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions do not restrict root")
+	}
+	testHome(t)
+	repo, linked := untrackedInstructionWorktree(t)
+	sha := strings.TrimSpace(git(t, repo, "rev-parse", "HEAD"))
+	git(t, repo, "update-index", "--add", "--cacheinfo", "160000,"+sha+",vendor/pkg")
+	write(t, filepath.Join(repo, "vendor", "pkg", "AGENTS.md"), "inside a gitlink\n")
+	private := filepath.Join(repo, "vendor", "pkg", "private")
+	if err := os.Mkdir(private, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(private, 0o755) })
+	if err := prepare(t, linked, "claude"); err != nil {
+		t.Fatalf("gitlink path in the primary index blocked the delegation: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(linked, "vendor")); !os.IsNotExist(err) {
+		t.Fatalf("file below a gitlink copied into the worktree: %v", err)
+	}
+	if err := PrepareDelegationInstructions(context.Background(), linked, "claude", true); err == nil || !strings.Contains(err.Error(), filepath.Join(repo, "AGENTS.md")) {
+		t.Fatalf("root untracked instructions must still block worktree creation: %v", err)
+	}
+	if err := os.Remove(filepath.Join(repo, "AGENTS.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := PrepareDelegationInstructions(context.Background(), linked, "claude", true); err != nil {
+		t.Fatalf("gitlink contents counted as untracked instructions: %v", err)
+	}
+}
+
+func TestDelegationTreatsCaseInsensitiveTrackedInstructionsAsTracked(t *testing.T) {
+	testHome(t)
+	repo, linked := untrackedInstructionWorktree(t)
+	write(t, filepath.Join(repo, "sub", "agents.md"), "tracked lower\n")
+	if _, err := os.Stat(filepath.Join(repo, "sub", "AGENTS.md")); err != nil {
+		t.Skip("case-sensitive filesystem")
+	}
+	if strings.TrimSpace(git(t, repo, "config", "core.ignorecase")) != "true" {
+		t.Skip("core.ignorecase is not enabled")
+	}
+	git(t, repo, "add", "sub/agents.md")
+	git(t, repo, "commit", "-qm", "lowercase instructions")
+	if err := os.Remove(filepath.Join(repo, "AGENTS.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(repo, "sub", "agents.md"), filepath.Join(repo, "sub", "AGENTS.md")); err != nil {
+		t.Fatal(err)
+	}
+	git(t, linked, "merge", "-q", "--ff-only", "main")
+	if err := PrepareDelegationInstructions(context.Background(), linked, "codex", true); err != nil {
+		t.Fatalf("case-renamed tracked file counted as untracked: %v", err)
+	}
+	if got := readFile(t, filepath.Join(linked, "sub", "agents.md")); got != "tracked lower\n" {
+		t.Fatalf("tracked file changed: %q", got)
+	}
+}
+
+func TestDelegationReportsUnreadableRepositoryLayoutsInThePrimary(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("file permissions do not restrict root")
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir string) string
+	}{
+		{"unreadable HEAD", func(t *testing.T, dir string) string {
+			for _, name := range []string{"objects", "refs"} {
+				if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(t, filepath.Join(dir, "HEAD"), "ref: refs/heads/main\n")
+			return filepath.Join(dir, "HEAD")
+		}},
+		{"unreadable commondir", func(t *testing.T, dir string) string {
+			write(t, filepath.Join(dir, "HEAD"), "ref: refs/heads/main\n")
+			write(t, filepath.Join(dir, "commondir"), "../.git\n")
+			return filepath.Join(dir, "commondir")
+		}},
+		{"unreadable objects", func(t *testing.T, dir string) string {
+			for _, name := range []string{"objects", "refs"} {
+				if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(t, filepath.Join(dir, "HEAD"), "ref: refs/heads/main\n")
+			return filepath.Join(dir, "objects")
+		}},
+		{"empty commondir", func(t *testing.T, dir string) string {
+			write(t, filepath.Join(dir, "HEAD"), "ref: refs/heads/main\n")
+			write(t, filepath.Join(dir, "commondir"), "")
+			return ""
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testHome(t)
+			repo, linked := untrackedInstructionWorktree(t)
+			dir := filepath.Join(repo, "vendor", "pkg")
+			write(t, filepath.Join(dir, "AGENTS.md"), "behind an unreadable layout\n")
+			locked := tc.setup(t, dir)
+			if locked != "" {
+				if err := os.Chmod(locked, 0); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Chmod(locked, 0o755) })
+			}
+			if err := prepare(t, linked, "claude"); err == nil || !strings.Contains(err.Error(), dir) {
+				t.Fatalf("unreadable repository layout treated as a plain directory: %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(linked, "AGENTS.md")); !os.IsNotExist(err) {
+				t.Fatalf("preparation proceeded despite a failed repository check: %v", err)
+			}
+		})
+	}
+}
+
+func TestDelegationFoldsGitlinkCaseLikeGit(t *testing.T) {
+	testHome(t)
+	repo, linked := untrackedInstructionWorktree(t)
+	git(t, repo, "config", "core.ignorecase", "true")
+	sha := strings.TrimSpace(git(t, repo, "rev-parse", "HEAD"))
+	git(t, repo, "update-index", "--add", "--cacheinfo", "160000,"+sha+",vendor/\u00c4")
+	write(t, filepath.Join(repo, "vendor", "\u00e4", "AGENTS.md"), "plain unicode folder\n")
+	if _, err := os.Stat(filepath.Join(repo, "vendor", "\u00c4")); err == nil {
+		t.Skip("filesystem folds Unicode case")
+	}
+	if err := prepare(t, linked, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(linked, "vendor", "\u00e4", "AGENTS.md")); got != "plain unicode folder\n" {
+		t.Fatalf("Unicode folder folded onto a gitlink: %q", got)
+	}
+}
+
+func TestDelegationPreparesPlainDirectoriesWithGitTrace(t *testing.T) {
+	testHome(t)
+	repo, linked := untrackedInstructionWorktree(t)
+	write(t, filepath.Join(repo, "docs", "HEAD"), "not a ref\n")
+	write(t, filepath.Join(repo, "docs", "AGENTS.md"), "plain docs\n")
+	t.Setenv("GIT_TRACE", "1")
+	if err := prepare(t, linked, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(linked, "docs", "AGENTS.md")); got != "plain docs\n" {
+		t.Fatalf("plain directory instructions not prepared: %q", got)
+	}
+}
+
+func TestDelegationReportsUnreadableCommonDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions do not restrict root")
+	}
+	for _, name := range []string{"objects", "refs"} {
+		for _, relative := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/relative=%t", name, relative), func(t *testing.T) {
+				testHome(t)
+				repo := newRepo(t)
+				bare := filepath.Join(filepath.Dir(repo), "bare.git")
+				git(t, repo, "clone", "-q", "--bare", repo, bare)
+				bare = resolvePath(bare)
+				checkout := filepath.Join(filepath.Dir(repo), "checkout")
+				git(t, bare, "worktree", "add", "-q", checkout, "main")
+				common := filepath.Join(filepath.Dir(repo), "separate.git")
+				git(t, repo, "init", "-q", "--bare", common)
+				nested := filepath.Join(bare, "nested")
+				write(t, filepath.Join(nested, "HEAD"), "ref: refs/heads/main\n")
+				commonRef := common
+				if relative {
+					var err error
+					commonRef, err = filepath.Rel(nested, common)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				write(t, filepath.Join(nested, "commondir"), commonRef+"\r\n")
+				write(t, filepath.Join(nested, "AGENTS.md"), "separate instructions\n")
+				write(t, filepath.Join(bare, "AGENTS.md"), "primary instructions\n")
+				if err := prepare(t, checkout, "claude"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Lstat(filepath.Join(checkout, "nested")); !os.IsNotExist(err) {
+					t.Fatalf("nested instructions copied before permission change: %v", err)
+				}
+				locked := filepath.Join(common, name)
+				if err := os.Chmod(locked, 0); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Chmod(locked, 0o755) })
+				if err := prepare(t, checkout, "claude"); err == nil || !errors.Is(err, os.ErrPermission) {
+					t.Fatalf("common directory inspection error ignored: %v", err)
+				}
+				if _, err := os.Lstat(filepath.Join(checkout, "nested")); !os.IsNotExist(err) {
+					t.Fatalf("instructions copied after failed repository inspection: %v", err)
+				}
+			})
+		}
+	}
 }

@@ -34,13 +34,9 @@ func gitOutput(ctx context.Context, cwd string, args ...string) ([]byte, error) 
 }
 
 func gitOutputWithStderr(ctx context.Context, cwd string, args ...string) ([]byte, string, error) {
-	return gitOutputWithEnv(ctx, cwd, nil, args...)
-}
-
-func gitOutputWithEnv(ctx context.Context, cwd string, env []string, args ...string) ([]byte, string, error) {
 	cmd := childprocess.CommandContext(ctx, "git", args...)
 	cmd.Dir = cwd
-	cmd.Env = append(append(cmd.Environ(), "LC_ALL=C"), env...)
+	cmd.Env = append(cmd.Environ(), "LC_ALL=C")
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr

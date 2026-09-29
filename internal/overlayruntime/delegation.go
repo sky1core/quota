@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"unicode/utf8"
+	"syscall"
 
 	"github.com/sky1core/quota/internal/atomicfile"
 )
@@ -50,92 +50,224 @@ func PrepareDelegationInstructions(ctx context.Context, dir, agent string, creat
 }
 
 func (r repoContext) untrackedInstructionSources() ([]string, error) {
-	var rels []string
-	var err error
 	if r.Root == r.Common {
-		rels, err = instructionFilesBelow(r.Root)
-	} else {
-		rels, err = r.untrackedInstructionFiles()
+		return r.instructionFilesBelow(gitlinkSet{})
 	}
+	gitlinks, err := r.gitlinks()
 	if err != nil {
 		return nil, err
 	}
-	var own []string
+	rels, err := r.instructionFilesBelow(gitlinks)
+	if err != nil {
+		return nil, err
+	}
+	var untracked []string
 	for _, rel := range rels {
-		ours, err := r.ownsDirectory(filepath.Join(r.Root, filepath.Dir(rel)))
+		other, err := r.untracked(rel)
 		if err != nil {
 			return nil, err
 		}
-		if ours {
-			own = append(own, rel)
+		if other {
+			untracked = append(untracked, rel)
 		}
 	}
-	return own, nil
+	return untracked, nil
 }
 
-func (r repoContext) ownsDirectory(dir string) (bool, error) {
-	out, _, err := gitOutputWithEnv(r.Context, dir, []string{"GIT_DISCOVERY_ACROSS_FILESYSTEM=1"}, "rev-parse", "--path-format=absolute", "--git-dir")
-	if err != nil {
-		return false, fmt.Errorf("cannot determine the repository owning %s: %w", dir, err)
-	}
-	gitDir, err := onePath(out)
-	if err != nil {
-		return false, fmt.Errorf("cannot determine the repository owning %s: %w", dir, err)
-	}
-	return gitDir == r.Common, nil
+type gitlinkSet struct {
+	paths      map[string]bool
+	ignoreCase bool
 }
 
-func (r repoContext) untrackedInstructionFiles() ([]string, error) {
-	out, stderr, err := gitOutputWithStderr(r.Context, r.Root, "ls-files", "--others", "-z", "--", ":(glob)**/AGENTS.md")
-	if err != nil {
-		return nil, err
+func (g gitlinkSet) contains(rel string) bool {
+	if g.ignoreCase {
+		rel = asciiLower(rel)
 	}
-	for _, line := range strings.Split(stderr, "\n") {
-		if strings.HasPrefix(line, "warning: could not open directory") {
-			return nil, fmt.Errorf("git could not list every untracked file under %s: %s", r.Root, strings.TrimSpace(line))
+	return g.paths[rel]
+}
+
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
 		}
 	}
-	var rels []string
+	return string(b)
+}
+
+func (r repoContext) gitlinks() (gitlinkSet, error) {
+	out, err := gitOutput(r.Context, r.Root, "config", "--type=bool", "--default=false", "core.ignorecase")
+	if err != nil {
+		return gitlinkSet{}, err
+	}
+	links := gitlinkSet{paths: map[string]bool{}, ignoreCase: string(out) == "true\n"}
+	out, err = gitOutput(r.Context, r.Root, "ls-files", "-z", "--stage")
+	if err != nil {
+		return gitlinkSet{}, err
+	}
 	for _, entry := range bytes.Split(out, []byte{0}) {
-		if len(entry) == 0 {
+		if !bytes.HasPrefix(entry, []byte("160000 ")) {
 			continue
 		}
-		if !utf8.Valid(entry) {
-			return nil, fmt.Errorf("untracked AGENTS.md path under %s is not valid UTF-8", r.Root)
+		tab := bytes.IndexByte(entry, '\t')
+		if tab < 0 {
+			return gitlinkSet{}, fmt.Errorf("git ls-files --stage under %s returned an entry without a path", r.Root)
 		}
-		rels = append(rels, filepath.FromSlash(string(entry)))
+		rel := filepath.FromSlash(string(entry[tab+1:]))
+		if links.ignoreCase {
+			rel = asciiLower(rel)
+		}
+		links.paths[rel] = true
 	}
-	return rels, nil
+	return links, nil
+}
+
+func (r repoContext) untracked(rel string) (bool, error) {
+	out, err := gitOutput(r.Context, r.Root, "ls-files", "--others", "-z", "--", ":(literal)"+filepath.ToSlash(rel))
+	if err != nil {
+		return false, err
+	}
+	switch entries := bytes.Split(bytes.TrimSuffix(out, []byte{0}), []byte{0}); {
+	case len(out) == 0:
+		return false, nil
+	case len(entries) == 1:
+		return true, nil
+	}
+	return false, fmt.Errorf("git ls-files --others returned more than one entry for %s", filepath.Join(r.Root, rel))
 }
 
 var bareRepositoryEntries = map[string]bool{"branches": true, "common": true, "hooks": true, "info": true, "logs": true, "lost-found": true, "modules": true, "objects": true, "refs": true, "reftable": true, "remotes": true, "rr-cache": true, "svn": true, "worktrees": true}
 
-func instructionFilesBelow(root string) ([]string, error) {
+func (r repoContext) instructionFilesBelow(gitlinks gitlinkSet) ([]string, error) {
+	root, bare := r.Root, r.Root == r.Common
 	var rels []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			if path == root {
-				return nil
-			}
-			if (filepath.Dir(path) == root && bareRepositoryEntries[d.Name()]) || exists(filepath.Join(path, ".git")) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.Name() != "AGENTS.md" {
+		if path == root {
 			return nil
 		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
 		}
-		rels = append(rels, rel)
+		if d.IsDir() {
+			if filepath.Dir(path) == root && ((bare && bareRepositoryEntries[d.Name()]) || (!bare && d.Name() == ".git")) {
+				return filepath.SkipDir
+			}
+			if gitlinks.contains(rel) {
+				return filepath.SkipDir
+			}
+			nested, err := r.repositoryBoundary(path)
+			if err != nil {
+				return err
+			}
+			if nested {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() == "AGENTS.md" {
+			rels = append(rels, rel)
+		}
 		return nil
 	})
 	return rels, err
+}
+
+func (r repoContext) repositoryBoundary(dir string) (bool, error) {
+	marker := filepath.Join(dir, ".git")
+	present, err := entryPresent(marker)
+	if err != nil {
+		return false, err
+	}
+	if present {
+		if _, err := gitOutput(r.Context, r.Start, "rev-parse", "--resolve-git-dir", marker); err != nil {
+			return false, fmt.Errorf("%s is not a usable repository marker: %w", marker, err)
+		}
+		return true, nil
+	}
+	head, err := os.Lstat(filepath.Join(dir, "HEAD"))
+	if os.IsNotExist(err) || (err == nil && !head.Mode().IsRegular() && head.Mode()&os.ModeSymlink == 0) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := accessible(filepath.Join(dir, "HEAD")); err != nil {
+		return false, err
+	}
+	common := dir
+	commonFile := filepath.Join(dir, "commondir")
+	info, err := os.Stat(commonFile)
+	if err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	if err == nil && info.Mode().IsRegular() {
+		body, err := os.ReadFile(commonFile)
+		if err != nil {
+			return false, err
+		}
+		common = strings.TrimRight(string(body), "\r\n")
+		if !filepath.IsAbs(common) {
+			common = dir + string(os.PathSeparator) + common
+		}
+	}
+	for _, name := range []string{"objects", "refs"} {
+		if err := accessible(common + string(os.PathSeparator) + name); err != nil {
+			return false, err
+		}
+	}
+	_, stderr, err := gitOutputWithStderr(r.Context, r.Start, "rev-parse", "--resolve-git-dir", dir)
+	if err == nil {
+		return true, nil
+	}
+	var exit interface{ ExitCode() int }
+	if errors.As(err, &exit) && exit.ExitCode() == 128 {
+		for _, line := range strings.Split(stderr, "\n") {
+			if strings.HasPrefix(line, "fatal: not a gitdir ") {
+				return false, nil
+			}
+		}
+	}
+	return false, err
+}
+
+func accessible(path string) error {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		if err := syscall.Access(path, 1); err != nil {
+			return &os.PathError{Op: "access", Path: path, Err: err}
+		}
+		return nil
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+func entryPresent(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 func (r repoContext) prepareSharedInstructions(rel, agent string, createsWorktree bool) error {

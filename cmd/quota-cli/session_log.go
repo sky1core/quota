@@ -387,7 +387,7 @@ func resolveSessionLogProviderAccounts(provider string, candidates []sessionLogC
 			skipped = append(skipped, fmt.Sprintf("%s account %q has a duplicate key or session log root; ownership is ambiguous, skipped", provider, c.key))
 			continue
 		}
-		accounts = append(accounts, sessionLogAccount{Provider: provider, Key: c.key, Root: c.root})
+		accounts = append(accounts, sessionLogAccount{Provider: provider, Key: c.key, Root: roots[i]})
 	}
 	return accounts, skipped
 }

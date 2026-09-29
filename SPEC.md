@@ -153,7 +153,7 @@ Codex 고유 사항:
 
 **초기화권 (`resetCredits`, optional)**: Codex가 부여하는 일회성 rate-limit 리셋 grant(응답의 top-level `rateLimitResetCredits`). rate limit 윈도우와 별개이며 각 grant마다 **자체 만료 시각**이 있다.
 - `available` (int): 실제로 나열한 사용 가능(status `available`) 초기화권 수. **항상 `len(items)`와 같다** — 응답의 `availableCount`는 status 필터와 독립 소스라 어긋날 수 있어 신뢰하지 않는다(카운트가 목록과 모순되지 않게).
-- `items` (`[]map[string]any`): status가 `available`인 초기화권만, **만료 임박순**(오름차순)으로 정렬한다. 각 항목:
+- `items` (`[]map[string]any`): status가 `available`인 초기화권만, **만료 임박순**(오름차순)으로 정렬한다. 만료 시각으로는 걸러내지 않으므로 만료 시각이 지난 grant도 응답 status가 바뀔 때까지 목록에 남는다(공유 캐시는 그 만료 시각에 무효화돼 재조회한다). 각 항목:
   - `title` (string): grant 제목 (예: `Full reset (Weekly + 5 hr)`)
   - `expiresIn` (string, optional): 만료까지 남은 시간 (예: `1d 0h`, `6d 23h`). 이미 지났으면 `0m`.
   - `expiresAt` (`time.Time`, optional): 정확한 절대 만료 시각. 응답의 `expiresAt`(epoch)를 그대로 보존한다. `--json`에서는 RFC3339 문자열로 직렬화된다.
@@ -201,7 +201,7 @@ home 미지정 시 quota 기본 계정(`~/.codex`)을 조회한다. 호출자 �
 | 명령 | 설명 |
 |------|------|
 | `quota-cli account list` | 등록된 계정 목록과 config 경로 출력 (Claude/Codex 그룹, 각 기본 계정 포함) |
-| `quota-cli account add <key> <dir>` | 계정 추가. **`key` 접두사로 provider를 판별한다**: `claude-<N>`이면 Claude(`dir`=`CLAUDE_CONFIG_DIR`), `codex-<N>`이면 Codex(`dir`=`CODEX_HOME`). 그 외 key는 거부. `dir`는 `~` 확장 지원. 검증(형식·중복 key·중복 dir)을 통과해야 저장하며, `dir`가 없으면 경고만 하고 진행한다. `dir`는 유저가 쓴 그대로 저장한다. |
+| `quota-cli account add <key> <dir>` | 계정 추가. **`key` 접두사로 provider를 판별한다**: `claude-<N>`이면 Claude(`dir`=`CLAUDE_CONFIG_DIR`), `codex-<N>`이면 Codex(`dir`=`CODEX_HOME`). 그 외 key는 거부. `dir`는 `~` 확장 지원. 검증(형식·중복 key·중복 dir)을 통과해야 저장하며, `dir`가 없으면 경고만 하고 진행한다. `dir`는 유저가 쓴 그대로 저장하며 절대경로·실제 경로로 바꿔 쓰지 않는다. `~`도 절대경로도 아닌 상대경로는 해석하는 명령마다 그 프로세스의 작업 디렉터리 기준으로 해석된다. |
 | `quota-cli account rm <key>` | 계정 제거. `codex-<N>`이면 Codex 목록에서, 그 외는 Claude 목록에서 제거한다. 같은 key의 `execPrompt.accountSettings`도 함께 제거한다. |
 
 **서브커맨드 (`update`) — 수동 업데이트**: `quota-cli update`는 설정된 업데이트 기준을 Go module 버전으로 한 번 해석하고, CLI와 표준 Go 설치 디렉터리(`GOBIN`, 없으면 첫 `GOPATH/bin`)에 이미 설치된 지원 대상 companion을 같은 버전으로 맞춘다. 설정이 없으면 기존처럼 `github.com/sky1core/quota@latest`를 사용한다. `~/.config/quota/config.json`의 `update.ref`가 `main`이면 git의 main ref를, 그 외 비어 있지 않은 값이면 Go가 해석 가능한 tag/branch/commit ref를 사용한다. 비어 있지 않은 ref는 `GOPROXY=direct`로 해석·설치해 Go module proxy의 branch cache를 업데이트 기준으로 삼지 않는다. macOS에서 CLI와 bar가 함께 설치돼 있으면 둘 다 대상이며 CLI만 설치돼 있으면 bar를 새로 설치하지 않는다. 한쪽이 최신이어도 모든 대상의 디스크 빌드 정보를 검사한다.
@@ -252,7 +252,7 @@ home 미지정 시 quota 기본 계정(`~/.codex`)을 조회한다. 호출자 �
 **`exec-prompt` 동작**:
 - 모든 `exec-prompt` 실행은 위임이다. 위 **위임 시작 시 지침 준비·검사**를 에이전트 실행 전에 수행한다. Codex의 명시적 작업 경로(`-C`/`--cd`)를 대상에 반영하며, Claude 로컬 지침 한도는 선택된 provider가 Claude일 때 적용한다.
 - `--agent=claude` 또는 `--agent=codex`를 첫 옵션으로 지정하면 그 뒤 `args`는 순서와 값을 바꾸지 않고 고정 접두(`claude -p`/`codex exec`) 뒤에 전달한다. `--agent`를 생략하면 아래 모델명 기반 자동 라우팅을 사용한다. stdin/stdout/stderr와 최종 종료 상태는 원본 CLI가 직접 담당하며, quota-cli는 선택 결과나 중간 데이터를 출력 스트림에 섞지 않는다.
-- 선택할 provider의 등록 계정만 75초 캐시 기준으로 병렬 조회한다. 조회 실패 계정과 현재 적용되는 quota 창이 계정별 `minLeftPct` 미만인 계정은 후보에서 제외하며, 후보가 없으면 원본 CLI를 실행하지 않고 실패한다.
+- 선택할 provider의 등록 계정만 75초 캐시 기준으로 병렬 조회한다. 조회 실패 계정과 현재 적용되는 quota 창이 계정별 `minLeftPct` 미만인 계정은 후보에서 제외하며(이 하한 기준에서는 잔여량이 `minLeftPct`와 같으면 후보로 남고, `minLeftPct`가 0이면 잔여 0%도 이 기준으로는 제외하지 않는다. 아래 5시간 창 진입 기준은 별개로 적용된다), 후보가 없으면 원본 CLI를 실행하지 않고 실패한다.
 - 신규 작업은 응답에 5시간 quota 창이 있을 때 그 잔여량이 25% 이상이어야 배정한다. Claude는 `session`, Codex는 실제 `windowMins == 300`인 창으로 판정한다. 정상 응답에 주간 창만 있으면 그 창의 `minLeftPct` 기준으로 판단한다. 조회·파싱 오류나 `windowErrors`가 있거나, 적용할 창의 잔여량을 유효한 0~100% 수치로 읽을 수 없거나, 적용할 창이 하나도 없으면 제외한다. 응답에 없는 제한을 계정 종류로 추정하거나 추가하지 않는다. 이 진입 기준은 계정별 보존분 `minLeftPct`(기본 5%)와 별개로 적용하며 선택 점수에서 차감하지 않는다.
 - 장기 창을 최우선, 짧은 창을 다음 순서로 비교한다. 비교값은 `남은 % - minLeftPct`이며, 양쪽 모두 리셋 시각을 알면 `비교값 / 리셋까지 남은 분`이 큰 쪽을 우선해, 같은 비교값이면 먼저 리셋되는 계정을 먼저 소비한다. 리셋 시각을 모르는 쪽이 있으면 비교값으로 비교한다. 모든 비교값이 같으면 config 순서가 빠른 계정을 선택한다.
 - Codex는 실제 `windowMins`가 가장 큰 창을 장기 기준, 가장 작은 창을 짧은 기준으로 사용한다.
@@ -377,6 +377,7 @@ home 미지정 시 quota 기본 계정(`~/.codex`)을 조회한다. 호출자 �
 - 기본 범위는 `agent=all`이며 `account`를 지정하면 해당 key만 본다. `claude-2`, `codex-2` 같은 추가 계정은 기존 `config.json` 계정 설정에서 로그 root를 계산한다.
 - Claude 기본 계정 로그 root는 quota 기본 계정의 `~/.claude/projects`다. 호출자 환경의 `CLAUDE_CONFIG_DIR`나 `CLAUDE_PROJECTS_DIR`는 기본 세션 로그 조회에 영향을 주지 않는다. 추가 Claude 계정은 등록된 `<configDir>/projects`를 본다.
 - Codex 기본 계정 로그 root는 quota 기본 계정의 `~/.codex/sessions`다. 호출자 환경의 `CODEX_HOME`이나 `CODEX_SESSIONS_DIR`은 기본 세션 로그 조회에 영향을 주지 않는다. 추가 Codex 계정은 등록된 `<home>/sessions`를 본다.
+- 로그 root(`projects`/`sessions`)가 심볼릭 링크이면 해석한 실제 경로를 root로 쓰며 출력하는 path도 실제 경로다. root 아래 항목의 심볼릭 링크는 따라가지 않는다.
 - 기본 출력은 user/assistant 메시지 텍스트만 포함한다. tool call/result 원문은 `--include-tools`가 있을 때만 검색/출력한다.
 - 토큰 소모를 제한하기 위해 `search` 기본값은 `limit=20`, `max-chars=220`이고, `show` 기본값은 `tail=40`, `max-chars=880`이다. `max-chars=0`은 해당 truncation을 끈다.
 - `show`의 `session-ref`는 configured 로그 root 아래 파일의 정확한 path, basename, 또는 path 부분 문자열로 해석한다. 여러 파일이 맞으면 후보를 출력하고 실패한다.
@@ -638,7 +639,7 @@ quota-cli·quota-bar·위임 실행이 공유하는, 계정별 **마지막 성�
   - `all models` 포함 → `weekly_all`
   - 그 외(모델별 행) → `extra_N` (리포트 순서, 라벨 중복 제거, 개수 제한 없음)
 - **label**: 콜론 앞 텍스트에서 `windowLabel`로 도출한다(하드코딩 어휘 없음 — 데이터 모델의 Claude 절 참조)
-- resets: 상대시간(`resetsIn`)으로 정규화하고, 절대표기를 파싱할 수 있으면 절대 리셋 시각(`resetsAt`, `time.Time`)도 함께 채운다 (`parseReset`). 리셋 절이 없는 행은 두 키 모두 생략한다.
+- resets: 상대시간(`resetsIn`)으로 정규화하고, 절대표기를 파싱할 수 있으면 절대 리셋 시각(`resetsAt`, `time.Time`)도 함께 채운다 (`parseReset`). 연도·날짜가 생략된 절대표기는 파싱 시점 이후의 가장 가까운 시각으로 해석하므로 `resetsAt`은 과거가 되지 않으며, 리셋이 지난 raw는 공유 캐시의 데이터 변경 경계에서 재파싱하지 않는다. 리셋 절이 없는 행은 두 키 모두 생략한다.
 - 일부 행이 리포트에 없거나 매칭이 일부만 되어도 매치된 항목만 반환 (부분 결과 허용)
 - 하단 "What's contributing" 섹션은 퍼센트투성이지만 매치되지 않는다: 그 줄들은 콜론이 없거나(`73% of your usage came from …`) 콜론 뒤가 `N% used`가 아니다(`Top skills: /skill-one 1%`).
 - ANSI 이스케이프는 파싱 전에 제거한다. JSON 엔벨로프는 지금까지 깨끗한 텍스트만 실어왔지만, 리포트에 장식이 붙는 날 전 행이 한꺼번에 매치 실패하는 것을 막는다.

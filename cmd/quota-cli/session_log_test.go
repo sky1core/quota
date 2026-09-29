@@ -369,3 +369,50 @@ func writeSessionLog(t *testing.T, path string, lines []string) string {
 	}
 	return path
 }
+
+func TestSessionLogSearchFollowsSymlinkedLogRoots(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CLAUDE_PROJECTS_DIR", "")
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("CODEX_SESSIONS_DIR", "")
+
+	cfg := config.Config{
+		ClaudeAccounts: []config.ClaudeAccount{{Key: "claude-2", ConfigDir: "~/claude-two"}},
+		CodexAccounts:  []config.CodexAccount{{Key: "codex-2", Home: "~/codex-two"}},
+	}
+	if err := config.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	writeSessionLog(t, filepath.Join(home, "store", "claude-projects", "project-a", "claude-session.jsonl"), []string{
+		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"find needle behind claude symlink"}]}}`,
+	})
+	writeSessionLog(t, filepath.Join(home, "store", "codex-sessions", "2026", "08", "31", "codex-session.jsonl"), []string{
+		`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"needle behind codex symlink"}]}}`,
+	})
+	for _, dir := range []string{"claude-two", "codex-two"} {
+		if err := os.MkdirAll(filepath.Join(home, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("../store/claude-projects", filepath.Join(home, "claude-two", "projects")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../store/codex-sessions", filepath.Join(home, "codex-two", "sessions")); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := sessionLogSearch([]string{"-agent", "all", "-limit", "5", "needle"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"claude-2", "codex-2", "claude-session.jsonl", "codex-session.jsonl"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}

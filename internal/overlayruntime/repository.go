@@ -107,59 +107,29 @@ func (r repoContext) claimTarget(target string) (bool, error) {
 			return false, err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			ours, err := r.insideWorktree(filepath.Dir(dir))
-			if err != nil || !ours {
-				return false, err
-			}
 			return false, fmt.Errorf("%s is a symlink", dir)
 		}
-	}
-	cwd, err := nearestExistingDir(target)
-	if err != nil {
-		return false, err
-	}
-	return r.insideWorktree(cwd)
-}
-
-func (r repoContext) insideWorktree(dir string) (bool, error) {
-	out, err := gitOutput(r.Context, dir, "rev-parse", "--is-bare-repository", "--is-inside-work-tree")
-	if err != nil {
-		if errors.Is(err, ErrOutsideRepository) {
-			return false, nil
+		if !info.IsDir() {
+			break
 		}
-		return false, err
+		nested, err := r.repositoryBoundary(dir)
+		if err != nil || nested {
+			return false, err
+		}
 	}
-	if string(out) != "false\ntrue\n" {
-		return false, nil
-	}
-	out, err = gitOutput(r.Context, dir, "rev-parse", "--path-format=absolute", "--show-toplevel")
-	if err != nil {
-		return false, err
-	}
-	top, err := onePath(out)
-	if err != nil {
-		return false, err
-	}
-	return top == resolvePath(r.Top), nil
+	return true, nil
 }
 
 func (r repoContext) gitlinkAbove(rel string) (bool, error) {
-	ancestors := map[string]bool{}
-	args := []string{"ls-files", "-z", "--stage", "--"}
-	for dir := filepath.Dir(rel); dir != "."; dir = filepath.Dir(dir) {
-		ancestors[filepath.ToSlash(dir)] = true
-		args = append(args, ":(literal)"+filepath.ToSlash(dir))
-	}
-	if len(ancestors) == 0 {
+	if filepath.Dir(rel) == "." {
 		return false, nil
 	}
-	out, err := gitOutput(r.Context, r.Top, args...)
+	links, err := r.gitlinks(r.Top)
 	if err != nil {
 		return false, err
 	}
-	for _, entry := range strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00") {
-		meta, path, found := strings.Cut(entry, "\t")
-		if found && strings.HasPrefix(meta, "160000 ") && ancestors[path] {
+	for dir := filepath.Dir(rel); dir != "."; dir = filepath.Dir(dir) {
+		if links.contains(dir) {
 			return true, nil
 		}
 	}
@@ -171,16 +141,37 @@ func (r repoContext) tracked(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	out, err := gitOutput(r.Context, cwd, "rev-parse", "--path-format=absolute", "--show-toplevel")
+	if err != nil {
+		return false, err
+	}
+	cwd, err = onePath(out)
+	if err != nil {
+		return false, err
+	}
 	rel, err := filepath.Rel(cwd, path)
 	if err != nil {
 		return false, err
 	}
-	out, e := gitOutput(r.Context, cwd, "ls-files", "-z", "--error-unmatch", "--", ":(literal)"+rel)
+	ignoreCase, err := r.gitIgnoresCase(cwd)
+	if err != nil {
+		return false, err
+	}
+	rel = filepath.ToSlash(rel)
+	pathspec := ":(literal)" + rel
+	if ignoreCase {
+		pathspec = ":(literal,icase)" + rel
+		rel = asciiLower(rel)
+	}
+	out, e := gitOutput(r.Context, cwd, "ls-files", "-z", "--error-unmatch", "--", pathspec)
 	if ok, err := gitBoolean(e); !ok {
 		return false, err
 	}
 	for _, entry := range strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00") {
-		if entry == filepath.ToSlash(rel) {
+		if ignoreCase {
+			entry = asciiLower(entry)
+		}
+		if entry == rel {
 			return true, nil
 		}
 	}

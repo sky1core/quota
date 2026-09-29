@@ -53,7 +53,7 @@ func (r repoContext) untrackedInstructionSources() ([]string, error) {
 	if r.Root == r.Common {
 		return r.instructionFilesBelow(gitlinkSet{})
 	}
-	gitlinks, err := r.gitlinks()
+	gitlinks, err := r.gitlinks(r.Root)
 	if err != nil {
 		return nil, err
 	}
@@ -96,13 +96,18 @@ func asciiLower(s string) string {
 	return string(b)
 }
 
-func (r repoContext) gitlinks() (gitlinkSet, error) {
-	out, err := gitOutput(r.Context, r.Root, "config", "--type=bool", "--default=false", "core.ignorecase")
+func (r repoContext) gitIgnoresCase(dir string) (bool, error) {
+	out, err := gitOutput(r.Context, dir, "config", "--type=bool", "--default=false", "core.ignorecase")
+	return string(out) == "true\n", err
+}
+
+func (r repoContext) gitlinks(dir string) (gitlinkSet, error) {
+	ignoreCase, err := r.gitIgnoresCase(dir)
 	if err != nil {
 		return gitlinkSet{}, err
 	}
-	links := gitlinkSet{paths: map[string]bool{}, ignoreCase: string(out) == "true\n"}
-	out, err = gitOutput(r.Context, r.Root, "ls-files", "-z", "--stage")
+	links := gitlinkSet{paths: map[string]bool{}, ignoreCase: ignoreCase}
+	out, err := gitOutput(r.Context, dir, "ls-files", "-z", "--stage")
 	if err != nil {
 		return gitlinkSet{}, err
 	}
@@ -112,7 +117,7 @@ func (r repoContext) gitlinks() (gitlinkSet, error) {
 		}
 		tab := bytes.IndexByte(entry, '\t')
 		if tab < 0 {
-			return gitlinkSet{}, fmt.Errorf("git ls-files --stage under %s returned an entry without a path", r.Root)
+			return gitlinkSet{}, fmt.Errorf("git ls-files --stage under %s returned an entry without a path", dir)
 		}
 		rel := filepath.FromSlash(string(entry[tab+1:]))
 		if links.ignoreCase {
@@ -183,56 +188,116 @@ func (r repoContext) repositoryBoundary(dir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	gitdir, suspect := dir, dir
 	if present {
-		if _, err := gitOutput(r.Context, r.Start, "rev-parse", "--resolve-git-dir", marker); err != nil {
-			return false, fmt.Errorf("%s is not a usable repository marker: %w", marker, err)
+		gitdir, err = repositoryMarkerDirectory(marker)
+		if err != nil {
+			return false, err
 		}
+		suspect = marker
+	}
+	head, err := inspectRepositoryFileTypes(gitdir)
+	if err != nil || (!present && !head) {
+		return false, err
+	}
+	_, stderr, err := gitOutputWithStderr(r.Context, r.Start, "rev-parse", "--resolve-git-dir", suspect)
+	if err == nil {
 		return true, nil
 	}
-	head, err := os.Lstat(filepath.Join(dir, "HEAD"))
+	if present {
+		return false, fmt.Errorf("%s is not a usable repository marker: %w", marker, err)
+	}
+	var exit interface{ ExitCode() int }
+	if errors.As(err, &exit) && exit.ExitCode() == 128 {
+		for _, line := range strings.Split(stderr, "\n") {
+			if strings.HasPrefix(line, "fatal: not a gitdir ") {
+				return false, checkRepositoryAccess(gitdir)
+			}
+		}
+	}
+	return false, err
+}
+
+func repositoryMarkerDirectory(marker string) (string, error) {
+	info, err := os.Stat(marker)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return marker, nil
+	}
+	if !info.Mode().IsRegular() || info.Size() > 1<<20 {
+		return "", fmt.Errorf("%s is not a usable repository marker", marker)
+	}
+	body, err := os.ReadFile(marker)
+	if err != nil {
+		return "", err
+	}
+	reference, found := strings.CutPrefix(strings.TrimRight(string(body), "\r\n"), "gitdir: ")
+	if !found || reference == "" || len(body) > 1<<20 {
+		return "", fmt.Errorf("%s is not a usable repository marker", marker)
+	}
+	reference, _, _ = strings.Cut(reference, "\x00")
+	if !filepath.IsAbs(reference) {
+		reference = filepath.Dir(marker) + string(os.PathSeparator) + reference
+	}
+	return reference, nil
+}
+
+func inspectRepositoryFileTypes(dir string) (bool, error) {
+	headFile := dir + string(os.PathSeparator) + "HEAD"
+	head, err := os.Lstat(headFile)
 	if os.IsNotExist(err) || (err == nil && !head.Mode().IsRegular() && head.Mode()&os.ModeSymlink == 0) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	if err := accessible(filepath.Join(dir, "HEAD")); err != nil {
-		return false, err
-	}
-	common := dir
-	commonFile := filepath.Join(dir, "commondir")
+	commonFile := dir + string(os.PathSeparator) + "commondir"
 	info, err := os.Stat(commonFile)
 	if err != nil && !os.IsNotExist(err) {
 		return false, err
 	}
+	if err == nil && !info.Mode().IsRegular() && !info.IsDir() {
+		return false, fmt.Errorf("%s is not a regular file", commonFile)
+	}
+	return true, nil
+}
+
+func checkRepositoryAccess(dir string) error {
+	headFile := dir + string(os.PathSeparator) + "HEAD"
+	head, err := os.Lstat(headFile)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err == nil && head.Mode().IsRegular() {
+		if err := accessible(headFile); err != nil {
+			return err
+		}
+	}
+	common := dir
+	commonFile := dir + string(os.PathSeparator) + "commondir"
+	info, err := os.Stat(commonFile)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	if err == nil && info.Mode().IsRegular() {
 		body, err := os.ReadFile(commonFile)
 		if err != nil {
-			return false, err
+			return err
 		}
 		common = strings.TrimRight(string(body), "\r\n")
+		common, _, _ = strings.Cut(common, "\x00")
 		if !filepath.IsAbs(common) {
 			common = dir + string(os.PathSeparator) + common
 		}
 	}
 	for _, name := range []string{"objects", "refs"} {
 		if err := accessible(common + string(os.PathSeparator) + name); err != nil {
-			return false, err
+			return err
 		}
 	}
-	_, stderr, err := gitOutputWithStderr(r.Context, r.Start, "rev-parse", "--resolve-git-dir", dir)
-	if err == nil {
-		return true, nil
-	}
-	var exit interface{ ExitCode() int }
-	if errors.As(err, &exit) && exit.ExitCode() == 128 {
-		for _, line := range strings.Split(stderr, "\n") {
-			if strings.HasPrefix(line, "fatal: not a gitdir ") {
-				return false, nil
-			}
-		}
-	}
-	return false, err
+	return nil
 }
 
 func accessible(path string) error {
